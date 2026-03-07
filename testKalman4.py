@@ -330,7 +330,11 @@ GHUB_GAIN_X = 1.0
 GHUB_GAIN_Y = 1.0
 GHUB_MAX_STEP = 127
 RECOIL_CONTROL_ENABLE = True
-RECOIL_COMPENSATION_Y_PX = 6  # positive Y nudges aim down while firing
+RECOIL_COMPENSATION_Y_PX = 5  # positive Y nudges aim down while firing
+# M4A1 = 9, AUG = 8, SG552 = 5
+RECOIL_TUNE_FALLBACK_DEFAULT = False
+RECOIL_TUNE_FALLBACK_TOGGLE_KEY = "f7"
+RECOIL_TUNE_FALLBACK_TOGGLE_COOLDOWN_S = 0.2
 
 WARMUP_CLASS = 0
 TARGET_TIMEOUT_S = 0.08
@@ -1952,6 +1956,8 @@ def main():
     last_toggle = 0.0
     left_hold_engage = LEFT_HOLD_ENGAGE_DEFAULT
     last_left_hold_toggle = 0.0
+    recoil_tune_fallback = RECOIL_TUNE_FALLBACK_DEFAULT
+    last_recoil_tune_toggle = 0.0
     running = True
 
     mouse_button_pressed_x1 = False
@@ -1973,6 +1979,7 @@ def main():
         "target_cls": -1,
         "use_kalman": use_kalman,
         "left_hold_engage": left_hold_engage,
+        "recoil_tune_fallback": recoil_tune_fallback,
         "ctrl_cmd_age_ema": 0.0,
         "ctrl_send_ema": 0.0,
         "ctrl_sent_vx_ema": 0.0,
@@ -3228,9 +3235,41 @@ def main():
                 cmd = get_latest(control_queue, 0.01)
             except queue.Empty:
                 with shared_lock:
-                    state["ctrl_sent_vx_ema"] = float(state.get("ctrl_sent_vx_ema", 0.0)) * EGO_MOTION_COMP_DECAY
-                    state["ctrl_sent_vy_ema"] = float(state.get("ctrl_sent_vy_ema", 0.0)) * EGO_MOTION_COMP_DECAY
-                continue
+                    local_mode = state["mode"]
+                    left_pressed = bool(state.get("left_pressed", False))
+                    left_hold_engage = bool(state.get("left_hold_engage", False))
+                    recoil_tune_fallback = bool(state.get("recoil_tune_fallback", False))
+                engage_active = (local_mode != 0) and ((not left_hold_engage) or left_pressed)
+                if engage_active and recoil_tune_fallback and left_pressed:
+                    now = time.time()
+                    cmd = {
+                        "dx": 0,
+                        "dy": 0,
+                        "ts": now,
+                        "frame_ts": now,
+                        "capture_ts": now,
+                        "synthetic_recoil": True,
+                    }
+                else:
+                    with shared_lock:
+                        state["ctrl_sent_vx_ema"] = float(state.get("ctrl_sent_vx_ema", 0.0)) * EGO_MOTION_COMP_DECAY
+                        state["ctrl_sent_vy_ema"] = float(state.get("ctrl_sent_vy_ema", 0.0)) * EGO_MOTION_COMP_DECAY
+                    continue
+
+            synthetic_recoil = bool(cmd.get("synthetic_recoil", False))
+            if synthetic_recoil:
+                left_pressed = True
+                local_mode = 1
+                left_hold_engage = False
+                recoil_tune_fallback = True
+                engage_active = True
+            else:
+                with shared_lock:
+                    local_mode = state["mode"]
+                    left_pressed = bool(state.get("left_pressed", False))
+                    left_hold_engage = bool(state.get("left_hold_engage", False))
+                    recoil_tune_fallback = bool(state.get("recoil_tune_fallback", False))
+                engage_active = (local_mode != 0) and ((not left_hold_engage) or left_pressed)
 
             now = time.time()
             cmd_age = now - cmd["ts"]
@@ -3251,11 +3290,6 @@ def main():
                 )
                 continue
 
-            with shared_lock:
-                local_mode = state["mode"]
-                left_pressed = bool(state.get("left_pressed", False))
-                left_hold_engage = bool(state.get("left_hold_engage", False))
-            engage_active = (local_mode != 0) and ((not left_hold_engage) or left_pressed)
             if not engage_active:
                 with shared_lock:
                     state["ctrl_sent_vx_ema"] = float(state.get("ctrl_sent_vx_ema", 0.0)) * EGO_MOTION_COMP_DECAY
@@ -3415,6 +3449,19 @@ def main():
                         f"({LEFT_HOLD_ENGAGE_TOGGLE_KEY})"
                     )
                     winsound.Beep(1400 if left_hold_engage else 700, 100)
+
+                if keyboard.is_pressed(RECOIL_TUNE_FALLBACK_TOGGLE_KEY) and (
+                    now - last_recoil_tune_toggle > RECOIL_TUNE_FALLBACK_TOGGLE_COOLDOWN_S
+                ):
+                    recoil_tune_fallback = not recoil_tune_fallback
+                    with shared_lock:
+                        state["recoil_tune_fallback"] = recoil_tune_fallback
+                    last_recoil_tune_toggle = now
+                    print(
+                        f"RecoilTuneFallback: {'ON' if recoil_tune_fallback else 'OFF'} "
+                        f"({RECOIL_TUNE_FALLBACK_TOGGLE_KEY})"
+                    )
+                    winsound.Beep(1500 if recoil_tune_fallback else 800, 100)
 
                 if mouse_button_pressed_x2 and now - last_toggle > 0.2:
                     mode = (mode + 1) % 2
