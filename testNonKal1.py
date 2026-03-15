@@ -54,7 +54,7 @@ if torch is not None:
         pass
 
 # ---------------- CONFIG ----------------
-MODEL_PATH = r"C:\YOLO\Delta\runs\detect\train\weights\best.pt"
+MODEL_PATH = r"C:\YOLO\Delta\runs\detect\train2\weights\best.pt"
 IMGSZ = 640  # latency-first input size; fixed-shape ONNX models may override at runtime
 CONF = 0.2
 DEVICE = "cuda"
@@ -98,6 +98,8 @@ CAPTURE_BENCHMARK_H = 700
 CAPTURE_YIELD_EACH_LOOP = True
 CAPTURE_NONE_BACKOFF_S = 0.0
 CAPTURE_THREAD_PRIORITY = "highest"  # "normal" | "above_normal" | "highest"
+INFERENCE_THREAD_PRIORITY = "highest"  # "normal" | "above_normal" | "highest"
+CONTROL_THREAD_PRIORITY = "highest"  # "normal" | "above_normal" | "highest"
 MSS_USE_RAW_BUFFER = True
 CAPTURE_DXGI_TARGET_FPS = 0
 CAPTURE_DXGI_VIDEO_MODE = True
@@ -186,7 +188,7 @@ EGO_MOTION_ERROR_GATE_NORM_THRESHOLD = 2.0
 EGO_MOTION_RESET_ON_SWITCH = True
 KALMAN_USE_CA_MODEL = False
 MAX_FRAME_AGE_S = 0.05
-DEBUG_LOG = True
+DEBUG_LOG = False
 PERF_LOG_ENABLE = True
 PERF_LOG_INTERVAL_S = 1.0
 PERF_LOG_WHEN_MODE_OFF = False
@@ -206,9 +208,9 @@ TRACKER_VELOCITY_MIN_DT = 1.0 / 300.0
 TRACKER_MAX_SPEED_PX_S = 2600.0
 
 PID_ENABLE = True
-PID_KP = 0.60
+PID_KP = 0.50
 PID_KI = 0.0
-PID_KD = 0.004
+PID_KD = 0.008
 PID_INTEGRAL_LIMIT = 20.0
 PID_ANTI_WINDUP_GAIN = 1.0
 PID_DERIVATIVE_ALPHA = 0.2
@@ -279,7 +281,13 @@ GHUB_GAIN_X = 1.0
 GHUB_GAIN_Y = 1.0
 GHUB_MAX_STEP = 127
 RECOIL_CONTROL_ENABLE = True
-RECOIL_COMPENSATION_Y_PX = 11
+RECOIL_COMPENSATION_Y_PX = 12
+TRIGGERBOT_ENABLE_DEFAULT = False
+TRIGGERBOT_BOX_PERCENT_DEFAULT = 100.0
+TRIGGERBOT_CLICK_HOLD_S = 0.001
+TRIGGERBOT_CLICK_COOLDOWN_S = 0.001
+TRIGGERBOT_TOGGLE_KEY = "f8"
+TRIGGERBOT_TOGGLE_COOLDOWN_S = 0.2
 RECOIL_TUNE_FALLBACK_DEFAULT = False
 RECOIL_TUNE_FALLBACK_IGNORE_MODE_CHECK_DEFAULT = False
 RECOIL_TUNE_FALLBACK_TOGGLE_KEY = "f7"
@@ -1742,7 +1750,14 @@ PID_RUNTIME_PARAM_SPECS = (
     {"key": "target_max_lost_frames", "label": "Max Lost Frames", "type": "number", "step": 1.0},
     {"key": "kalman_process_noise", "label": "Kalman Q (vel)", "type": "number", "step": 0.001},
     {"key": "kalman_measurement_noise", "label": "Kalman R", "type": "number", "step": 0.001},
+    {"key": "model_conf", "label": "Model Conf", "type": "number", "step": 0.001},
+    {"key": "detection_min_conf", "label": "Detection Min Conf", "type": "number", "step": 0.001},
+    {"key": "triggerbot_enable", "label": "Trigger Bot", "type": "bool"},
+    {"key": "triggerbot_box_percent", "label": "Trigger Box (%)", "type": "number", "step": 1.0},
+    {"key": "triggerbot_click_hold_s", "label": "Trigger Hold (s)", "type": "number", "step": 0.001},
+    {"key": "triggerbot_click_cooldown_s", "label": "Trigger Cooldown (s)", "type": "number", "step": 0.001},
     {"key": "recoil_compensation_y_px", "label": "Recoil Comp Y (px)", "type": "number", "step": 1.0},
+    {"key": "ghub_max_step", "label": "GHUB Max Step", "type": "number", "step": 1.0},
     {
         "key": "recoil_tune_fallback_ignore_mode_check",
         "label": "F7 Ignore Mode Check",
@@ -1777,7 +1792,14 @@ def build_pid_runtime_defaults():
         "target_max_lost_frames": float(TARGET_MAX_LOST_FRAMES),
         "kalman_process_noise": float(KALMAN_PROCESS_NOISE_BASE),
         "kalman_measurement_noise": float(KALMAN_MEAS_NOISE_BASE),
+        "model_conf": float(CONF),
+        "detection_min_conf": float(DETECTION_MIN_CONF),
+        "triggerbot_enable": bool(TRIGGERBOT_ENABLE_DEFAULT),
+        "triggerbot_box_percent": float(TRIGGERBOT_BOX_PERCENT_DEFAULT),
+        "triggerbot_click_hold_s": float(TRIGGERBOT_CLICK_HOLD_S),
+        "triggerbot_click_cooldown_s": float(TRIGGERBOT_CLICK_COOLDOWN_S),
         "recoil_compensation_y_px": float(RECOIL_COMPENSATION_Y_PX),
+        "ghub_max_step": float(GHUB_MAX_STEP),
         "recoil_tune_fallback_ignore_mode_check": bool(
             RECOIL_TUNE_FALLBACK_IGNORE_MODE_CHECK_DEFAULT
         ),
@@ -1876,6 +1898,8 @@ class RuntimePIDConfig:
                 "tracking_alpha",
                 "tracking_velocity_alpha",
                 "anti_windup_gain",
+                "model_conf",
+                "detection_min_conf",
             ):
                 numeric_value = clamp(numeric_value, 0.0, 1.0)
             elif key in (
@@ -1887,10 +1911,14 @@ class RuntimePIDConfig:
                 "ego_motion_error_gate_norm_threshold",
             ):
                 numeric_value = max(1e-6, numeric_value)
+            elif key in ("triggerbot_click_hold_s", "triggerbot_click_cooldown_s"):
+                numeric_value = max(0.0, numeric_value)
             elif key in ("ego_motion_comp_gain_x", "ego_motion_comp_gain_y"):
                 numeric_value = max(0.0, numeric_value)
-            elif key == "target_max_lost_frames":
+            elif key in ("target_max_lost_frames", "ghub_max_step"):
                 numeric_value = float(max(1, int(round(numeric_value))))
+            elif key == "triggerbot_box_percent":
+                numeric_value = clamp(numeric_value, 1.0, 100.0)
             normalized[key] = numeric_value
 
         with self._lock:
@@ -3029,6 +3057,8 @@ def create_tracker():
 
 class MouseMoveClient:
     _SIO_LOOPBACK_FAST_PATH = 0x98000010
+    _MOUSEEVENTF_LEFTDOWN = 0x0002
+    _MOUSEEVENTF_LEFTUP = 0x0004
 
     def __init__(self, host=MOUSE_HOST, port=MOUSE_PORT, send_backend=MOUSE_SEND_BACKEND):
         self.host = host
@@ -3045,6 +3075,7 @@ class MouseMoveClient:
         self._send_buf = bytearray(8)
         self._send_view = memoryview(self._send_buf)
         self._binary_mode = bool(MOUSE_SOCKET_BINARY)
+        self._ghub_max_step = max(1, int(GHUB_MAX_STEP))
 
         if self.send_backend == "ghub":
             if ghub_mouse is None:
@@ -3065,6 +3096,11 @@ class MouseMoveClient:
             else:
                 pydirectinput.FAILSAFE = False
                 pydirectinput.PAUSE = 0
+
+    def configure(self, *, ghub_max_step=None):
+        with self.lock:
+            if ghub_max_step is not None:
+                self._ghub_max_step = max(1, int(round(float(ghub_max_step))))
 
     def close(self):
         if ghub_mouse is not None and self._ghub_ready:
@@ -3143,7 +3179,7 @@ class MouseMoveClient:
 
             remaining_x = send_x
             remaining_y = send_y
-            step_limit = max(1, int(GHUB_MAX_STEP))
+            step_limit = self._ghub_max_step
             while remaining_x != 0 or remaining_y != 0:
                 step_x = int(clamp(remaining_x, -step_limit, step_limit))
                 step_y = int(clamp(remaining_y, -step_limit, step_limit))
@@ -3181,6 +3217,18 @@ class MouseMoveClient:
             if self.send_backend == "pydirectinput":
                 return self.send_input_pydirectinput(x, y)
             return self._send_socket(x, y)
+
+    def click_left(self, hold_s=TRIGGERBOT_CLICK_HOLD_S):
+        hold_s = max(0.0, float(hold_s))
+        with self.lock:
+            try:
+                ctypes.windll.user32.mouse_event(self._MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                if hold_s > 0.0:
+                    time.sleep(hold_s)
+                ctypes.windll.user32.mouse_event(self._MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                return True
+            except Exception:
+                return False
 
     def send(self, x, y):
         return self.send_input(x, y)
@@ -3227,6 +3275,7 @@ def main():
     last_left_hold_toggle = 0.0
     recoil_tune_fallback = RECOIL_TUNE_FALLBACK_DEFAULT
     last_recoil_tune_toggle = 0.0
+    last_triggerbot_toggle = 0.0
     running = True
     mouse_button_pressed_x1 = False
     mouse_button_pressed_x2 = False
@@ -3376,6 +3425,7 @@ def main():
 
     def inference_loop_simple():
         nonlocal running
+        set_current_thread_priority(INFERENCE_THREAD_PRIORITY)
         last_backend_err_ts = 0.0
         last_pid_tick = time.perf_counter()
         last_track_tick = 0.0
@@ -3456,6 +3506,14 @@ def main():
             sticky_bias_px = float(pid_snapshot["sticky_bias_px"])
             prediction_time = float(pid_snapshot["prediction_time"])
             target_max_lost_frames = max(1, int(round(pid_snapshot["target_max_lost_frames"])))
+            model_conf = float(pid_snapshot.get("model_conf", CONF))
+            detection_min_conf = float(pid_snapshot.get("detection_min_conf", DETECTION_MIN_CONF))
+            triggerbot_enable = bool(pid_snapshot.get("triggerbot_enable", TRIGGERBOT_ENABLE_DEFAULT))
+            triggerbot_box_percent = float(
+                pid_snapshot.get("triggerbot_box_percent", TRIGGERBOT_BOX_PERCENT_DEFAULT)
+            )
+            if hasattr(backend, "conf"):
+                backend.conf = model_conf
             ego_motion_comp_enable = bool(pid_snapshot["ego_motion_comp_enable"])
             ego_motion_comp_gain_x = float(pid_snapshot["ego_motion_comp_gain_x"])
             ego_motion_comp_gain_y = float(pid_snapshot["ego_motion_comp_gain_y"])
@@ -3521,7 +3579,8 @@ def main():
                     state["use_kalman"] = use_kalman
 
             engage_active = (local_mode != 0) and ((not local_left_hold_engage) or local_right_pressed)
-            if not engage_active:
+            triggerbot_monitor_active = (local_mode != 0) and triggerbot_enable
+            if not (engage_active or triggerbot_monitor_active):
                 with shared_lock:
                     state["target_found"] = False
                     state["last_target_full"] = CENTER
@@ -3619,9 +3678,9 @@ def main():
 
             if xyxy.size > 0:
                 if cls_ids.size == confs.size and np.all(np.isin(cls_ids, target_classes)):
-                    class_mask = confs >= DETECTION_MIN_CONF
+                    class_mask = confs >= detection_min_conf
                 else:
-                    class_mask = np.isin(cls_ids, target_classes) & (confs >= DETECTION_MIN_CONF)
+                    class_mask = np.isin(cls_ids, target_classes) & (confs >= detection_min_conf)
                 if np.any(class_mask):
                     candidates = xyxy[class_mask]
                     candidate_classes = cls_ids[class_mask]
@@ -3673,6 +3732,7 @@ def main():
             raw_meas_x = None
             raw_meas_y = None
             target_switched = False
+            trigger_fire = False
             if selected_detection is not None:
                 raw_meas_x = float(selected_detection["x"])
                 raw_meas_y = float(selected_detection["y"])
@@ -3687,6 +3747,14 @@ def main():
                 x1, y1, x2, y2 = selected_detection["bbox"]
                 last_box_w = float(max(1, x2 - x1))
                 last_box_h = float(max(1, y2 - y1))
+                if triggerbot_monitor_active:
+                    trigger_scale = clamp(triggerbot_box_percent / 100.0, 0.01, 1.0)
+                    trigger_half_w = max(1.0, (last_box_w * 0.5) * trigger_scale)
+                    trigger_half_h = max(1.0, (last_box_h * 0.5) * trigger_scale)
+                    trigger_fire = (
+                        abs(raw_meas_x - CENTER[0]) <= trigger_half_w
+                        and abs(raw_meas_y - CENTER[1]) <= trigger_half_h
+                    )
             elif not target_tracker.initialized:
                 with shared_lock:
                     state["target_found"] = False
@@ -3821,8 +3889,12 @@ def main():
             ff_y = (vy * dt) * ff_scale
             desired_x = pid_term_x + ff_x
             desired_y = pid_term_y + ff_y
-            dx = int(round(clamp(desired_x, -RAW_MAX_STEP_X, RAW_MAX_STEP_X)))
-            dy = int(round(clamp(desired_y, -RAW_MAX_STEP_Y, RAW_MAX_STEP_Y)))
+            if engage_active:
+                dx = int(round(clamp(desired_x, -RAW_MAX_STEP_X, RAW_MAX_STEP_X)))
+                dy = int(round(clamp(desired_y, -RAW_MAX_STEP_Y, RAW_MAX_STEP_Y)))
+            else:
+                dx = 0
+                dy = 0
 
             focus_x = int(clamp(track_x, 0, SCREEN_W - 1))
             focus_y = int(clamp(track_y, 0, SCREEN_H - 1))
@@ -3839,16 +3911,18 @@ def main():
                 state["target_ts"] = now_k
                 state["aim_seq"] += 1
 
-            put_latest(
-                control_queue,
-                {
-                    "dx": dx,
-                    "dy": dy,
-                    "ts": now_k,
-                    "frame_ts": frame_ts,
-                    "capture_ts": capture_ts,
-                },
-            )
+            if engage_active or trigger_fire:
+                put_latest(
+                    control_queue,
+                    {
+                        "dx": dx,
+                        "dy": dy,
+                        "ts": now_k,
+                        "frame_ts": frame_ts,
+                        "capture_ts": capture_ts,
+                        "trigger_fire": trigger_fire,
+                    },
+                )
             perf.record_inference(
                 frame_age_s=frame_age,
                 loop_s=time.perf_counter() - loop_perf_start,
@@ -3883,6 +3957,8 @@ def main():
 
     def control_loop():
         nonlocal running
+        set_current_thread_priority(CONTROL_THREAD_PRIORITY)
+        last_trigger_click_ts = 0.0
         while running:
             try:
                 cmd = get_latest(control_queue, 0.01)
@@ -3923,6 +3999,7 @@ def main():
                     continue
 
             synthetic_recoil = bool(cmd.get("synthetic_recoil", False))
+            trigger_fire = bool(cmd.get("trigger_fire", False))
             if synthetic_recoil:
                 left_pressed = True
                 local_mode = 1
@@ -3955,7 +4032,7 @@ def main():
                 )
                 continue
 
-            if not engage_active:
+            if not (engage_active or trigger_fire):
                 with shared_lock:
                     state["ctrl_sent_vx_ema"] = float(state.get("ctrl_sent_vx_ema", 0.0)) * EGO_MOTION_COMP_DECAY
                     state["ctrl_sent_vy_ema"] = float(state.get("ctrl_sent_vy_ema", 0.0)) * EGO_MOTION_COMP_DECAY
@@ -3977,12 +4054,43 @@ def main():
 
             dx = int(cmd["dx"])
             dy = int(cmd["dy"])
+            control_runtime = pid_runtime.snapshot()
             recoil_compensation_y_px = float(
-                pid_runtime.snapshot().get("recoil_compensation_y_px", RECOIL_COMPENSATION_Y_PX)
+                control_runtime.get("recoil_compensation_y_px", RECOIL_COMPENSATION_Y_PX)
             )
-            if RECOIL_CONTROL_ENABLE and left_pressed:
+            triggerbot_click_hold_s = float(
+                control_runtime.get("triggerbot_click_hold_s", TRIGGERBOT_CLICK_HOLD_S)
+            )
+            triggerbot_click_cooldown_s = float(
+                control_runtime.get("triggerbot_click_cooldown_s", TRIGGERBOT_CLICK_COOLDOWN_S)
+            )
+            mouse_client.configure(
+                ghub_max_step=control_runtime.get("ghub_max_step", GHUB_MAX_STEP)
+            )
+            trigger_sent_ok = False
+            trigger_click_now = time.time()
+            trigger_will_click = (
+                trigger_fire
+                and (not left_pressed)
+                and ((trigger_click_now - last_trigger_click_ts) >= triggerbot_click_cooldown_s)
+            )
+            if RECOIL_CONTROL_ENABLE and (left_pressed or trigger_will_click):
                 dy = int(clamp(dy + recoil_compensation_y_px, -RAW_MAX_STEP_Y, RAW_MAX_STEP_Y))
-            if dx == 0 and dy == 0:
+            movement_sent_ok = False
+            send_elapsed = 0.0
+            send_end_tick = time.perf_counter()
+            if dx != 0 or dy != 0:
+                send_start = time.perf_counter()
+                movement_sent_ok = mouse_client.send_input(dx, dy)
+                send_end_tick = time.perf_counter()
+                send_elapsed = send_end_tick - send_start
+
+            if trigger_will_click:
+                trigger_sent_ok = mouse_client.click_left(triggerbot_click_hold_s)
+                if trigger_sent_ok:
+                    last_trigger_click_ts = trigger_click_now
+
+            if dx == 0 and dy == 0 and not trigger_sent_ok:
                 with shared_lock:
                     state["ctrl_sent_vx_ema"] = float(state.get("ctrl_sent_vx_ema", 0.0)) * EGO_MOTION_COMP_DECAY
                     state["ctrl_sent_vy_ema"] = float(state.get("ctrl_sent_vy_ema", 0.0)) * EGO_MOTION_COMP_DECAY
@@ -3994,14 +4102,11 @@ def main():
                 )
                 continue
 
-            send_start = time.perf_counter()
-            sent_ok = mouse_client.send_input(dx, dy)
-            send_end_tick = time.perf_counter()
-            send_elapsed = send_end_tick - send_start
+            sent_ok = movement_sent_ok or trigger_sent_ok
             send_end = time.time()
             total_apply_latency = send_end - frame_ts_cmd
             total_apply_latency_full = send_end - capture_ts_cmd
-            if sent_ok:
+            if (dx != 0 or dy != 0) and movement_sent_ok:
                 with shared_lock:
                     state["ctrl_send_ema"] = ema_update(
                         float(state.get("ctrl_send_ema", 0.0)),
@@ -4024,7 +4129,7 @@ def main():
                             EGO_MOTION_COMP_ALPHA,
                         )
                     state["ctrl_last_send_tick"] = send_end_tick
-            else:
+            elif not trigger_sent_ok:
                 with shared_lock:
                     state["ctrl_sent_vx_ema"] = float(state.get("ctrl_sent_vx_ema", 0.0)) * EGO_MOTION_COMP_DECAY
                     state["ctrl_sent_vy_ema"] = float(state.get("ctrl_sent_vy_ema", 0.0)) * EGO_MOTION_COMP_DECAY
@@ -4175,6 +4280,24 @@ def main():
                         f"({RECOIL_TUNE_FALLBACK_TOGGLE_KEY})"
                     )
                     winsound.Beep(1500 if recoil_tune_fallback else 800, 100)
+
+                if keyboard.is_pressed(TRIGGERBOT_TOGGLE_KEY) and (
+                    now - last_triggerbot_toggle > TRIGGERBOT_TOGGLE_COOLDOWN_S
+                ):
+                    triggerbot_enabled = bool(
+                        pid_runtime.snapshot().get("triggerbot_enable", TRIGGERBOT_ENABLE_DEFAULT)
+                    )
+                    triggerbot_enabled = not triggerbot_enabled
+                    pid_runtime.update(
+                        {"triggerbot_enable": triggerbot_enabled},
+                        reset_pid=False,
+                    )
+                    last_triggerbot_toggle = now
+                    print(
+                        f"TriggerBot: {'ON' if triggerbot_enabled else 'OFF'} "
+                        f"({TRIGGERBOT_TOGGLE_KEY})"
+                    )
+                    winsound.Beep(1600 if triggerbot_enabled else 900, 100)
 
                 if mouse_button_pressed_x2 and now - last_toggle > 0.2:
                     mode = (mode + 1) % 2

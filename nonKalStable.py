@@ -54,7 +54,7 @@ if torch is not None:
         pass
 
 # ---------------- CONFIG ----------------
-MODEL_PATH = r"C:\YOLO\Delta\runs\detect\train\weights\best.pt"
+MODEL_PATH = r"C:\YOLO\Delta\runs\detect\train2\weights\best.pt"
 IMGSZ = 640  # latency-first input size; fixed-shape ONNX models may override at runtime
 CONF = 0.2
 DEVICE = "cuda"
@@ -98,6 +98,8 @@ CAPTURE_BENCHMARK_H = 700
 CAPTURE_YIELD_EACH_LOOP = True
 CAPTURE_NONE_BACKOFF_S = 0.0
 CAPTURE_THREAD_PRIORITY = "highest"  # "normal" | "above_normal" | "highest"
+INFERENCE_THREAD_PRIORITY = "highest"  # "normal" | "above_normal" | "highest"
+CONTROL_THREAD_PRIORITY = "highest"  # "normal" | "above_normal" | "highest"
 MSS_USE_RAW_BUFFER = True
 CAPTURE_DXGI_TARGET_FPS = 0
 CAPTURE_DXGI_VIDEO_MODE = True
@@ -186,7 +188,7 @@ EGO_MOTION_ERROR_GATE_NORM_THRESHOLD = 2.0
 EGO_MOTION_RESET_ON_SWITCH = True
 KALMAN_USE_CA_MODEL = False
 MAX_FRAME_AGE_S = 0.05
-DEBUG_LOG = True
+DEBUG_LOG = False
 PERF_LOG_ENABLE = True
 PERF_LOG_INTERVAL_S = 1.0
 PERF_LOG_WHEN_MODE_OFF = False
@@ -206,9 +208,9 @@ TRACKER_VELOCITY_MIN_DT = 1.0 / 300.0
 TRACKER_MAX_SPEED_PX_S = 2600.0
 
 PID_ENABLE = True
-PID_KP = 0.60
+PID_KP = 0.50
 PID_KI = 0.0
-PID_KD = 0.004
+PID_KD = 0.008
 PID_INTEGRAL_LIMIT = 20.0
 PID_ANTI_WINDUP_GAIN = 1.0
 PID_DERIVATIVE_ALPHA = 0.2
@@ -279,7 +281,7 @@ GHUB_GAIN_X = 1.0
 GHUB_GAIN_Y = 1.0
 GHUB_MAX_STEP = 127
 RECOIL_CONTROL_ENABLE = True
-RECOIL_COMPENSATION_Y_PX = 11
+RECOIL_COMPENSATION_Y_PX = 12
 RECOIL_TUNE_FALLBACK_DEFAULT = False
 RECOIL_TUNE_FALLBACK_IGNORE_MODE_CHECK_DEFAULT = False
 RECOIL_TUNE_FALLBACK_TOGGLE_KEY = "f7"
@@ -3376,6 +3378,7 @@ def main():
 
     def inference_loop_simple():
         nonlocal running
+        set_current_thread_priority(INFERENCE_THREAD_PRIORITY)
         last_backend_err_ts = 0.0
         last_pid_tick = time.perf_counter()
         last_track_tick = 0.0
@@ -3883,6 +3886,7 @@ def main():
 
     def control_loop():
         nonlocal running
+        set_current_thread_priority(CONTROL_THREAD_PRIORITY)
         while running:
             try:
                 cmd = get_latest(control_queue, 0.01)

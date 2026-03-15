@@ -1,6 +1,6 @@
 from ultralytics import YOLO
 
-pt_path = r"C:\YOLO\Delta\runs\detect\train\weights\best.pt"
+pt_path = r"C:\YOLO\Delta\runs\detect\train2\weights\best.pt"
 model = YOLO(pt_path)
 
 model.export(
