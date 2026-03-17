@@ -1,0 +1,89 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "vs2022-x64",
+      "displayName": "VS2022 x64",
+      "description": "Base Visual Studio 2022 x64 configuration for the native scaffold.",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build/vs2022-x64",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      }
+    },
+    {
+      "name": "vs2022-cuda-probe",
+      "displayName": "VS2022 x64 + CUDA Probe",
+      "description": "Enables the CUDA-powered native pipeline and the D3D11/CUDA interop probe target. Requires CUDA Visual Studio integration and CUDA_PATH.",
+      "inherits": "vs2022-x64",
+      "binaryDir": "${sourceDir}/build/vs2022-cuda-probe",
+      "toolset": "cuda=$env{CUDA_PATH}",
+      "cacheVariables": {
+        "DELTA_ENABLE_CUDA_D3D11_INTEROP": "ON",
+        "DELTA_ENABLE_CUDA_PIPELINE": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "delta-native-debug",
+      "displayName": "delta_native Debug",
+      "configurePreset": "vs2022-x64",
+      "configuration": "Debug",
+      "targets": [
+        "delta_native"
+      ]
+    },
+    {
+      "name": "delta-native-release",
+      "displayName": "delta_native Release",
+      "configurePreset": "vs2022-x64",
+      "configuration": "Release",
+      "targets": [
+        "delta_native"
+      ]
+    },
+    {
+      "name": "cuda-probe-debug",
+      "displayName": "delta_cuda_capture_probe Debug",
+      "configurePreset": "vs2022-cuda-probe",
+      "configuration": "Debug",
+      "targets": [
+        "delta_cuda_capture_probe"
+      ]
+    },
+    {
+      "name": "cuda-probe-release",
+      "displayName": "delta_cuda_capture_probe Release",
+      "configurePreset": "vs2022-cuda-probe",
+      "configuration": "Release",
+      "targets": [
+        "delta_cuda_capture_probe"
+      ]
+    },
+    {
+      "name": "delta-native-cuda-debug",
+      "displayName": "delta_native Debug (CUDA Pipeline)",
+      "configurePreset": "vs2022-cuda-probe",
+      "configuration": "Debug",
+      "targets": [
+        "delta_native"
+      ]
+    },
+    {
+      "name": "delta-native-cuda-release",
+      "displayName": "delta_native Release (CUDA Pipeline)",
+      "configurePreset": "vs2022-cuda-probe",
+      "configuration": "Release",
+      "targets": [
+        "delta_native"
+      ]
+    }
+  ]
+}

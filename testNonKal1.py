@@ -149,6 +149,7 @@ CATCHUP_GAIN_MAX = 0.75
 CATCHUP_CENTER_SCALE = 0.75
 CATCHUP_MAX_EXTRA_PX = 180.0
 HEAD_Y_BIAS = 0.0    # aim slightly above center for head class
+BODY_Y_RATIO = 0.38  # upper-torso anchor for body boxes; bbox center can drift into empty space
 USE_KALMAN_DEFAULT = False
 TRACKING_STRATEGY_RAW = "raw"
 TRACKING_STRATEGY_KALMAN = "kalman"
@@ -273,7 +274,7 @@ MOUSE_HOST = "127.0.0.1"
 MOUSE_PORT = 8080
 MOUSE_CONNECT_TIMEOUT_S = 0.002
 MOUSE_SEND_TIMEOUT_S = 0.002
-MOUSE_SEND_BACKEND = "ghub"  # "ghub" | "pydirectinput" | "socket"
+MOUSE_SEND_BACKEND = "socket"  # "ghub" | "pydirectinput" | "socket"
 MOUSE_SOCKET_BINARY = True
 PYDIRECTINPUT_GAIN_X = 1.0
 PYDIRECTINPUT_GAIN_Y = 1.0
@@ -296,6 +297,10 @@ WARMUP_CLASS = 0
 LEFT_HOLD_ENGAGE_DEFAULT = False
 LEFT_HOLD_ENGAGE_TOGGLE_KEY = "f6"
 LEFT_HOLD_ENGAGE_TOGGLE_COOLDOWN_S = 0.2
+LEFT_HOLD_ENGAGE_BUTTON_LEFT = "leftkey"
+LEFT_HOLD_ENGAGE_BUTTON_RIGHT = "rightkey"
+LEFT_HOLD_ENGAGE_BUTTON_BOTH = "both"
+LEFT_HOLD_ENGAGE_BUTTON_DEFAULT = LEFT_HOLD_ENGAGE_BUTTON_RIGHT
 VK_LBUTTON = 0x01
 VK_RBUTTON = 0x02
 VK_XBUTTON1 = 0x05
@@ -484,6 +489,17 @@ def bbox_iou_xyxy(a, b):
     if union <= 1e-6:
         return 0.0
     return inter / union
+
+
+def point_to_box_distance_xyxy(box, px, py):
+    if box is None:
+        return float("inf")
+    x1, y1, x2, y2 = map(float, box)
+    px = float(px)
+    py = float(py)
+    dx = 0.0 if x1 <= px <= x2 else min(abs(px - x1), abs(px - x2))
+    dy = 0.0 if y1 <= py <= y2 else min(abs(py - y1), abs(py - y2))
+    return float(np.hypot(dx, dy))
 
 
 def set_current_thread_priority(level):
@@ -1513,6 +1529,34 @@ def normalize_tracking_strategy(value):
     return TRACKING_STRATEGY_DEFAULT
 
 
+LEFT_HOLD_ENGAGE_BUTTON_OPTIONS = (
+    {"value": LEFT_HOLD_ENGAGE_BUTTON_LEFT, "label": "Left Key"},
+    {"value": LEFT_HOLD_ENGAGE_BUTTON_RIGHT, "label": "Right Key"},
+    {"value": LEFT_HOLD_ENGAGE_BUTTON_BOTH, "label": "Both"},
+)
+LEFT_HOLD_ENGAGE_BUTTON_LABELS = {
+    item["value"]: item["label"] for item in LEFT_HOLD_ENGAGE_BUTTON_OPTIONS
+}
+
+
+def normalize_left_hold_engage_button(value):
+    normalized = str(value).strip().lower()
+    if normalized in LEFT_HOLD_ENGAGE_BUTTON_LABELS:
+        return normalized
+    return LEFT_HOLD_ENGAGE_BUTTON_DEFAULT
+
+
+def is_left_hold_engage_satisfied(left_hold_engage, engage_button, *, left_pressed, right_pressed):
+    if not left_hold_engage:
+        return True
+    normalized = normalize_left_hold_engage_button(engage_button)
+    if normalized == LEFT_HOLD_ENGAGE_BUTTON_LEFT:
+        return bool(left_pressed)
+    if normalized == LEFT_HOLD_ENGAGE_BUTTON_BOTH:
+        return bool(left_pressed) and bool(right_pressed)
+    return bool(right_pressed)
+
+
 class ObservedMotionTracker:
     def __init__(
         self,
@@ -1704,21 +1748,52 @@ def pick_sticky_target(detections, screen_center, locked_point=None, *, sticky_b
     best_det = None
     best_idx = None
     best_score = float("inf")
+    best_anchor_score = float("inf")
     best_conf = -1.0
     for idx, det in enumerate(detections):
-        score = float(np.hypot(det["x"] - center_x, det["y"] - center_y))
+        x1, y1, x2, y2 = det["bbox"]
+        dx = 0.0 if x1 <= center_x <= x2 else float(min(abs(center_x - x1), abs(center_x - x2)))
+        dy = 0.0 if y1 <= center_y <= y2 else float(min(abs(center_y - y1), abs(center_y - y2)))
+        score = float(np.hypot(dx, dy))
+        anchor_score = float(np.hypot(det["x"] - center_x, det["y"] - center_y))
         if locked_idx is not None and idx == locked_idx:
             score -= float(sticky_bias)
-        if score < best_score or (abs(score - best_score) <= 1e-6 and det["conf"] > best_conf):
+        if (
+            score < best_score
+            or (
+                abs(score - best_score) <= 1e-6
+                and (
+                    anchor_score < best_anchor_score
+                    or (abs(anchor_score - best_anchor_score) <= 1e-6 and det["conf"] > best_conf)
+                )
+            )
+        ):
             best_det = det
             best_idx = idx
             best_score = score
+            best_anchor_score = anchor_score
             best_conf = float(det["conf"])
     return best_det, {
         "locked_idx": locked_idx,
         "selected_idx": best_idx,
         "switched": (locked_idx is not None and best_idx is not None and best_idx != locked_idx),
     }
+
+
+def detection_anchor_xyxy(x1, y1, x2, y2, cls_id):
+    x1 = float(x1)
+    y1 = float(y1)
+    x2 = float(x2)
+    y2 = float(y2)
+    width = max(1.0, x2 - x1)
+    height = max(1.0, y2 - y1)
+    aim_x = x1 + (width * 0.5)
+    if int(cls_id) == 0:
+        aim_y = y1 + (height * BODY_Y_RATIO)
+    else:
+        aim_y = y1 + (height * 0.5)
+    aim_y = clamp(aim_y, y1, y2)
+    return aim_x, aim_y
 
 
 def reset_ego_motion_state(shared_lock, state):
@@ -1730,6 +1805,7 @@ def reset_ego_motion_state(shared_lock, state):
 
 PID_RUNTIME_PARAM_SPECS = (
     {"key": "enable", "label": "PID Enabled", "type": "bool"},
+    {"key": "tracking_enabled", "label": "Tracking Enabled", "type": "bool"},
     {
         "key": "tracking_strategy",
         "label": "Tracking Strategy",
@@ -1759,6 +1835,12 @@ PID_RUNTIME_PARAM_SPECS = (
     {"key": "recoil_compensation_y_px", "label": "Recoil Comp Y (px)", "type": "number", "step": 1.0},
     {"key": "ghub_max_step", "label": "GHUB Max Step", "type": "number", "step": 1.0},
     {
+        "key": "left_hold_engage_button",
+        "label": "F6 Engage Button",
+        "type": "select",
+        "options": LEFT_HOLD_ENGAGE_BUTTON_OPTIONS,
+    },
+    {
         "key": "recoil_tune_fallback_ignore_mode_check",
         "label": "F7 Ignore Mode Check",
         "type": "bool",
@@ -1777,6 +1859,7 @@ PID_RUNTIME_PARAM_SPECS = (
 def build_pid_runtime_defaults():
     return {
         "enable": bool(PID_ENABLE),
+        "tracking_enabled": True,
         "tracking_strategy": str(TRACKING_STRATEGY_DEFAULT),
         "tracking_alpha": float(TRACKING_POSITION_ALPHA),
         "tracking_velocity_alpha": float(TRACKING_VELOCITY_ALPHA),
@@ -1800,6 +1883,7 @@ def build_pid_runtime_defaults():
         "triggerbot_click_cooldown_s": float(TRIGGERBOT_CLICK_COOLDOWN_S),
         "recoil_compensation_y_px": float(RECOIL_COMPENSATION_Y_PX),
         "ghub_max_step": float(GHUB_MAX_STEP),
+        "left_hold_engage_button": str(LEFT_HOLD_ENGAGE_BUTTON_DEFAULT),
         "recoil_tune_fallback_ignore_mode_check": bool(
             RECOIL_TUNE_FALLBACK_IGNORE_MODE_CHECK_DEFAULT
         ),
@@ -1838,6 +1922,9 @@ class RuntimePIDConfig:
             snapshot = dict(self._values)
             snapshot["tracking_strategy"] = normalize_tracking_strategy(
                 snapshot.get("tracking_strategy", TRACKING_STRATEGY_DEFAULT)
+            )
+            snapshot["left_hold_engage_button"] = normalize_left_hold_engage_button(
+                snapshot.get("left_hold_engage_button", LEFT_HOLD_ENGAGE_BUTTON_DEFAULT)
             )
             snapshot["use_kalman"] = snapshot["tracking_strategy"] == TRACKING_STRATEGY_KALMAN
             snapshot["version"] = int(self._version)
@@ -3431,6 +3518,7 @@ def main():
         last_track_tick = 0.0
         last_box_w = 0.0
         last_box_h = 0.0
+        last_target_bbox = None
         lost_frames = 0
         active_target_cls = -1
 
@@ -3477,6 +3565,7 @@ def main():
                     state.get("tracking_strategy", TRACKING_STRATEGY_DEFAULT)
                 )
                 local_left_hold_engage = bool(state.get("left_hold_engage", False))
+                local_left_pressed = bool(state.get("left_pressed", False))
                 local_right_pressed = bool(state.get("right_pressed", False))
                 prev_target_found = state["target_found"]
                 prev_tx, prev_ty = state["last_target_full"]
@@ -3496,10 +3585,14 @@ def main():
                 pid_y.reset()
                 last_pid_reset_token = pid_reset_token
             pid_enable = bool(pid_snapshot["enable"])
+            tracking_enabled = bool(pid_snapshot.get("tracking_enabled", True))
             tracking_strategy = normalize_tracking_strategy(
                 pid_snapshot.get("tracking_strategy", TRACKING_STRATEGY_DEFAULT)
             )
             use_kalman = tracking_strategy == TRACKING_STRATEGY_KALMAN
+            left_hold_engage_button = normalize_left_hold_engage_button(
+                pid_snapshot.get("left_hold_engage_button", LEFT_HOLD_ENGAGE_BUTTON_DEFAULT)
+            )
             tracking_alpha = float(pid_snapshot["tracking_alpha"])
             tracking_velocity_alpha = float(pid_snapshot["tracking_velocity_alpha"])
             pid_integrate = abs(float(pid_snapshot["ki"])) > 1e-12
@@ -3558,6 +3651,7 @@ def main():
                 lost_frames = 0
                 last_box_w = 0.0
                 last_box_h = 0.0
+                last_target_bbox = None
                 last_track_tick = 0.0
                 last_pid_tick = time.perf_counter()
                 drain_queue(control_queue)
@@ -3578,7 +3672,12 @@ def main():
                     state["tracking_strategy"] = tracking_strategy
                     state["use_kalman"] = use_kalman
 
-            engage_active = (local_mode != 0) and ((not local_left_hold_engage) or local_right_pressed)
+            engage_active = (local_mode != 0) and is_left_hold_engage_satisfied(
+                local_left_hold_engage,
+                left_hold_engage_button,
+                left_pressed=local_left_pressed,
+                right_pressed=local_right_pressed,
+            )
             triggerbot_monitor_active = (local_mode != 0) and triggerbot_enable
             if not (engage_active or triggerbot_monitor_active):
                 with shared_lock:
@@ -3596,9 +3695,15 @@ def main():
                 lost_frames = 0
                 last_box_w = 0.0
                 last_box_h = 0.0
+                last_target_bbox = None
                 last_track_tick = 0.0
                 last_pid_tick = time.perf_counter()
-                if local_left_hold_engage and (not local_right_pressed):
+                if local_left_hold_engage and not is_left_hold_engage_satisfied(
+                    True,
+                    left_hold_engage_button,
+                    left_pressed=local_left_pressed,
+                    right_pressed=local_right_pressed,
+                ):
                     drain_queue(control_queue)
                 time.sleep(0.002)
                 continue
@@ -3633,8 +3738,8 @@ def main():
                 # time.sleep(0.0005)
                 continue
 
-            # Model classes map directly from aimmode: 0=head, 1=body.
-            target_cls = int(local_aimmode)
+            # Model classes are inverted relative to aimmode: 0=body, 1=head.
+            target_cls = 1 if int(local_aimmode) == 0 else 0
             target_classes = np.array([target_cls], dtype=np.int32)
 
             if active_target_cls != -1 and active_target_cls not in target_classes:
@@ -3645,6 +3750,7 @@ def main():
                 lost_frames = 0
                 last_box_w = 0.0
                 last_box_h = 0.0
+                last_target_bbox = None
                 last_track_tick = 0.0
                 last_pid_tick = time.perf_counter()
 
@@ -3688,19 +3794,37 @@ def main():
                     detections = []
                     for bbox_raw, cls_id, conf in zip(candidates, candidate_classes, candidate_confs):
                         x1, y1, x2, y2 = map(int, bbox_raw)
+                        aim_x, aim_y = detection_anchor_xyxy(x1, y1, x2, y2, cls_id)
                         detections.append(
                             {
                                 "bbox": (x1, y1, x2, y2),
-                                "x": float(cap["left"] + ((x1 + x2) * 0.5)),
-                                "y": float(cap["top"] + ((y1 + y2) * 0.5)),
+                                "x": float(cap["left"] + aim_x),
+                                "y": float(cap["top"] + aim_y),
                                 "cls": int(cls_id),
                                 "conf": float(conf),
                             }
                         )
                     locked_point = None
-                    if target_tracker.initialized:
-                        locked_point = target_tracker.get_state()[:2]
-                    else:
+                    association_pool = detections
+                    if tracking_enabled and target_tracker.initialized:
+                        track_x, track_y, track_vx, track_vy, _, _ = target_tracker.get_state()
+                        locked_point = (float(track_x), float(track_y))
+                        assoc_ref = (
+                            float(track_x + (track_vx * ASSOC_PREDICT_DT)),
+                            float(track_y + (track_vy * ASSOC_PREDICT_DT)),
+                        )
+                        assoc_limit = float(
+                            TARGET_LOCK_MAX_JUMP
+                            + min(ASSOC_MAX_JUMP_PAD, np.hypot(track_vx, track_vy) * ASSOC_SPEED_JUMP_GAIN)
+                        )
+                        association_pool = [
+                            det for det in detections
+                            if (
+                                point_to_box_distance_xyxy(det["bbox"], assoc_ref[0], assoc_ref[1]) <= assoc_limit
+                                or bbox_iou_xyxy(det["bbox"], last_target_bbox) >= TRACKER_REINIT_MIN_IOU
+                            )
+                        ]
+                    elif tracking_enabled:
                         target_age_s = (
                             max(0.0, time.time() - prev_target_ts) if prev_target_ts > 0.0 else float("inf")
                         )
@@ -3710,12 +3834,32 @@ def main():
                             and target_age_s <= TARGET_TIMEOUT_S
                         ):
                             locked_point = (float(prev_tx), float(prev_ty))
-                    selected_detection, selected_meta = pick_sticky_target(
-                        detections,
-                        CENTER,
-                        locked_point,
-                        sticky_bias=sticky_bias_px,
-                    )
+                            assoc_ref = locked_point
+                            assoc_limit = float(TARGET_LOCK_MAX_JUMP)
+                            association_pool = [
+                                det for det in detections
+                                if (
+                                    point_to_box_distance_xyxy(det["bbox"], assoc_ref[0], assoc_ref[1]) <= assoc_limit
+                                    or bbox_iou_xyxy(det["bbox"], last_target_bbox) >= TRACKER_REINIT_MIN_IOU
+                                )
+                            ]
+                    if locked_point is None:
+                        selected_detection, selected_meta = pick_sticky_target(
+                            detections,
+                            CENTER,
+                            None,
+                            sticky_bias=sticky_bias_px,
+                        )
+                    elif association_pool:
+                        selected_detection, selected_meta = pick_sticky_target(
+                            association_pool,
+                            CENTER,
+                            locked_point,
+                            sticky_bias=sticky_bias_px,
+                        )
+                    else:
+                        selected_detection = None
+                        selected_meta = {"locked_idx": None, "selected_idx": None, "switched": False}
 
             now_k = time.time()
             now_tick = time.perf_counter()
@@ -3737,16 +3881,25 @@ def main():
                 raw_meas_x = float(selected_detection["x"])
                 raw_meas_y = float(selected_detection["y"])
                 target_switched = bool(selected_meta.get("switched", False))
+                if (not target_switched) and last_target_bbox is not None:
+                    target_switched = bbox_iou_xyxy(selected_detection["bbox"], last_target_bbox) < 0.05
                 if target_switched and ego_motion_reset_on_switch:
                     reset_ego_motion_state(shared_lock, state)
                     ctrl_sent_vx_ema = 0.0
                     ctrl_sent_vy_ema = 0.0
+                if target_switched:
+                    pid_x.reset()
+                    pid_y.reset()
+                    last_pid_tick = now_tick
+                if (not tracking_enabled) or target_switched:
+                    target_tracker.reset()
                 target_tracker.update(raw_meas_x, raw_meas_y)
                 active_target_cls = int(selected_detection["cls"])
                 lost_frames = 0
                 x1, y1, x2, y2 = selected_detection["bbox"]
                 last_box_w = float(max(1, x2 - x1))
                 last_box_h = float(max(1, y2 - y1))
+                last_target_bbox = tuple(selected_detection["bbox"])
                 if triggerbot_monitor_active:
                     trigger_scale = clamp(triggerbot_box_percent / 100.0, 0.01, 1.0)
                     trigger_half_w = max(1.0, (last_box_w * 0.5) * trigger_scale)
@@ -3755,7 +3908,7 @@ def main():
                         abs(raw_meas_x - CENTER[0]) <= trigger_half_w
                         and abs(raw_meas_y - CENTER[1]) <= trigger_half_h
                     )
-            elif not target_tracker.initialized:
+            elif (not tracking_enabled) or (not target_tracker.initialized):
                 with shared_lock:
                     state["target_found"] = False
                     state["last_target_full"] = CENTER
@@ -3786,6 +3939,7 @@ def main():
                     lost_frames = 0
                     last_box_w = 0.0
                     last_box_h = 0.0
+                    last_target_bbox = None
                     last_pid_tick = now_tick
                     drain_queue(control_queue)
                     with shared_lock:
@@ -3964,6 +4118,9 @@ def main():
                 cmd = get_latest(control_queue, 0.01)
             except queue.Empty:
                 runtime_snapshot = pid_runtime.snapshot()
+                left_hold_engage_button = normalize_left_hold_engage_button(
+                    runtime_snapshot.get("left_hold_engage_button", LEFT_HOLD_ENGAGE_BUTTON_DEFAULT)
+                )
                 with shared_lock:
                     local_mode = state["mode"]
                     left_pressed = bool(state.get("left_pressed", False))
@@ -3977,7 +4134,12 @@ def main():
                     )
                 )
                 mode_ok = recoil_tune_fallback_ignore_mode_check or (local_mode != 0)
-                engage_ok = (not left_hold_engage) or right_pressed
+                engage_ok = is_left_hold_engage_satisfied(
+                    left_hold_engage,
+                    left_hold_engage_button,
+                    left_pressed=left_pressed,
+                    right_pressed=right_pressed,
+                )
                 if recoil_tune_fallback and left_pressed and mode_ok and engage_ok:
                     now = time.time()
                     cmd = {
@@ -4011,7 +4173,15 @@ def main():
                     left_pressed = bool(state.get("left_pressed", False))
                     left_hold_engage = bool(state.get("left_hold_engage", False))
                     right_pressed = bool(state.get("right_pressed", False))
-                engage_active = (local_mode != 0) and ((not left_hold_engage) or right_pressed)
+                engage_active = (local_mode != 0) and is_left_hold_engage_satisfied(
+                    left_hold_engage,
+                    pid_runtime.snapshot().get(
+                        "left_hold_engage_button",
+                        LEFT_HOLD_ENGAGE_BUTTON_DEFAULT,
+                    ),
+                    left_pressed=left_pressed,
+                    right_pressed=right_pressed,
+                )
 
             now = time.time()
             cmd_age = now - cmd["ts"]
@@ -4152,9 +4322,18 @@ def main():
                 continue
             with shared_lock:
                 perf_mode = state["mode"]
+                left_pressed = bool(state.get("left_pressed", False))
                 left_hold_engage = bool(state.get("left_hold_engage", False))
                 right_pressed = bool(state.get("right_pressed", False))
-            perf_engaged = (perf_mode != 0) and ((not left_hold_engage) or right_pressed)
+            perf_engaged = (perf_mode != 0) and is_left_hold_engage_satisfied(
+                left_hold_engage,
+                pid_runtime.snapshot().get(
+                    "left_hold_engage_button",
+                    LEFT_HOLD_ENGAGE_BUTTON_DEFAULT,
+                ),
+                left_pressed=left_pressed,
+                right_pressed=right_pressed,
+            )
             if (not PERF_LOG_WHEN_MODE_OFF) and (not perf_engaged):
                 continue
 
@@ -4189,14 +4368,51 @@ def main():
     def update_left_pressed(pressed):
         pressed = bool(pressed)
         with shared_lock:
+            previous_left_pressed = bool(state.get("left_pressed", False))
+            previous_right_pressed = bool(state.get("right_pressed", False))
+            local_left_hold_engage = bool(state.get("left_hold_engage", False))
             state["left_pressed"] = pressed
+        engage_button = normalize_left_hold_engage_button(
+            pid_runtime.snapshot().get("left_hold_engage_button", LEFT_HOLD_ENGAGE_BUTTON_DEFAULT)
+        )
+        was_engaged = is_left_hold_engage_satisfied(
+            local_left_hold_engage,
+            engage_button,
+            left_pressed=previous_left_pressed,
+            right_pressed=previous_right_pressed,
+        )
+        is_engaged = is_left_hold_engage_satisfied(
+            local_left_hold_engage,
+            engage_button,
+            left_pressed=pressed,
+            right_pressed=previous_right_pressed,
+        )
+        if was_engaged and (not is_engaged):
+            drain_queue(control_queue)
 
     def update_right_pressed(pressed):
         pressed = bool(pressed)
         with shared_lock:
-            state["right_pressed"] = pressed
+            previous_left_pressed = bool(state.get("left_pressed", False))
+            previous_right_pressed = bool(state.get("right_pressed", False))
             local_left_hold_engage = bool(state.get("left_hold_engage", False))
-        if (not pressed) and local_left_hold_engage:
+            state["right_pressed"] = pressed
+        engage_button = normalize_left_hold_engage_button(
+            pid_runtime.snapshot().get("left_hold_engage_button", LEFT_HOLD_ENGAGE_BUTTON_DEFAULT)
+        )
+        was_engaged = is_left_hold_engage_satisfied(
+            local_left_hold_engage,
+            engage_button,
+            left_pressed=previous_left_pressed,
+            right_pressed=previous_right_pressed,
+        )
+        is_engaged = is_left_hold_engage_satisfied(
+            local_left_hold_engage,
+            engage_button,
+            left_pressed=previous_left_pressed,
+            right_pressed=pressed,
+        )
+        if was_engaged and (not is_engaged):
             drain_queue(control_queue)
 
     def on_click(x, y, button, pressed):
@@ -4249,11 +4465,23 @@ def main():
                     now - last_left_hold_toggle > LEFT_HOLD_ENGAGE_TOGGLE_COOLDOWN_S
                 ):
                     left_hold_engage = not left_hold_engage
+                    engage_button = normalize_left_hold_engage_button(
+                        pid_runtime.snapshot().get(
+                            "left_hold_engage_button",
+                            LEFT_HOLD_ENGAGE_BUTTON_DEFAULT,
+                        )
+                    )
                     with shared_lock:
                         state["left_hold_engage"] = left_hold_engage
+                        left_pressed = bool(state.get("left_pressed", False))
                         right_pressed = bool(state.get("right_pressed", False))
                     last_left_hold_toggle = now
-                    if left_hold_engage and (not right_pressed):
+                    if left_hold_engage and not is_left_hold_engage_satisfied(
+                        True,
+                        engage_button,
+                        left_pressed=left_pressed,
+                        right_pressed=right_pressed,
+                    ):
                         drain_queue(control_queue)
                         with shared_lock:
                             state["target_found"] = False
@@ -4263,8 +4491,9 @@ def main():
                             state["aim_dx"] = 0
                             state["aim_dy"] = 0
                     print(
-                        f"RightHoldEngage: {'ON' if left_hold_engage else 'OFF'} "
-                        f"({LEFT_HOLD_ENGAGE_TOGGLE_KEY})"
+                        f"HoldEngage: {'ON' if left_hold_engage else 'OFF'} "
+                        f"({LEFT_HOLD_ENGAGE_TOGGLE_KEY}, "
+                        f"{LEFT_HOLD_ENGAGE_BUTTON_LABELS.get(engage_button, engage_button)})"
                     )
                     winsound.Beep(1400 if left_hold_engage else 700, 100)
 

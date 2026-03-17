@@ -1,0 +1,55 @@
+#pragma once
+
+#include <memory>
+#include <thread>
+
+#include "delta/capture.hpp"
+#include "delta/config.hpp"
+#include "delta/control.hpp"
+#include "delta/frontend.hpp"
+#include "delta/inference.hpp"
+#include "delta/runtime_state.hpp"
+#include "delta/tracking.hpp"
+
+namespace delta {
+
+struct RuntimePerfWindow;
+
+#if defined(__cpp_lib_jthread) && (__cpp_lib_jthread >= 201911L)
+using AppThread = std::jthread;
+#else
+using AppThread = std::thread;
+#endif
+
+class DeltaApp {
+public:
+    DeltaApp(StaticConfig config, RuntimeConfig runtime);
+    ~DeltaApp();
+
+    int run();
+    void stop();
+
+private:
+    void captureLoop();
+    void inferenceLoop();
+    void controlLoop();
+    void perfLoop();
+
+    StaticConfig config_{};
+    RuntimeConfigStore runtime_store_;
+    SharedState shared_{};
+    LatestSlot<FramePacket> frame_slot_;
+    LatestSlot<GpuFramePacket> gpu_frame_slot_;
+    LatestSlot<CommandPacket> command_slot_;
+    std::unique_ptr<ICaptureSource> capture_;
+    std::unique_ptr<IInferenceEngine> inference_;
+    std::unique_ptr<IInputSender> input_sender_;
+    std::unique_ptr<RuntimeFrontendServer> frontend_;
+    std::unique_ptr<RuntimePerfWindow> perf_;
+    AppThread capture_thread_;
+    AppThread inference_thread_;
+    AppThread control_thread_;
+    AppThread perf_thread_;
+};
+
+}  // namespace delta

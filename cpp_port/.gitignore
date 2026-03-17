@@ -1,0 +1,13 @@
+/build/
+/build-cuda/
+/build-cuda-vs/
+/.vs/
+/out/
+/runtime/
+/models/
+/CMakeUserPresets.json
+*.user
+*.VC.db
+*.VC.opendb
+/TensorRT-10.9.0.34/
+/__py_cache__/

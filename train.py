@@ -4,10 +4,10 @@ import multiprocessing
 
 def main():
     path = "data.yaml"
-    model = YOLO("yolo11n.pt")
+    model = YOLO("yolo26s.pt")
     model.train(
         data=path,
-        epochs=300,
+        epochs=150,
         imgsz=640,
         device="cuda"
     ) 

@@ -1,0 +1,6 @@
+/train/
+/runs/
+/valid/
+/__pycache__/
+*.pt
+*.txt
