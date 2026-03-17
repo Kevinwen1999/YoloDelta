@@ -153,6 +153,7 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"triggerbot_enable\":" << (cfg.triggerbot_enable ? "true" : "false") << ","
         << "\"triggerbot_click_hold_s\":" << cfg.triggerbot_click_hold_s << ","
         << "\"triggerbot_click_cooldown_s\":" << cfg.triggerbot_click_cooldown_s << ","
+        << "\"recoil_compensation_y_rate_px_s\":" << cfg.recoil_compensation_y_rate_px_s << ","
         << "\"recoil_compensation_y_px\":" << cfg.recoil_compensation_y_px << ","
         << "\"left_hold_engage_button\":\"" << engageButtonName(cfg.left_hold_engage_button) << "\","
         << "\"recoil_tune_fallback_ignore_mode_check\":"
@@ -261,7 +262,8 @@ std::string buildPageHtml() {
       {key:"triggerbot_enable",label:"Trigger Bot",type:"bool"},
       {key:"triggerbot_click_hold_s",label:"Trigger Hold (s)",type:"number",step:0.001,min:0},
       {key:"triggerbot_click_cooldown_s",label:"Trigger Cooldown (s)",type:"number",step:0.001,min:0},
-      {key:"recoil_compensation_y_px",label:"Recoil Comp Y (px)",type:"number",step:1},
+      {key:"recoil_compensation_y_rate_px_s",label:"Recoil Comp Y Rate (px/s)",type:"number",step:1},
+      {key:"recoil_compensation_y_px",label:"Legacy Recoil Comp Y (px/cmd)",type:"number",step:0.1},
       {key:"left_hold_engage_button",label:"F6 Engage Button",type:"select",options:[{value:"rightkey",label:"Right Key"},{value:"leftkey",label:"Left Key"},{value:"both",label:"Both"}]},
       {key:"recoil_tune_fallback_ignore_mode_check",label:"F7 Ignore Mode Check",type:"bool"},
       {key:"sendinput_gain_x",label:"SendInput Gain X",type:"number",step:0.001},
@@ -365,6 +367,7 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     if (const auto value = extractJsonBool(body, "triggerbot_enable"); value.has_value()) cfg.triggerbot_enable = *value;
     if (const auto value = extractJsonNumber(body, "triggerbot_click_hold_s"); value.has_value()) cfg.triggerbot_click_hold_s = std::max(0.0F, static_cast<float>(*value));
     if (const auto value = extractJsonNumber(body, "triggerbot_click_cooldown_s"); value.has_value()) cfg.triggerbot_click_cooldown_s = std::max(0.0F, static_cast<float>(*value));
+    if (const auto value = extractJsonNumber(body, "recoil_compensation_y_rate_px_s"); value.has_value()) cfg.recoil_compensation_y_rate_px_s = static_cast<float>(*value);
     if (const auto value = extractJsonNumber(body, "recoil_compensation_y_px"); value.has_value()) cfg.recoil_compensation_y_px = static_cast<float>(*value);
     if (const auto value = extractJsonString(body, "left_hold_engage_button"); value.has_value()) cfg.left_hold_engage_button = parseEngageButton(*value);
     if (const auto value = extractJsonBool(body, "recoil_tune_fallback_ignore_mode_check"); value.has_value()) cfg.recoil_tune_fallback_ignore_mode_check = *value;

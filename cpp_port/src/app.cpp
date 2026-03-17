@@ -100,13 +100,15 @@ constexpr double kPerfLogIntervalSeconds = 1.0;
 constexpr double kCommandTimeoutSeconds = 0.10;
 constexpr double kMaxFrameAgeSeconds = 0.05;
 constexpr double kTargetTimeoutSeconds = 0.08;
+constexpr double kLegacyRecoilReferenceHz = 120.0;
+constexpr double kMaxRecoilIntegrateDtSeconds = 0.05;
 constexpr float kMinTrackDt = 1.0F / 240.0F;
 constexpr float kMaxTrackDt = 0.06F;
 constexpr float kMaxTrackSpeedPxS = 1800.0F;
 constexpr float kEgoMotionCompAlpha = 0.30F;
 constexpr float kEgoMotionCompMaxPxS = 3200.0F;
 constexpr float kEgoMotionCompDecay = 0.92F;
-constexpr float kBodyAimYRatio = 0.38F;
+constexpr float kBodyAimYRatio = 0.0F;
 constexpr float kTargetLockMaxJump = 260.0F;
 constexpr float kTrackerReinitMinIou = 0.35F;
 constexpr float kAssocPredictDt = 0.02F;
@@ -1067,6 +1069,8 @@ void DeltaApp::controlLoop() {
     SteadyClock::time_point last_recoil_toggle{};
     SteadyClock::time_point last_triggerbot_toggle{};
     SystemClock::time_point last_trigger_click{};
+    SteadyClock::time_point last_recoil_integrate_tick{};
+    double recoil_carry_y = 0.0;
     const auto center = screenCenter(config_);
 
     for (;;) {
@@ -1167,6 +1171,10 @@ void DeltaApp::controlLoop() {
         }
 
         std::optional<CommandPacket> cmd = command_slot_.wait_take_for(kControlCommandWait);
+        const double recoil_rate_y_px_s = std::abs(runtime.recoil_compensation_y_rate_px_s) > 1e-6F
+            ? static_cast<double>(runtime.recoil_compensation_y_rate_px_s)
+            : (static_cast<double>(runtime.recoil_compensation_y_px) * kLegacyRecoilReferenceHz);
+        const bool recoil_enabled = std::abs(recoil_rate_y_px_s) > 1e-6;
         if (!cmd.has_value()) {
             const bool mode_ok = runtime.recoil_tune_fallback_ignore_mode_check || (toggles.mode != 0);
             const bool engage_ok = isLeftHoldEngageSatisfied(
@@ -1174,7 +1182,7 @@ void DeltaApp::controlLoop() {
                 runtime.left_hold_engage_button,
                 toggles.left_pressed,
                 toggles.right_pressed);
-            if (toggles.recoil_tune_fallback && toggles.left_pressed && mode_ok && engage_ok) {
+            if (recoil_enabled && toggles.recoil_tune_fallback && toggles.left_pressed && mode_ok && engage_ok) {
                 cmd = CommandPacket{
                     .dx = 0,
                     .dy = 0,
@@ -1249,11 +1257,26 @@ void DeltaApp::controlLoop() {
             && (last_trigger_click == SystemClock::time_point{}
                 || secondsSince(last_trigger_click, system_now) >= runtime.triggerbot_click_cooldown_s);
 
-        if (toggles.left_pressed || trigger_will_click) {
+        const bool recoil_active = recoil_enabled && (toggles.left_pressed || trigger_will_click);
+        if (recoil_active) {
+            const auto recoil_tick = SteadyClock::now();
+            if (last_recoil_integrate_tick != SteadyClock::time_point{}) {
+                const double recoil_dt = clamp(
+                    secondsSince(last_recoil_integrate_tick, recoil_tick),
+                    0.0,
+                    kMaxRecoilIntegrateDtSeconds);
+                recoil_carry_y += recoil_rate_y_px_s * recoil_dt;
+            }
+            last_recoil_integrate_tick = recoil_tick;
+            const int recoil_step = static_cast<int>(recoil_carry_y);
+            recoil_carry_y -= static_cast<double>(recoil_step);
             dy = clamp(
-                static_cast<int>(std::lround(static_cast<double>(dy) + static_cast<double>(runtime.recoil_compensation_y_px))),
+                dy + recoil_step,
                 -runtime.raw_max_step_y,
                 runtime.raw_max_step_y);
+        } else {
+            recoil_carry_y = 0.0;
+            last_recoil_integrate_tick = {};
         }
 
         bool movement_sent = false;
