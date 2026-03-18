@@ -123,7 +123,15 @@ If Visual Studio says the CUDA toolset is missing:
 
 - make sure the CUDA toolkit was installed with Visual Studio integration
 - confirm `CUDA_PATH` is set in your environment
-- use the `vs2022-cuda-probe` preset, which passes `toolset=cuda=$env{CUDA_PATH}`
+- use the `vs2022-cuda-probe` preset, which seeds `CMAKE_GENERATOR_TOOLSET=cuda=$penv{CUDA_PATH}`
+
+Command-line preset flow:
+
+```powershell
+cd cpp_port
+& 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' --preset vs2022-cuda-probe
+& 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' --build --preset delta-native-cuda-debug
+```
 
 ## CUDA Interop Probe
 

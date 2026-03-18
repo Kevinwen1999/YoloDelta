@@ -59,6 +59,8 @@ struct StaticConfig {
 struct RuntimeConfig {
     bool pid_enable = true;
     bool tracking_enabled = true;
+    bool debug_preview_enable = true;
+    float body_y_ratio = 0.1F;
     TrackingStrategy tracking_strategy = TrackingStrategy::RawDelta;
     float tracking_alpha = 0.42F;
     float tracking_velocity_alpha = 1.0F;
@@ -85,7 +87,7 @@ struct RuntimeConfig {
     float ego_motion_error_gate_norm_threshold = 2.0F;
     bool ego_motion_reset_on_switch = true;
     float recoil_compensation_y_rate_px_s = 0.0F;
-    float recoil_compensation_y_px = 6.0F;
+    float recoil_compensation_y_px = 10.0F;
     LeftHoldEngageButton left_hold_engage_button = LeftHoldEngageButton::Right;
     bool recoil_tune_fallback_ignore_mode_check = false;
     bool triggerbot_enable = false;

@@ -1532,7 +1532,7 @@ def normalize_tracking_strategy(value):
 LEFT_HOLD_ENGAGE_BUTTON_OPTIONS = (
     {"value": LEFT_HOLD_ENGAGE_BUTTON_LEFT, "label": "Left Key"},
     {"value": LEFT_HOLD_ENGAGE_BUTTON_RIGHT, "label": "Right Key"},
-    {"value": LEFT_HOLD_ENGAGE_BUTTON_BOTH, "label": "Both"},
+    {"value": LEFT_HOLD_ENGAGE_BUTTON_BOTH, "label": "Either Key"},
 )
 LEFT_HOLD_ENGAGE_BUTTON_LABELS = {
     item["value"]: item["label"] for item in LEFT_HOLD_ENGAGE_BUTTON_OPTIONS
@@ -1553,7 +1553,9 @@ def is_left_hold_engage_satisfied(left_hold_engage, engage_button, *, left_press
     if normalized == LEFT_HOLD_ENGAGE_BUTTON_LEFT:
         return bool(left_pressed)
     if normalized == LEFT_HOLD_ENGAGE_BUTTON_BOTH:
-        return bool(left_pressed) and bool(right_pressed)
+        # "both" is the legacy stored value; intended behavior is that
+        # either mouse button satisfies engage when this mode is selected.
+        return bool(left_pressed) or bool(right_pressed)
     return bool(right_pressed)
 
 

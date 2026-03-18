@@ -6,6 +6,7 @@
 #include "delta/capture.hpp"
 #include "delta/config.hpp"
 #include "delta/control.hpp"
+#include "delta/debug_preview.hpp"
 #include "delta/frontend.hpp"
 #include "delta/inference.hpp"
 #include "delta/runtime_state.hpp"
@@ -44,6 +45,7 @@ private:
     std::unique_ptr<ICaptureSource> capture_;
     std::unique_ptr<IInferenceEngine> inference_;
     std::unique_ptr<IInputSender> input_sender_;
+    std::unique_ptr<DebugPreviewWindow> debug_preview_;
     std::unique_ptr<RuntimeFrontendServer> frontend_;
     std::unique_ptr<RuntimePerfWindow> perf_;
     AppThread capture_thread_;

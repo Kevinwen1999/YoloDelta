@@ -108,7 +108,9 @@ bool isLeftHoldEngageSatisfied(
     case LeftHoldEngageButton::Left:
         return left_pressed;
     case LeftHoldEngageButton::Both:
-        return left_pressed && right_pressed;
+        // "Both" is the legacy stored value; intended behavior is that
+        // either mouse button satisfies engage when this mode is selected.
+        return left_pressed || right_pressed;
     case LeftHoldEngageButton::Right:
     default:
         return right_pressed;

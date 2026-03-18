@@ -23,8 +23,8 @@
       "description": "Enables the CUDA-powered native pipeline and the D3D11/CUDA interop probe target. Requires CUDA Visual Studio integration and CUDA_PATH.",
       "inherits": "vs2022-x64",
       "binaryDir": "${sourceDir}/build/vs2022-cuda-probe",
-      "toolset": "cuda=$env{CUDA_PATH}",
       "cacheVariables": {
+        "CMAKE_GENERATOR_TOOLSET": "cuda=$penv{CUDA_PATH}",
         "DELTA_ENABLE_CUDA_D3D11_INTEROP": "ON",
         "DELTA_ENABLE_CUDA_PIPELINE": "ON"
       }

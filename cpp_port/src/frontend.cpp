@@ -127,6 +127,8 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
     oss << "{"
         << "\"pid_enable\":" << (cfg.pid_enable ? "true" : "false") << ","
         << "\"tracking_enabled\":" << (cfg.tracking_enabled ? "true" : "false") << ","
+        << "\"debug_preview_enable\":" << (cfg.debug_preview_enable ? "true" : "false") << ","
+        << "\"body_y_ratio\":" << cfg.body_y_ratio << ","
         << "\"tracking_strategy\":\"" << trackingStrategyName(cfg.tracking_strategy) << "\","
         << "\"tracking_velocity_alpha\":" << cfg.tracking_velocity_alpha << ","
         << "\"kp\":" << cfg.kp << ","
@@ -237,6 +239,8 @@ std::string buildPageHtml() {
     const fields = [
       {key:"pid_enable",label:"PID Enabled",type:"bool"},
       {key:"tracking_enabled",label:"Tracking Enabled",type:"bool"},
+      {key:"debug_preview_enable",label:"Debug Preview",type:"bool"},
+      {key:"body_y_ratio",label:"Body Aim Y Ratio",type:"number",step:0.01,min:0,max:1},
       {key:"tracking_strategy",label:"Tracking Strategy",type:"select",options:[{value:"raw",label:"Raw Detection"},{value:"raw_delta",label:"Raw + Velocity"}]},
       {key:"tracking_velocity_alpha",label:"Velocity Beta",type:"number",step:0.001},
       {key:"kp",label:"Kp (X/Y)",type:"number",step:0.001},
@@ -264,7 +268,7 @@ std::string buildPageHtml() {
       {key:"triggerbot_click_cooldown_s",label:"Trigger Cooldown (s)",type:"number",step:0.001,min:0},
       {key:"recoil_compensation_y_rate_px_s",label:"Recoil Comp Y Rate (px/s)",type:"number",step:1},
       {key:"recoil_compensation_y_px",label:"Legacy Recoil Comp Y (px/cmd)",type:"number",step:0.1},
-      {key:"left_hold_engage_button",label:"F6 Engage Button",type:"select",options:[{value:"rightkey",label:"Right Key"},{value:"leftkey",label:"Left Key"},{value:"both",label:"Both"}]},
+      {key:"left_hold_engage_button",label:"F6 Engage Button",type:"select",options:[{value:"rightkey",label:"Right Key"},{value:"leftkey",label:"Left Key"},{value:"both",label:"Either Key"}]},
       {key:"recoil_tune_fallback_ignore_mode_check",label:"F7 Ignore Mode Check",type:"bool"},
       {key:"sendinput_gain_x",label:"SendInput Gain X",type:"number",step:0.001},
       {key:"sendinput_gain_y",label:"SendInput Gain Y",type:"number",step:0.001},
@@ -342,6 +346,8 @@ std::string buildPageHtml() {
 bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string& error) {
     if (const auto value = extractJsonBool(body, "pid_enable"); value.has_value()) cfg.pid_enable = *value;
     if (const auto value = extractJsonBool(body, "tracking_enabled"); value.has_value()) cfg.tracking_enabled = *value;
+    if (const auto value = extractJsonBool(body, "debug_preview_enable"); value.has_value()) cfg.debug_preview_enable = *value;
+    if (const auto value = extractJsonNumber(body, "body_y_ratio"); value.has_value()) cfg.body_y_ratio = clamp(static_cast<float>(*value), 0.0F, 1.0F);
     if (const auto value = extractJsonString(body, "tracking_strategy"); value.has_value()) cfg.tracking_strategy = parseTrackingStrategy(*value);
     if (const auto value = extractJsonNumber(body, "tracking_velocity_alpha"); value.has_value()) cfg.tracking_velocity_alpha = clamp(static_cast<float>(*value), 0.0F, 1.0F);
     if (const auto value = extractJsonNumber(body, "kp"); value.has_value()) cfg.kp = static_cast<float>(*value);

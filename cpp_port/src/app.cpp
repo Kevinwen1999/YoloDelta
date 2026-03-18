@@ -108,7 +108,6 @@ constexpr float kMaxTrackSpeedPxS = 1800.0F;
 constexpr float kEgoMotionCompAlpha = 0.30F;
 constexpr float kEgoMotionCompMaxPxS = 3200.0F;
 constexpr float kEgoMotionCompDecay = 0.92F;
-constexpr float kBodyAimYRatio = 0.0F;
 constexpr float kTargetLockMaxJump = 260.0F;
 constexpr float kTrackerReinitMinIou = 0.35F;
 constexpr float kAssocPredictDt = 0.02F;
@@ -145,7 +144,7 @@ std::pair<int, int> screenCenter(const StaticConfig& config) {
     return {config.screen_w / 2, config.screen_h / 2};
 }
 
-std::pair<float, float> detectionAimPoint(const Detection& detection) {
+std::pair<float, float> detectionAimPoint(const Detection& detection, const float body_y_ratio) {
     const float x1 = static_cast<float>(detection.bbox[0]);
     const float y1 = static_cast<float>(detection.bbox[1]);
     const float x2 = static_cast<float>(detection.bbox[2]);
@@ -154,7 +153,7 @@ std::pair<float, float> detectionAimPoint(const Detection& detection) {
     const float height = std::max(1.0F, y2 - y1);
     const float aim_x = x1 + (width * 0.5F);
     const float aim_y = detection.cls == 0
-        ? (y1 + (height * kBodyAimYRatio))
+        ? (y1 + (height * clamp(body_y_ratio, 0.0F, 1.0F)))
         : (y1 + (height * 0.5F));
     return {aim_x, clamp(aim_y, y1, y2)};
 }
@@ -203,6 +202,41 @@ CaptureRegion buildCaptureRegion(const StaticConfig& config, const int center_x,
         .width = width,
         .height = height,
     };
+}
+
+DebugPreviewSnapshot makeInactiveDebugPreviewSnapshot(const std::pair<int, int> center) {
+    DebugPreviewSnapshot snapshot{};
+    snapshot.screen_center = center;
+    return snapshot;
+}
+
+DebugPreviewSnapshot makeDebugPreviewSnapshot(
+    const CaptureRegion& capture_region,
+    const std::pair<int, int> center,
+    const std::vector<Detection>& detections) {
+    DebugPreviewSnapshot snapshot{};
+    snapshot.active = true;
+    snapshot.capture_region = capture_region;
+    snapshot.screen_center = center;
+    snapshot.detections.reserve(detections.size());
+    for (const auto& detection : detections) {
+        snapshot.detections.push_back(DebugPreviewDetection{
+            .bbox = detection.bbox,
+            .cls = detection.cls,
+            .conf = detection.conf,
+            .selected = false,
+        });
+    }
+    return snapshot;
+}
+
+void markDebugPreviewSelected(DebugPreviewSnapshot& snapshot, const Detection& detection) {
+    for (auto& candidate : snapshot.detections) {
+        if (candidate.bbox == detection.bbox && candidate.cls == detection.cls) {
+            candidate.selected = true;
+            return;
+        }
+    }
 }
 
 void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, const TrackingStrategy strategy) {
@@ -401,6 +435,7 @@ DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
       capture_(makeDefaultCaptureSource(config_)),
       inference_(makeInferenceEngine(config_)),
       input_sender_(makeInputSender()),
+      debug_preview_(makeDebugPreviewWindow(config_)),
       frontend_(makeRuntimeFrontend(config_, runtime_store_, shared_)),
       perf_(std::make_unique<RuntimePerfWindow>()) {
     if (capture_ && inference_) {
@@ -433,6 +468,10 @@ int DeltaApp::run() {
         if (frontend_) {
             frontend_->start();
         }
+        if (debug_preview_) {
+            debug_preview_->start();
+            debug_preview_->setEnabled(runtime_store_.snapshot().debug_preview_enable);
+        }
         if (config_.perf_log_enable && perf_) {
             perf_thread_ = AppThread([this]() { perfLoop(); });
         }
@@ -453,6 +492,9 @@ int DeltaApp::run() {
         }
     } catch (...) {
         stop();
+        if (debug_preview_) {
+            debug_preview_->stop();
+        }
         if (frontend_) {
             frontend_->stop();
         }
@@ -471,6 +513,9 @@ int DeltaApp::run() {
     }
     if (perf_thread_.joinable()) {
         perf_thread_.join();
+    }
+    if (debug_preview_) {
+        debug_preview_->stop();
     }
     if (frontend_) {
         frontend_->stop();
@@ -585,10 +630,15 @@ void DeltaApp::inferenceLoop() {
         std::optional<std::array<int, 4>> last_target_bbox;
         SteadyClock::time_point last_pid_tick{};
         SteadyClock::time_point last_track_tick{};
+        bool last_debug_preview_enabled = runtime.debug_preview_enable;
+        bool preview_idle_state = true;
 
         {
             std::lock_guard<std::mutex> lock(shared_.mutex);
             shared_.tracking_strategy = trackingStrategyName(last_tracking_strategy);
+        }
+        if (debug_preview_) {
+            debug_preview_->setEnabled(last_debug_preview_enabled);
         }
 
         for (;;) {
@@ -605,6 +655,13 @@ void DeltaApp::inferenceLoop() {
             const std::uint64_t reset_token = runtime_store_.resetToken();
             inference_->setModelConfidence(runtime.model_conf);
             const bool tracking_enabled = runtime.tracking_enabled;
+            const bool debug_preview_enabled = runtime.debug_preview_enable;
+
+            if (debug_preview_ && debug_preview_enabled != last_debug_preview_enabled) {
+                debug_preview_->setEnabled(debug_preview_enabled);
+                last_debug_preview_enabled = debug_preview_enabled;
+                preview_idle_state = true;
+            }
 
             if (pid_version != last_pid_version) {
                 pid_x.configure(
@@ -650,6 +707,10 @@ void DeltaApp::inferenceLoop() {
                     clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                 }
                 last_tracking_strategy = runtime.tracking_strategy;
+                if (debug_preview_ && debug_preview_enabled) {
+                    debug_preview_->publish(makeInactiveDebugPreviewSnapshot(center));
+                }
+                preview_idle_state = true;
                 std::this_thread::sleep_for(kInferenceIdleSleep);
                 continue;
             }
@@ -693,9 +754,14 @@ void DeltaApp::inferenceLoop() {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                 }
+                if (debug_preview_ && debug_preview_enabled && !preview_idle_state) {
+                    debug_preview_->publish(makeInactiveDebugPreviewSnapshot(center));
+                }
+                preview_idle_state = true;
                 std::this_thread::sleep_for(kInferenceIdleSleep);
                 continue;
             }
+            preview_idle_state = false;
 
             std::optional<FramePacket> cpu_packet;
             std::optional<GpuFramePacket> gpu_packet;
@@ -761,7 +827,7 @@ void DeltaApp::inferenceLoop() {
                 detection.bbox[1] += capture_region.top;
                 detection.bbox[2] += capture_region.left;
                 detection.bbox[3] += capture_region.top;
-                const auto [aim_x, aim_y] = detectionAimPoint(detection);
+                const auto [aim_x, aim_y] = detectionAimPoint(detection, runtime.body_y_ratio);
                 detection.x = aim_x;
                 detection.y = aim_y;
             }
@@ -774,6 +840,11 @@ void DeltaApp::inferenceLoop() {
                     }),
                 detections.end());
 
+            std::optional<DebugPreviewSnapshot> preview_snapshot;
+            if (debug_preview_ && debug_preview_enabled) {
+                preview_snapshot = makeDebugPreviewSnapshot(capture_region, center, detections);
+            }
+
             std::optional<std::pair<float, float>> locked_point;
             if (tracking_enabled && tracker->initialized()) {
                 const TrackerState tracker_state = tracker->state();
@@ -784,6 +855,9 @@ void DeltaApp::inferenceLoop() {
                 && prev_target_time != SystemClock::time_point{}
                 && secondsSince(prev_target_time, SystemClock::now()) <= kTargetTimeoutSeconds) {
                 locked_point = std::make_pair(static_cast<float>(prev_target_full.first), static_cast<float>(prev_target_full.second));
+            }
+            if (preview_snapshot.has_value() && locked_point.has_value()) {
+                preview_snapshot->locked_point = *locked_point;
             }
 
             std::optional<StickyTargetPick> sticky;
@@ -856,6 +930,9 @@ void DeltaApp::inferenceLoop() {
                 last_box_w = static_cast<float>(std::max(1, sticky->detection->bbox[2] - sticky->detection->bbox[0]));
                 last_box_h = static_cast<float>(std::max(1, sticky->detection->bbox[3] - sticky->detection->bbox[1]));
                 last_target_bbox = sticky->detection->bbox;
+                if (preview_snapshot.has_value()) {
+                    markDebugPreviewSelected(*preview_snapshot, *sticky->detection);
+                }
                 if (target_switched && runtime.ego_motion_reset_on_switch) {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     resetEgoMotionStateLocked(shared_);
@@ -881,6 +958,9 @@ void DeltaApp::inferenceLoop() {
                         secondsSince(tracker_start, SteadyClock::now()),
                         inference_result.timings,
                         std::nullopt);
+                }
+                if (debug_preview_ && preview_snapshot.has_value()) {
+                    debug_preview_->publish(std::move(*preview_snapshot));
                 }
                 continue;
             } else {
@@ -910,6 +990,9 @@ void DeltaApp::inferenceLoop() {
                             secondsSince(tracker_start, SteadyClock::now()),
                             inference_result.timings,
                             std::nullopt);
+                    }
+                    if (debug_preview_ && preview_snapshot.has_value()) {
+                        debug_preview_->publish(std::move(*preview_snapshot));
                     }
                     continue;
                 }
@@ -979,6 +1062,9 @@ void DeltaApp::inferenceLoop() {
             const float predicted_x = tracker_state.x + (vx * prediction_time);
             const float predicted_y = tracker_state.y + (vy * prediction_time);
             const float aim_y = predicted_y;
+            if (preview_snapshot.has_value()) {
+                preview_snapshot->predicted_point = std::make_pair(predicted_x, aim_y);
+            }
             const float pid_dt = clamp(
                 last_pid_tick == SteadyClock::time_point{}
                     ? kMinTrackDt
@@ -1021,6 +1107,12 @@ void DeltaApp::inferenceLoop() {
                 shared_.capture_focus_full = {focus_x, focus_y};
                 shared_.target_time = now_system;
                 shared_.tracking_strategy = trackingStrategyName(runtime.tracking_strategy);
+            }
+            if (preview_snapshot.has_value()) {
+                preview_snapshot->target_found = true;
+                preview_snapshot->target_cls = selected_cls;
+                preview_snapshot->target_speed = speed;
+                debug_preview_->publish(std::move(*preview_snapshot));
             }
 
             if (engage_active || trigger_fire) {
