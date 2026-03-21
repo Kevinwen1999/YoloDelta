@@ -47,13 +47,27 @@ struct TrackerState {
     float ay = 0.0F;
 };
 
+struct CaptureTimings {
+    double acquire_s = 0.0;
+    double d3d_copy_s = 0.0;
+    double d3d_sync_s = 0.0;
+    double cuda_copy_s = 0.0;
+    double cpu_copy_s = 0.0;
+    double cached_reuse_s = 0.0;
+    bool used_cached_frame = false;
+};
+
 struct FramePacket {
     std::vector<std::uint8_t> bgr;
     int width = 0;
     int height = 0;
     CaptureRegion capture{};
+    SteadyClock::time_point acquire_started{};
+    SteadyClock::time_point frame_ready{};
+    SteadyClock::time_point capture_done{};
     SteadyClock::time_point frame_time{};
     SystemClock::time_point capture_time{};
+    CaptureTimings timings{};
 };
 
 struct GpuFramePacket {
@@ -63,17 +77,26 @@ struct GpuFramePacket {
     int height = 0;
     PixelFormat pixel_format = PixelFormat::Bgra8;
     CaptureRegion capture{};
+    SteadyClock::time_point acquire_started{};
+    SteadyClock::time_point frame_ready{};
+    SteadyClock::time_point capture_done{};
     SteadyClock::time_point frame_time{};
     SystemClock::time_point capture_time{};
+    CaptureTimings timings{};
     void* cuda_stream = nullptr;
 };
 
 struct CommandPacket {
     int dx = 0;
     int dy = 0;
+    SteadyClock::time_point acquire_started{};
+    SteadyClock::time_point frame_ready{};
+    SteadyClock::time_point capture_done{};
+    SteadyClock::time_point cmd_generated{};
     SystemClock::time_point generated_at{};
     SystemClock::time_point frame_time{};
     SystemClock::time_point capture_time{};
+    bool target_detected = false;
     bool synthetic_recoil = false;
     bool trigger_fire = false;
 };

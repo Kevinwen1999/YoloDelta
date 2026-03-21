@@ -12,11 +12,14 @@
 #endif
 
 #include <chrono>
+#include <atomic>
+#include <cstdlib>
 #include <cstdint>
 #include <cwchar>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -95,6 +98,22 @@ void checkHr(HRESULT hr, std::string_view what) {
     }
 }
 
+double secondsSince(const SteadyClock::time_point since, const SteadyClock::time_point now) {
+    return std::chrono::duration<double>(now - since).count();
+}
+
+std::optional<int> envInt(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return std::nullopt;
+    }
+    try {
+        return std::stoi(value);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 #if defined(DELTA_WITH_CUDA_PIPELINE)
 void checkCuda(cudaError_t status, std::string_view what) {
     if (status != cudaSuccess) {
@@ -120,6 +139,20 @@ CaptureRegion clampRegionToDesktop(const CaptureRegion& requested, int desktop_w
 
 struct DesktopDuplicationCapture::Impl {
     explicit Impl(StaticConfig cfg) : config(std::move(cfg)) {}
+
+    int effectiveAcquireTimeoutMs() const {
+        int timeout_ms = std::max(0, config.capture_timeout_ms);
+        if (const auto override_ms = envInt("DELTA_CAPTURE_TIMEOUT_MS"); override_ms.has_value()) {
+            timeout_ms = std::max(0, *override_ms);
+        }
+        if (config.capture_video_mode && has_cached_desktop && cached_desktop != nullptr) {
+            timeout_ms = std::max(0, cached_frame_timeout_ms.load(std::memory_order_relaxed));
+            if (const auto override_ms = envInt("DELTA_CAPTURE_CACHED_TIMEOUT_MS"); override_ms.has_value()) {
+                timeout_ms = std::max(0, *override_ms);
+            }
+        }
+        return timeout_ms;
+    }
 
     void initialize() {
         if (initialized) {
@@ -342,8 +375,15 @@ struct DesktopDuplicationCapture::Impl {
         cuda_region = region;
     }
 
-    GpuFramePacket copyRegionToGpuPacket(ID3D11Texture2D* source_texture, const CaptureRegion& region) {
+    GpuFramePacket copyRegionToGpuPacket(
+        ID3D11Texture2D* source_texture,
+        const CaptureRegion& region,
+        const SteadyClock::time_point acquire_started,
+        const SteadyClock::time_point frame_ready,
+        const bool used_cached_frame) {
         ensureGpuResources(region);
+        CaptureTimings timings{};
+        timings.used_cached_frame = used_cached_frame;
 
         D3D11_BOX source_box{};
         source_box.left = static_cast<UINT>(region.left);
@@ -353,6 +393,7 @@ struct DesktopDuplicationCapture::Impl {
         source_box.bottom = static_cast<UINT>(region.top + region.height);
         source_box.back = 1;
 
+        const auto d3d_copy_start = SteadyClock::now();
         context->CopySubresourceRegion(
             cuda_interop_texture.Get(),
             0,
@@ -362,7 +403,13 @@ struct DesktopDuplicationCapture::Impl {
             source_texture,
             0,
             &source_box);
+        const auto d3d_copy_end = SteadyClock::now();
+        timings.d3d_copy_s = secondsSince(d3d_copy_start, d3d_copy_end);
+
+        const auto d3d_sync_start = SteadyClock::now();
         context->Flush();
+        const auto d3d_sync_end = SteadyClock::now();
+        timings.d3d_sync_s = secondsSince(d3d_sync_start, d3d_sync_end);
 
         const cudaStream_t stream = activeCudaStream();
 
@@ -373,6 +420,7 @@ struct DesktopDuplicationCapture::Impl {
             }
         });
 
+        const auto cuda_copy_start = SteadyClock::now();
         checkCuda(cudaGraphicsMapResources(1, &cuda_resource, stream), "cudaGraphicsMapResources");
         mapped = true;
 
@@ -392,6 +440,7 @@ struct DesktopDuplicationCapture::Impl {
                 cudaMemcpyDeviceToDevice,
                 stream),
             "cudaMemcpy2DFromArrayAsync(cuda bgra)");
+        timings.cuda_copy_s = secondsSince(cuda_copy_start, SteadyClock::now());
 
         GpuFramePacket packet{};
         packet.device_ptr = cuda_bgra_device;
@@ -400,15 +449,29 @@ struct DesktopDuplicationCapture::Impl {
         packet.height = region.height;
         packet.pixel_format = PixelFormat::Bgra8;
         packet.capture = region;
-        packet.frame_time = SteadyClock::now();
+        packet.acquire_started = acquire_started;
+        packet.frame_ready = frame_ready;
+        packet.capture_done = SteadyClock::now();
+        packet.frame_time = frame_ready;
         packet.capture_time = SystemClock::now();
+        if (used_cached_frame) {
+            timings.cached_reuse_s = secondsSince(frame_ready, packet.capture_done);
+        }
+        packet.timings = timings;
         packet.cuda_stream = stream;
         return packet;
     }
 #endif
 
-    FramePacket copyRegionToPacket(ID3D11Texture2D* source_texture, const CaptureRegion& region) {
+    FramePacket copyRegionToPacket(
+        ID3D11Texture2D* source_texture,
+        const CaptureRegion& region,
+        const SteadyClock::time_point acquire_started,
+        const SteadyClock::time_point frame_ready,
+        const bool used_cached_frame) {
         ensureCropStaging(region);
+        CaptureTimings timings{};
+        timings.used_cached_frame = used_cached_frame;
 
         D3D11_BOX source_box{};
         source_box.left = static_cast<UINT>(region.left);
@@ -418,6 +481,7 @@ struct DesktopDuplicationCapture::Impl {
         source_box.bottom = static_cast<UINT>(region.top + region.height);
         source_box.back = 1;
 
+        const auto d3d_copy_start = SteadyClock::now();
         context->CopySubresourceRegion(
             crop_staging.Get(),
             0,
@@ -428,7 +492,9 @@ struct DesktopDuplicationCapture::Impl {
             0,
             &source_box
         );
+        timings.d3d_copy_s = secondsSince(d3d_copy_start, SteadyClock::now());
 
+        const auto cpu_copy_start = SteadyClock::now();
         D3D11_MAPPED_SUBRESOURCE mapped{};
         checkHr(context->Map(crop_staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "Map(crop staging)");
         ScopeExit unmap([&]() { context->Unmap(crop_staging.Get(), 0); });
@@ -437,8 +503,8 @@ struct DesktopDuplicationCapture::Impl {
         packet.width = region.width;
         packet.height = region.height;
         packet.capture = region;
-        packet.frame_time = SteadyClock::now();
-        packet.capture_time = SystemClock::now();
+        packet.acquire_started = acquire_started;
+        packet.frame_ready = frame_ready;
         packet.bgr.resize(static_cast<std::size_t>(region.width) * static_cast<std::size_t>(region.height) * 3ULL);
 
         const auto* src_base = static_cast<const std::uint8_t*>(mapped.pData);
@@ -454,17 +520,26 @@ struct DesktopDuplicationCapture::Impl {
             }
         }
 
+        packet.capture_done = SteadyClock::now();
+        packet.frame_time = frame_ready;
+        packet.capture_time = SystemClock::now();
+        timings.cpu_copy_s = secondsSince(cpu_copy_start, packet.capture_done);
+        if (used_cached_frame) {
+            timings.cached_reuse_s = secondsSince(frame_ready, packet.capture_done);
+        }
+        packet.timings = timings;
         return packet;
     }
 
     std::optional<FramePacket> grab(const CaptureRegion& requested_region) {
         initialize();
         const CaptureRegion region = clampRegionToDesktop(requested_region, desktop_width, desktop_height);
+        const auto acquire_started = SteadyClock::now();
 
         DXGI_OUTDUPL_FRAME_INFO frame_info{};
         ComPtr<IDXGIResource> frame_resource;
         HRESULT hr = duplication->AcquireNextFrame(
-            static_cast<UINT>(std::max(0, config.capture_timeout_ms)),
+            static_cast<UINT>(effectiveAcquireTimeoutMs()),
             &frame_info,
             &frame_resource
         );
@@ -472,17 +547,20 @@ struct DesktopDuplicationCapture::Impl {
         if (hr == DXGI_ERROR_ACCESS_LOST) {
             recreateDuplication();
             hr = duplication->AcquireNextFrame(
-                static_cast<UINT>(std::max(0, config.capture_timeout_ms)),
+                static_cast<UINT>(effectiveAcquireTimeoutMs()),
                 &frame_info,
                 &frame_resource
             );
         }
+        const auto frame_ready = SteadyClock::now();
 
         if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
             if (!config.capture_video_mode || !has_cached_desktop || cached_desktop == nullptr) {
                 return std::nullopt;
             }
-            return copyRegionToPacket(cached_desktop.Get(), region);
+            FramePacket packet = copyRegionToPacket(cached_desktop.Get(), region, acquire_started, frame_ready, true);
+            packet.timings.acquire_s = secondsSince(acquire_started, frame_ready);
+            return packet;
         }
 
         checkHr(hr, "AcquireNextFrame");
@@ -509,7 +587,8 @@ struct DesktopDuplicationCapture::Impl {
             has_cached_desktop = true;
         }
 
-        FramePacket packet = copyRegionToPacket(source_texture, region);
+        FramePacket packet = copyRegionToPacket(source_texture, region, acquire_started, frame_ready, false);
+        packet.timings.acquire_s = secondsSince(acquire_started, frame_ready);
         checkHr(duplication->ReleaseFrame(), "ReleaseFrame");
         frame_acquired = false;
         return packet;
@@ -523,27 +602,31 @@ struct DesktopDuplicationCapture::Impl {
 
         initialize();
         const CaptureRegion region = clampRegionToDesktop(requested_region, desktop_width, desktop_height);
+        const auto acquire_started = SteadyClock::now();
 
         DXGI_OUTDUPL_FRAME_INFO frame_info{};
         ComPtr<IDXGIResource> frame_resource;
         HRESULT hr = duplication->AcquireNextFrame(
-            static_cast<UINT>(std::max(0, config.capture_timeout_ms)),
+            static_cast<UINT>(effectiveAcquireTimeoutMs()),
             &frame_info,
             &frame_resource);
 
         if (hr == DXGI_ERROR_ACCESS_LOST) {
             recreateDuplication();
             hr = duplication->AcquireNextFrame(
-                static_cast<UINT>(std::max(0, config.capture_timeout_ms)),
+                static_cast<UINT>(effectiveAcquireTimeoutMs()),
                 &frame_info,
                 &frame_resource);
         }
+        const auto frame_ready = SteadyClock::now();
 
         if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
             if (!config.capture_video_mode || !has_cached_desktop || cached_desktop == nullptr) {
                 return std::nullopt;
             }
-            return copyRegionToGpuPacket(cached_desktop.Get(), region);
+            GpuFramePacket packet = copyRegionToGpuPacket(cached_desktop.Get(), region, acquire_started, frame_ready, true);
+            packet.timings.acquire_s = secondsSince(acquire_started, frame_ready);
+            return packet;
         }
 
         checkHr(hr, "AcquireNextFrame");
@@ -566,7 +649,8 @@ struct DesktopDuplicationCapture::Impl {
             has_cached_desktop = true;
         }
 
-        GpuFramePacket packet = copyRegionToGpuPacket(source_texture, region);
+        GpuFramePacket packet = copyRegionToGpuPacket(source_texture, region, acquire_started, frame_ready, false);
+        packet.timings.acquire_s = secondsSince(acquire_started, frame_ready);
         checkHr(duplication->ReleaseFrame(), "ReleaseFrame");
         frame_acquired = false;
         return packet;
@@ -590,6 +674,7 @@ struct DesktopDuplicationCapture::Impl {
     ComPtr<IDXGIOutputDuplication> duplication;
     ComPtr<ID3D11Texture2D> cached_desktop;
     ComPtr<ID3D11Texture2D> crop_staging;
+    std::atomic<int> cached_frame_timeout_ms{1};
 #if defined(DELTA_WITH_CUDA_PIPELINE)
     bool cuda_ready = false;
     int cuda_device = -1;
@@ -664,6 +749,12 @@ void DesktopDuplicationCapture::setGpuConsumerStream(void* stream) {
 #else
     (void)stream;
 #endif
+}
+
+void DesktopDuplicationCapture::setCachedFrameTimeoutMs(const int timeout_ms) {
+    if (impl_) {
+        impl_->cached_frame_timeout_ms.store(std::max(0, timeout_ms), std::memory_order_relaxed);
+    }
 }
 
 void DesktopDuplicationCapture::close() {

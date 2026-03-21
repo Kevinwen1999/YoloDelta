@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -105,8 +106,8 @@ struct SharedState {
     std::pair<int, int> last_target_full{1280, 720};
     std::pair<int, int> capture_focus_full{1280, 720};
     SystemClock::time_point target_time{};
-    float ctrl_sent_vx_ema = 0.0F;
-    float ctrl_sent_vy_ema = 0.0F;
+    std::atomic<float> ctrl_sent_vx_ema{0.0F};
+    std::atomic<float> ctrl_sent_vy_ema{0.0F};
     SteadyClock::time_point ctrl_last_send_tick{};
     std::string tracking_strategy = "raw_delta";
 };

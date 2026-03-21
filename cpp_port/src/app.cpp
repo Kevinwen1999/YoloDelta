@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -19,6 +20,13 @@ struct RuntimePerfWindow {
     std::uint64_t capture_frames = 0;
     std::uint64_t capture_none = 0;
     double capture_grab_s = 0.0;
+    double capture_acquire_s = 0.0;
+    double capture_d3d_copy_s = 0.0;
+    double capture_d3d_sync_s = 0.0;
+    double capture_cuda_copy_s = 0.0;
+    double capture_cpu_copy_s = 0.0;
+    double capture_cached_reuse_s = 0.0;
+    std::uint64_t capture_cached_frames = 0;
 
     std::uint64_t infer_frames = 0;
     std::uint64_t infer_stale = 0;
@@ -26,8 +34,13 @@ struct RuntimePerfWindow {
     double infer_loop_s = 0.0;
     double infer_frame_age_s = 0.0;
     double infer_frame_age_max_s = 0.0;
-    std::uint64_t infer_tracker_calls = 0;
-    double infer_tracker_s = 0.0;
+    double infer_select_s = 0.0;
+    double infer_tracker_update_s = 0.0;
+    double infer_aim_predict_s = 0.0;
+    double infer_aim_pid_s = 0.0;
+    double infer_aim_sync_s = 0.0;
+    double infer_preview_s = 0.0;
+    double infer_queue_s = 0.0;
     std::uint64_t infer_backend_samples = 0;
     double infer_backend_pre_s = 0.0;
     double infer_backend_exec_s = 0.0;
@@ -55,6 +68,13 @@ struct RuntimePerfWindow {
         capture_frames = 0;
         capture_none = 0;
         capture_grab_s = 0.0;
+        capture_acquire_s = 0.0;
+        capture_d3d_copy_s = 0.0;
+        capture_d3d_sync_s = 0.0;
+        capture_cuda_copy_s = 0.0;
+        capture_cpu_copy_s = 0.0;
+        capture_cached_reuse_s = 0.0;
+        capture_cached_frames = 0;
 
         infer_frames = 0;
         infer_stale = 0;
@@ -62,8 +82,13 @@ struct RuntimePerfWindow {
         infer_loop_s = 0.0;
         infer_frame_age_s = 0.0;
         infer_frame_age_max_s = 0.0;
-        infer_tracker_calls = 0;
-        infer_tracker_s = 0.0;
+        infer_select_s = 0.0;
+        infer_tracker_update_s = 0.0;
+        infer_aim_predict_s = 0.0;
+        infer_aim_pid_s = 0.0;
+        infer_aim_sync_s = 0.0;
+        infer_preview_s = 0.0;
+        infer_queue_s = 0.0;
         infer_backend_samples = 0;
         infer_backend_pre_s = 0.0;
         infer_backend_exec_s = 0.0;
@@ -213,7 +238,8 @@ DebugPreviewSnapshot makeInactiveDebugPreviewSnapshot(const std::pair<int, int> 
 DebugPreviewSnapshot makeDebugPreviewSnapshot(
     const CaptureRegion& capture_region,
     const std::pair<int, int> center,
-    const std::vector<Detection>& detections) {
+    const std::vector<Detection>& detections,
+    const std::optional<Detection>& selected_detection = std::nullopt) {
     DebugPreviewSnapshot snapshot{};
     snapshot.active = true;
     snapshot.capture_region = capture_region;
@@ -224,19 +250,13 @@ DebugPreviewSnapshot makeDebugPreviewSnapshot(
             .bbox = detection.bbox,
             .cls = detection.cls,
             .conf = detection.conf,
-            .selected = false,
+            .selected = selected_detection.has_value()
+                && selected_detection->bbox == detection.bbox
+                && selected_detection->cls == detection.cls
+                && std::abs(selected_detection->conf - detection.conf) <= 1e-6F,
         });
     }
     return snapshot;
-}
-
-void markDebugPreviewSelected(DebugPreviewSnapshot& snapshot, const Detection& detection) {
-    for (auto& candidate : snapshot.detections) {
-        if (candidate.bbox == detection.bbox && candidate.cls == detection.cls) {
-            candidate.selected = true;
-            return;
-        }
-    }
 }
 
 void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, const TrackingStrategy strategy) {
@@ -252,26 +272,130 @@ void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, 
 }
 
 void resetEgoMotionStateLocked(SharedState& shared) {
-    shared.ctrl_sent_vx_ema = 0.0F;
-    shared.ctrl_sent_vy_ema = 0.0F;
+    shared.ctrl_sent_vx_ema.store(0.0F, std::memory_order_relaxed);
+    shared.ctrl_sent_vy_ema.store(0.0F, std::memory_order_relaxed);
     shared.ctrl_last_send_tick = {};
 }
 
 void decayEgoMotionStateLocked(SharedState& shared) {
-    shared.ctrl_sent_vx_ema *= kEgoMotionCompDecay;
-    shared.ctrl_sent_vy_ema *= kEgoMotionCompDecay;
-    if (std::abs(shared.ctrl_sent_vx_ema) < 1e-6F) {
-        shared.ctrl_sent_vx_ema = 0.0F;
+    float ctrl_sent_vx_ema = shared.ctrl_sent_vx_ema.load(std::memory_order_relaxed) * kEgoMotionCompDecay;
+    float ctrl_sent_vy_ema = shared.ctrl_sent_vy_ema.load(std::memory_order_relaxed) * kEgoMotionCompDecay;
+    if (std::abs(ctrl_sent_vx_ema) < 1e-6F) {
+        ctrl_sent_vx_ema = 0.0F;
     }
-    if (std::abs(shared.ctrl_sent_vy_ema) < 1e-6F) {
-        shared.ctrl_sent_vy_ema = 0.0F;
+    if (std::abs(ctrl_sent_vy_ema) < 1e-6F) {
+        ctrl_sent_vy_ema = 0.0F;
     }
+    shared.ctrl_sent_vx_ema.store(ctrl_sent_vx_ema, std::memory_order_relaxed);
+    shared.ctrl_sent_vy_ema.store(ctrl_sent_vy_ema, std::memory_order_relaxed);
+}
+
+struct InferenceAppTimings {
+    double select_s = 0.0;
+    double tracker_update_s = 0.0;
+    double aim_predict_s = 0.0;
+    double aim_pid_s = 0.0;
+    double aim_sync_s = 0.0;
+    double preview_s = 0.0;
+    double queue_s = 0.0;
+};
+
+std::optional<StickyTargetPick> pickAssociatedStickyTarget(
+    const std::vector<Detection>& detections,
+    const int center_x,
+    const int center_y,
+    const std::pair<float, float>& assoc_ref,
+    const float assoc_limit,
+    const std::optional<std::pair<float, float>>& locked_point,
+    const std::optional<std::array<int, 4>>& last_target_bbox,
+    const float sticky_bias_px) {
+    StickyTargetPick result{};
+    bool found_any = false;
+    int locked_idx = -1;
+    float best_locked_distance = std::numeric_limits<float>::max();
+
+    for (int i = 0; i < static_cast<int>(detections.size()); ++i) {
+        const auto& detection = detections[static_cast<size_t>(i)];
+        const bool near_ref = pointToBoxDistance(detection.bbox, assoc_ref.first, assoc_ref.second) <= assoc_limit;
+        const bool overlaps_prev = last_target_bbox.has_value()
+            && bboxIou(detection.bbox, *last_target_bbox) >= kTrackerReinitMinIou;
+        if (!(near_ref || overlaps_prev)) {
+            continue;
+        }
+        found_any = true;
+        if (!locked_point.has_value()) {
+            continue;
+        }
+        const float dx = detection.x - locked_point->first;
+        const float dy = detection.y - locked_point->second;
+        const float locked_distance = std::sqrt((dx * dx) + (dy * dy));
+        if (locked_distance < best_locked_distance) {
+            best_locked_distance = locked_distance;
+            locked_idx = i;
+        }
+    }
+
+    if (!found_any) {
+        return std::nullopt;
+    }
+
+    float best_score = std::numeric_limits<float>::max();
+    float best_anchor_score = std::numeric_limits<float>::max();
+    float best_conf = -1.0F;
+    int best_idx = -1;
+
+    for (int i = 0; i < static_cast<int>(detections.size()); ++i) {
+        const auto& detection = detections[static_cast<size_t>(i)];
+        const bool near_ref = pointToBoxDistance(detection.bbox, assoc_ref.first, assoc_ref.second) <= assoc_limit;
+        const bool overlaps_prev = last_target_bbox.has_value()
+            && bboxIou(detection.bbox, *last_target_bbox) >= kTrackerReinitMinIou;
+        if (!(near_ref || overlaps_prev)) {
+            continue;
+        }
+
+        float score = pointToBoxDistance(detection.bbox, static_cast<float>(center_x), static_cast<float>(center_y));
+        const float anchor_score = std::sqrt(
+            ((detection.x - static_cast<float>(center_x)) * (detection.x - static_cast<float>(center_x)))
+            + ((detection.y - static_cast<float>(center_y)) * (detection.y - static_cast<float>(center_y))));
+        if (i == locked_idx) {
+            score -= sticky_bias_px;
+        }
+        if (
+            score < best_score
+            || (
+                std::abs(score - best_score) <= 1e-6F
+                && (
+                    anchor_score < best_anchor_score
+                    || (std::abs(anchor_score - best_anchor_score) <= 1e-6F && detection.conf > best_conf)
+                )
+            )
+        ) {
+            best_idx = i;
+            best_score = score;
+            best_anchor_score = anchor_score;
+            best_conf = detection.conf;
+        }
+    }
+
+    if (best_idx < 0) {
+        return std::nullopt;
+    }
+    result.detection = detections[static_cast<size_t>(best_idx)];
+    result.switched = locked_idx >= 0 && best_idx != locked_idx;
+    return result;
 }
 
 struct PerfLogSnapshot {
     double elapsed_s = 0.0;
     double cap_fps = 0.0;
     double cap_grab_ms = 0.0;
+    double cap_acquire_ms = 0.0;
+    double cap_d3d_copy_ms = 0.0;
+    double cap_d3d_sync_ms = 0.0;
+    double cap_cuda_copy_ms = 0.0;
+    double cap_cpu_copy_ms = 0.0;
+    double cap_cached_reuse_ms = 0.0;
+    double cap_cached_rate = 0.0;
     std::uint64_t cap_none = 0;
     double infer_fps = 0.0;
     double infer_loop_ms = 0.0;
@@ -279,8 +403,13 @@ struct PerfLogSnapshot {
     double infer_age_max_ms = 0.0;
     std::uint64_t infer_stale = 0;
     double infer_lock_rate = 0.0;
-    double tracker_hz = 0.0;
-    double tracker_ms = 0.0;
+    double infer_select_ms = 0.0;
+    double infer_tracker_update_ms = 0.0;
+    double infer_aim_predict_ms = 0.0;
+    double infer_aim_pid_ms = 0.0;
+    double infer_aim_sync_ms = 0.0;
+    double infer_preview_ms = 0.0;
+    double infer_queue_ms = 0.0;
     std::uint64_t infer_backend_samples = 0;
     double infer_backend_pre_ms = 0.0;
     double infer_backend_exec_ms = 0.0;
@@ -297,7 +426,11 @@ struct PerfLogSnapshot {
     std::uint64_t control_mode_drop = 0;
 };
 
-void recordCapturePerf(RuntimePerfWindow& perf, const double grab_s, const bool is_none) {
+void recordCapturePerf(
+    RuntimePerfWindow& perf,
+    const double grab_s,
+    const bool is_none,
+    const std::optional<CaptureTimings>& timings = std::nullopt) {
     std::lock_guard<std::mutex> lock(perf.mutex);
     if (is_none) {
         ++perf.capture_none;
@@ -305,6 +438,17 @@ void recordCapturePerf(RuntimePerfWindow& perf, const double grab_s, const bool 
     }
     ++perf.capture_frames;
     perf.capture_grab_s += std::max(0.0, grab_s);
+    if (timings.has_value()) {
+        perf.capture_acquire_s += std::max(0.0, timings->acquire_s);
+        perf.capture_d3d_copy_s += std::max(0.0, timings->d3d_copy_s);
+        perf.capture_d3d_sync_s += std::max(0.0, timings->d3d_sync_s);
+        perf.capture_cuda_copy_s += std::max(0.0, timings->cuda_copy_s);
+        perf.capture_cpu_copy_s += std::max(0.0, timings->cpu_copy_s);
+        perf.capture_cached_reuse_s += std::max(0.0, timings->cached_reuse_s);
+        if (timings->used_cached_frame) {
+            ++perf.capture_cached_frames;
+        }
+    }
 }
 
 void recordInferencePerf(
@@ -313,7 +457,7 @@ void recordInferencePerf(
     const double loop_s,
     const bool stale_drop,
     const bool target_found,
-    const double tracker_s,
+    const InferenceAppTimings& app_timings,
     const InferenceTimings& timings,
     const std::optional<double> cmd_latency_s) {
     std::lock_guard<std::mutex> lock(perf.mutex);
@@ -327,10 +471,13 @@ void recordInferencePerf(
     if (target_found) {
         ++perf.infer_found;
     }
-    if (tracker_s > 0.0) {
-        ++perf.infer_tracker_calls;
-        perf.infer_tracker_s += tracker_s;
-    }
+    perf.infer_select_s += std::max(0.0, app_timings.select_s);
+    perf.infer_tracker_update_s += std::max(0.0, app_timings.tracker_update_s);
+    perf.infer_aim_predict_s += std::max(0.0, app_timings.aim_predict_s);
+    perf.infer_aim_pid_s += std::max(0.0, app_timings.aim_pid_s);
+    perf.infer_aim_sync_s += std::max(0.0, app_timings.aim_sync_s);
+    perf.infer_preview_s += std::max(0.0, app_timings.preview_s);
+    perf.infer_queue_s += std::max(0.0, app_timings.queue_s);
     if (timings.preprocess_ms > 0.0 || timings.execute_ms > 0.0 || timings.postprocess_ms > 0.0) {
         ++perf.infer_backend_samples;
         perf.infer_backend_pre_s += timings.preprocess_ms / 1000.0;
@@ -399,6 +546,17 @@ std::optional<PerfLogSnapshot> takePerfSnapshot(RuntimePerfWindow& perf, const d
     snapshot.elapsed_s = elapsed;
     snapshot.cap_fps = elapsed > 0.0 ? static_cast<double>(perf.capture_frames) / elapsed : 0.0;
     snapshot.cap_grab_ms = perf.capture_frames > 0 ? (perf.capture_grab_s * 1000.0 / static_cast<double>(perf.capture_frames)) : 0.0;
+    snapshot.cap_acquire_ms = perf.capture_frames > 0 ? (perf.capture_acquire_s * 1000.0 / static_cast<double>(perf.capture_frames)) : 0.0;
+    snapshot.cap_d3d_copy_ms = perf.capture_frames > 0 ? (perf.capture_d3d_copy_s * 1000.0 / static_cast<double>(perf.capture_frames)) : 0.0;
+    snapshot.cap_d3d_sync_ms = perf.capture_frames > 0 ? (perf.capture_d3d_sync_s * 1000.0 / static_cast<double>(perf.capture_frames)) : 0.0;
+    snapshot.cap_cuda_copy_ms = perf.capture_frames > 0 ? (perf.capture_cuda_copy_s * 1000.0 / static_cast<double>(perf.capture_frames)) : 0.0;
+    snapshot.cap_cpu_copy_ms = perf.capture_frames > 0 ? (perf.capture_cpu_copy_s * 1000.0 / static_cast<double>(perf.capture_frames)) : 0.0;
+    snapshot.cap_cached_reuse_ms = perf.capture_cached_frames > 0
+        ? (perf.capture_cached_reuse_s * 1000.0 / static_cast<double>(perf.capture_cached_frames))
+        : 0.0;
+    snapshot.cap_cached_rate = perf.capture_frames > 0
+        ? static_cast<double>(perf.capture_cached_frames) / static_cast<double>(perf.capture_frames)
+        : 0.0;
     snapshot.cap_none = perf.capture_none;
     snapshot.infer_fps = elapsed > 0.0 ? static_cast<double>(perf.infer_frames) / elapsed : 0.0;
     snapshot.infer_loop_ms = perf.infer_frames > 0 ? (perf.infer_loop_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
@@ -406,8 +564,13 @@ std::optional<PerfLogSnapshot> takePerfSnapshot(RuntimePerfWindow& perf, const d
     snapshot.infer_age_max_ms = perf.infer_frame_age_max_s * 1000.0;
     snapshot.infer_stale = perf.infer_stale;
     snapshot.infer_lock_rate = perf.infer_frames > 0 ? static_cast<double>(perf.infer_found) / static_cast<double>(perf.infer_frames) : 0.0;
-    snapshot.tracker_hz = elapsed > 0.0 ? static_cast<double>(perf.infer_tracker_calls) / elapsed : 0.0;
-    snapshot.tracker_ms = perf.infer_tracker_calls > 0 ? (perf.infer_tracker_s * 1000.0 / static_cast<double>(perf.infer_tracker_calls)) : 0.0;
+    snapshot.infer_select_ms = perf.infer_frames > 0 ? (perf.infer_select_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
+    snapshot.infer_tracker_update_ms = perf.infer_frames > 0 ? (perf.infer_tracker_update_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
+    snapshot.infer_aim_predict_ms = perf.infer_frames > 0 ? (perf.infer_aim_predict_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
+    snapshot.infer_aim_pid_ms = perf.infer_frames > 0 ? (perf.infer_aim_pid_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
+    snapshot.infer_aim_sync_ms = perf.infer_frames > 0 ? (perf.infer_aim_sync_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
+    snapshot.infer_preview_ms = perf.infer_frames > 0 ? (perf.infer_preview_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
+    snapshot.infer_queue_ms = perf.infer_frames > 0 ? (perf.infer_queue_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
     snapshot.infer_backend_samples = perf.infer_backend_samples;
     snapshot.infer_backend_pre_ms = perf.infer_backend_samples > 0 ? (perf.infer_backend_pre_s * 1000.0 / static_cast<double>(perf.infer_backend_samples)) : 0.0;
     snapshot.infer_backend_exec_ms = perf.infer_backend_samples > 0 ? (perf.infer_backend_exec_s * 1000.0 / static_cast<double>(perf.infer_backend_samples)) : 0.0;
@@ -440,6 +603,9 @@ DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
       perf_(std::make_unique<RuntimePerfWindow>()) {
     if (capture_ && inference_) {
         capture_->setGpuConsumerStream(inference_->gpuInputStream());
+    }
+    if (capture_) {
+        capture_->setCachedFrameTimeoutMs(runtime_store_.snapshot().capture_cached_timeout_ms);
     }
     const auto center = screenCenter(config_);
     std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -556,10 +722,11 @@ void DeltaApp::captureLoop() {
             if (prefer_gpu) {
                 const auto grab_start = SteadyClock::now();
                 if (std::optional<GpuFramePacket> packet = capture_->grabGpu(region); packet.has_value()) {
+                    const CaptureTimings timings = packet->timings;
                     frame_slot_.clear();
                     gpu_frame_slot_.put(std::move(*packet));
                     if (perf_) {
-                        recordCapturePerf(*perf_, secondsSince(grab_start, SteadyClock::now()), false);
+                        recordCapturePerf(*perf_, secondsSince(grab_start, SteadyClock::now()), false, timings);
                     }
                     captured = true;
                 } else if (perf_) {
@@ -571,9 +738,10 @@ void DeltaApp::captureLoop() {
                 const auto grab_start = SteadyClock::now();
                 if (std::optional<FramePacket> packet = capture_->grab(region); packet.has_value()) {
                     gpu_frame_slot_.clear();
+                    const CaptureTimings timings = packet->timings;
                     frame_slot_.put(std::move(*packet));
                     if (perf_) {
-                        recordCapturePerf(*perf_, secondsSince(grab_start, SteadyClock::now()), false);
+                        recordCapturePerf(*perf_, secondsSince(grab_start, SteadyClock::now()), false, timings);
                     }
                     captured = true;
                 } else if (perf_) {
@@ -618,6 +786,9 @@ void DeltaApp::inferenceLoop() {
             runtime.anti_windup_gain,
             runtime.derivative_alpha,
             runtime.output_limit);
+        if (capture_) {
+            capture_->setCachedFrameTimeoutMs(runtime.capture_cached_timeout_ms);
+        }
 
         std::uint64_t last_pid_version = runtime_store_.version();
         std::uint64_t last_reset_token = runtime_store_.resetToken();
@@ -680,6 +851,9 @@ void DeltaApp::inferenceLoop() {
                     runtime.anti_windup_gain,
                     runtime.derivative_alpha,
                     runtime.output_limit);
+                if (capture_) {
+                    capture_->setCachedFrameTimeoutMs(runtime.capture_cached_timeout_ms);
+                }
                 last_pid_version = pid_version;
             }
 
@@ -763,6 +937,7 @@ void DeltaApp::inferenceLoop() {
             }
             preview_idle_state = false;
 
+            InferenceAppTimings app_timings{};
             std::optional<FramePacket> cpu_packet;
             std::optional<GpuFramePacket> gpu_packet;
             if (inference_->supportsGpuInput()) {
@@ -780,7 +955,14 @@ void DeltaApp::inferenceLoop() {
                     cpu_packet = capture_->grab(region);
                 }
                 if (perf_) {
-                    recordCapturePerf(*perf_, secondsSince(grab_start, SteadyClock::now()), !(gpu_packet.has_value() || cpu_packet.has_value()));
+                    const std::optional<CaptureTimings> capture_timings = gpu_packet.has_value()
+                        ? std::optional<CaptureTimings>(gpu_packet->timings)
+                        : (cpu_packet.has_value() ? std::optional<CaptureTimings>(cpu_packet->timings) : std::nullopt);
+                    recordCapturePerf(
+                        *perf_,
+                        secondsSince(grab_start, SteadyClock::now()),
+                        !(gpu_packet.has_value() || cpu_packet.has_value()),
+                        capture_timings);
                 }
             } else {
                 cpu_packet = frame_slot_.try_take();
@@ -790,11 +972,17 @@ void DeltaApp::inferenceLoop() {
                 continue;
             }
 
-            const SteadyClock::time_point frame_time = gpu_packet.has_value() ? gpu_packet->frame_time : cpu_packet->frame_time;
+            const CaptureRegion capture_region = gpu_packet.has_value() ? gpu_packet->capture : cpu_packet->capture;
+            const SteadyClock::time_point frame_ready = gpu_packet.has_value() ? gpu_packet->frame_ready : cpu_packet->frame_ready;
+            const SteadyClock::time_point frame_time = frame_ready != SteadyClock::time_point{}
+                ? frame_ready
+                : (gpu_packet.has_value() ? gpu_packet->frame_time : cpu_packet->frame_time);
+            const SteadyClock::time_point capture_done = gpu_packet.has_value() ? gpu_packet->capture_done : cpu_packet->capture_done;
+            const SteadyClock::time_point acquire_started = gpu_packet.has_value() ? gpu_packet->acquire_started : cpu_packet->acquire_started;
             const double frame_age = secondsSince(frame_time, SteadyClock::now());
             if (frame_age > kMaxFrameAgeSeconds) {
                 if (perf_) {
-                    recordInferencePerf(*perf_, frame_age, secondsSince(loop_start, SteadyClock::now()), true, false, 0.0, {}, std::nullopt);
+                    recordInferencePerf(*perf_, frame_age, secondsSince(loop_start, SteadyClock::now()), true, false, app_timings, {}, std::nullopt);
                 }
                 continue;
             }
@@ -820,7 +1008,6 @@ void DeltaApp::inferenceLoop() {
                 inference_result = inference_->predict(*cpu_packet, target_cls);
             }
 
-            const CaptureRegion capture_region = gpu_packet.has_value() ? gpu_packet->capture : cpu_packet->capture;
             std::vector<Detection> detections = inference_result.detections;
             for (auto& detection : detections) {
                 detection.bbox[0] += capture_region.left;
@@ -840,11 +1027,7 @@ void DeltaApp::inferenceLoop() {
                     }),
                 detections.end());
 
-            std::optional<DebugPreviewSnapshot> preview_snapshot;
-            if (debug_preview_ && debug_preview_enabled) {
-                preview_snapshot = makeDebugPreviewSnapshot(capture_region, center, detections);
-            }
-
+            const auto select_start = SteadyClock::now();
             std::optional<std::pair<float, float>> locked_point;
             if (tracking_enabled && tracker->initialized()) {
                 const TrackerState tracker_state = tracker->state();
@@ -855,9 +1038,6 @@ void DeltaApp::inferenceLoop() {
                 && prev_target_time != SystemClock::time_point{}
                 && secondsSince(prev_target_time, SystemClock::now()) <= kTargetTimeoutSeconds) {
                 locked_point = std::make_pair(static_cast<float>(prev_target_full.first), static_cast<float>(prev_target_full.second));
-            }
-            if (preview_snapshot.has_value() && locked_point.has_value()) {
-                preview_snapshot->locked_point = *locked_point;
             }
 
             std::optional<StickyTargetPick> sticky;
@@ -881,25 +1061,17 @@ void DeltaApp::inferenceLoop() {
                         kAssocMaxJumpPad,
                         std::sqrt((assoc_state.vx * assoc_state.vx) + (assoc_state.vy * assoc_state.vy)) * kAssocSpeedJumpGain);
                 }
-                std::vector<Detection> associated;
-                associated.reserve(detections.size());
-                for (const auto& detection : detections) {
-                    const bool near_ref = pointToBoxDistance(detection.bbox, assoc_ref.first, assoc_ref.second) <= assoc_limit;
-                    const bool overlaps_prev = last_target_bbox.has_value()
-                        && bboxIou(detection.bbox, *last_target_bbox) >= kTrackerReinitMinIou;
-                    if (near_ref || overlaps_prev) {
-                        associated.push_back(detection);
-                    }
-                }
-                if (!associated.empty()) {
-                    sticky = pickStickyTarget(
-                        associated,
-                        center.first,
-                        center.second,
-                        locked_point,
-                        runtime.sticky_bias_px);
-                }
+                sticky = pickAssociatedStickyTarget(
+                    detections,
+                    center.first,
+                    center.second,
+                    assoc_ref,
+                    assoc_limit,
+                    locked_point,
+                    last_target_bbox,
+                    runtime.sticky_bias_px);
             }
+            app_timings.select_s = secondsSince(select_start, SteadyClock::now());
 
             const auto tracker_start = SteadyClock::now();
             const SteadyClock::time_point now_tick = SteadyClock::now();
@@ -930,9 +1102,6 @@ void DeltaApp::inferenceLoop() {
                 last_box_w = static_cast<float>(std::max(1, sticky->detection->bbox[2] - sticky->detection->bbox[0]));
                 last_box_h = static_cast<float>(std::max(1, sticky->detection->bbox[3] - sticky->detection->bbox[1]));
                 last_target_bbox = sticky->detection->bbox;
-                if (preview_snapshot.has_value()) {
-                    markDebugPreviewSelected(*preview_snapshot, *sticky->detection);
-                }
                 if (target_switched && runtime.ego_motion_reset_on_switch) {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     resetEgoMotionStateLocked(shared_);
@@ -942,11 +1111,22 @@ void DeltaApp::inferenceLoop() {
                         std::abs(sticky->detection->x - static_cast<float>(center.first)) <= (last_box_w * 0.5F)
                         && std::abs(sticky->detection->y - static_cast<float>(center.second)) <= (last_box_h * 0.5F);
                 }
+                app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
             } else if (!tracking_enabled || !tracker->initialized()) {
+                app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     clearAimStateLocked(shared_, center, runtime.tracking_strategy);
+                }
+                if (debug_preview_ && debug_preview_enabled) {
+                    const auto preview_start = SteadyClock::now();
+                    DebugPreviewSnapshot preview_snapshot = makeDebugPreviewSnapshot(capture_region, center, detections);
+                    if (locked_point.has_value()) {
+                        preview_snapshot.locked_point = *locked_point;
+                    }
+                    debug_preview_->publish(std::move(preview_snapshot));
+                    app_timings.preview_s = secondsSince(preview_start, SteadyClock::now());
                 }
                 if (perf_) {
                     recordInferencePerf(
@@ -955,17 +1135,15 @@ void DeltaApp::inferenceLoop() {
                         secondsSince(loop_start, SteadyClock::now()),
                         false,
                         false,
-                        secondsSince(tracker_start, SteadyClock::now()),
+                        app_timings,
                         inference_result.timings,
                         std::nullopt);
-                }
-                if (debug_preview_ && preview_snapshot.has_value()) {
-                    debug_preview_->publish(std::move(*preview_snapshot));
                 }
                 continue;
             } else {
                 ++lost_frames;
                 if (lost_frames > runtime.target_max_lost_frames) {
+                    app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
                     tracker->reset();
                     pid_x.reset();
                     pid_y.reset();
@@ -980,6 +1158,15 @@ void DeltaApp::inferenceLoop() {
                         std::lock_guard<std::mutex> lock(shared_.mutex);
                         clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                     }
+                    if (debug_preview_ && debug_preview_enabled) {
+                        const auto preview_start = SteadyClock::now();
+                        DebugPreviewSnapshot preview_snapshot = makeDebugPreviewSnapshot(capture_region, center, detections);
+                        if (locked_point.has_value()) {
+                            preview_snapshot.locked_point = *locked_point;
+                        }
+                        debug_preview_->publish(std::move(preview_snapshot));
+                        app_timings.preview_s = secondsSince(preview_start, SteadyClock::now());
+                    }
                     if (perf_) {
                         recordInferencePerf(
                             *perf_,
@@ -987,26 +1174,20 @@ void DeltaApp::inferenceLoop() {
                             secondsSince(loop_start, SteadyClock::now()),
                             false,
                             false,
-                            secondsSince(tracker_start, SteadyClock::now()),
+                            app_timings,
                             inference_result.timings,
                             std::nullopt);
                     }
-                    if (debug_preview_ && preview_snapshot.has_value()) {
-                        debug_preview_->publish(std::move(*preview_snapshot));
-                    }
                     continue;
                 }
+                app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
             }
 
+            const auto aim_predict_start = SteadyClock::now();
             const TrackerState tracker_state = tracker->state();
             const float ff_scale = tracker->feedforwardScale();
-            float ctrl_sent_vx_ema = 0.0F;
-            float ctrl_sent_vy_ema = 0.0F;
-            {
-                std::lock_guard<std::mutex> lock(shared_.mutex);
-                ctrl_sent_vx_ema = shared_.ctrl_sent_vx_ema;
-                ctrl_sent_vy_ema = shared_.ctrl_sent_vy_ema;
-            }
+            const float ctrl_sent_vx_ema = shared_.ctrl_sent_vx_ema.load(std::memory_order_relaxed);
+            const float ctrl_sent_vy_ema = shared_.ctrl_sent_vy_ema.load(std::memory_order_relaxed);
             float vx = tracker_state.vx;
             float vy = tracker_state.vy;
             const float prediction_time = std::max(0.0F, runtime.prediction_time);
@@ -1062,9 +1243,9 @@ void DeltaApp::inferenceLoop() {
             const float predicted_x = tracker_state.x + (vx * prediction_time);
             const float predicted_y = tracker_state.y + (vy * prediction_time);
             const float aim_y = predicted_y;
-            if (preview_snapshot.has_value()) {
-                preview_snapshot->predicted_point = std::make_pair(predicted_x, aim_y);
-            }
+            app_timings.aim_predict_s = secondsSince(aim_predict_start, SteadyClock::now());
+
+            const auto aim_pid_start = SteadyClock::now();
             const float pid_dt = clamp(
                 last_pid_tick == SteadyClock::time_point{}
                     ? kMinTrackDt
@@ -1089,12 +1270,13 @@ void DeltaApp::inferenceLoop() {
             const int dy = engage_active
                 ? static_cast<int>(std::lround(clamp(desired_y, -static_cast<float>(runtime.raw_max_step_y), static_cast<float>(runtime.raw_max_step_y))))
                 : 0;
+            app_timings.aim_pid_s = secondsSince(aim_pid_start, SteadyClock::now());
 
+            const auto aim_sync_start = SteadyClock::now();
             const int focus_x = clamp(static_cast<int>(std::lround(tracker_state.x)), 0, config_.screen_w - 1);
             const int focus_y = clamp(static_cast<int>(std::lround(tracker_state.y)), 0, config_.screen_h - 1);
             const int selected_cls = active_target_cls != -1 ? active_target_cls : target_cls;
             const auto now_system = SystemClock::now();
-            const double tracker_elapsed = secondsSince(tracker_start, SteadyClock::now());
 
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1108,34 +1290,56 @@ void DeltaApp::inferenceLoop() {
                 shared_.target_time = now_system;
                 shared_.tracking_strategy = trackingStrategyName(runtime.tracking_strategy);
             }
-            if (preview_snapshot.has_value()) {
-                preview_snapshot->target_found = true;
-                preview_snapshot->target_cls = selected_cls;
-                preview_snapshot->target_speed = speed;
-                debug_preview_->publish(std::move(*preview_snapshot));
+            app_timings.aim_sync_s = secondsSince(aim_sync_start, SteadyClock::now());
+
+            if (debug_preview_ && debug_preview_enabled) {
+                const auto preview_start = SteadyClock::now();
+                DebugPreviewSnapshot preview_snapshot = makeDebugPreviewSnapshot(
+                    capture_region,
+                    center,
+                    detections,
+                    sticky.has_value() ? sticky->detection : std::nullopt);
+                if (locked_point.has_value()) {
+                    preview_snapshot.locked_point = *locked_point;
+                }
+                preview_snapshot.predicted_point = std::make_pair(predicted_x, aim_y);
+                preview_snapshot.target_found = true;
+                preview_snapshot.target_cls = selected_cls;
+                preview_snapshot.target_speed = speed;
+                debug_preview_->publish(std::move(preview_snapshot));
+                app_timings.preview_s = secondsSince(preview_start, SteadyClock::now());
             }
 
+            const auto queue_start = SteadyClock::now();
             if (engage_active || trigger_fire) {
                 command_slot_.put(CommandPacket{
                     .dx = dx,
                     .dy = dy,
+                    .acquire_started = acquire_started,
+                    .frame_ready = frame_ready,
+                    .capture_done = capture_done,
+                    .cmd_generated = queue_start,
                     .generated_at = now_system,
                     .frame_time = gpu_packet.has_value() ? gpu_packet->capture_time : cpu_packet->capture_time,
                     .capture_time = gpu_packet.has_value() ? gpu_packet->capture_time : cpu_packet->capture_time,
+                    .target_detected = true,
                     .synthetic_recoil = false,
                     .trigger_fire = trigger_fire,
                 });
+                app_timings.queue_s = secondsSince(queue_start, SteadyClock::now());
             }
             if (perf_) {
+                const SteadyClock::time_point pipe_origin = capture_done != SteadyClock::time_point{} ? capture_done : frame_time;
+                const SteadyClock::time_point pipe_end = SteadyClock::now();
                 recordInferencePerf(
                     *perf_,
                     frame_age,
                     secondsSince(loop_start, SteadyClock::now()),
                     false,
                     true,
-                    tracker_elapsed,
+                    app_timings,
                     inference_result.timings,
-                    secondsSince(gpu_packet.has_value() ? gpu_packet->capture_time : cpu_packet->capture_time, now_system));
+                    pipe_origin == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(pipe_origin, pipe_end)));
             }
         }
     } catch (const std::exception& ex) {
@@ -1163,6 +1367,8 @@ void DeltaApp::controlLoop() {
     SystemClock::time_point last_trigger_click{};
     SteadyClock::time_point last_recoil_integrate_tick{};
     double recoil_carry_y = 0.0;
+    MouseSenderConfig last_sender_config{};
+    bool sender_config_initialized = false;
     const auto center = screenCenter(config_);
 
     for (;;) {
@@ -1250,16 +1456,26 @@ void DeltaApp::controlLoop() {
             playToggleBeep(runtime.triggerbot_enable ? 1600 : 900);
         }
 
-        input_sender_->configure(MouseSenderConfig{
+        const MouseSenderConfig sender_config{
             .gain_x = runtime.sendinput_gain_x,
             .gain_y = runtime.sendinput_gain_y,
             .max_step = runtime.sendinput_max_step,
-        });
+        };
+        if (!sender_config_initialized
+            || sender_config.gain_x != last_sender_config.gain_x
+            || sender_config.gain_y != last_sender_config.gain_y
+            || sender_config.max_step != last_sender_config.max_step) {
+            input_sender_->configure(sender_config);
+            last_sender_config = sender_config;
+            sender_config_initialized = true;
+        }
 
         ToggleState toggles{};
+        bool target_detected = false;
         {
             std::lock_guard<std::mutex> lock(shared_.mutex);
             toggles = shared_.toggles;
+            target_detected = shared_.target_found;
         }
 
         std::optional<CommandPacket> cmd = command_slot_.wait_take_for(kControlCommandWait);
@@ -1274,25 +1490,29 @@ void DeltaApp::controlLoop() {
                 runtime.left_hold_engage_button,
                 toggles.left_pressed,
                 toggles.right_pressed);
-            if (recoil_enabled && toggles.recoil_tune_fallback && toggles.left_pressed && mode_ok && engage_ok) {
+            if (recoil_enabled && toggles.recoil_tune_fallback && target_detected && toggles.left_pressed && mode_ok && engage_ok) {
                 cmd = CommandPacket{
                     .dx = 0,
                     .dy = 0,
+                    .cmd_generated = steady_now,
                     .generated_at = system_now,
                     .frame_time = system_now,
                     .capture_time = system_now,
+                    .target_detected = true,
                     .synthetic_recoil = true,
                     .trigger_fire = false,
                 };
             } else {
-                std::lock_guard<std::mutex> lock(shared_.mutex);
-                decayEgoMotionStateLocked(shared_);
+                {
+                    std::lock_guard<std::mutex> lock(shared_.mutex);
+                    decayEgoMotionStateLocked(shared_);
+                }
                 std::this_thread::sleep_for(kControlIdleSleep);
                 continue;
             }
         }
 
-        if (cmd->generated_at != SystemClock::time_point{} && secondsSince(cmd->generated_at, system_now) > kCommandTimeoutSeconds) {
+        if (cmd->cmd_generated != SteadyClock::time_point{} && secondsSince(cmd->cmd_generated, steady_now) > kCommandTimeoutSeconds) {
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
                 decayEgoMotionStateLocked(shared_);
@@ -1300,13 +1520,13 @@ void DeltaApp::controlLoop() {
             if (perf_) {
                 recordControlPerf(
                     *perf_,
-                    secondsSince(cmd->generated_at, system_now),
+                    secondsSince(cmd->cmd_generated, steady_now),
                     false,
                     0.0,
                     true,
                     false,
-                    cmd->frame_time == SystemClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_time, system_now)),
-                    cmd->capture_time == SystemClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->capture_time, system_now)),
+                    cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_ready, steady_now)),
+                    cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, steady_now)),
                     std::nullopt,
                     std::nullopt);
             }
@@ -1329,13 +1549,13 @@ void DeltaApp::controlLoop() {
             if (perf_) {
                 recordControlPerf(
                     *perf_,
-                    cmd->generated_at == SystemClock::time_point{} ? 0.0 : secondsSince(cmd->generated_at, system_now),
+                    cmd->cmd_generated == SteadyClock::time_point{} ? 0.0 : secondsSince(cmd->cmd_generated, steady_now),
                     false,
                     0.0,
                     false,
                     true,
-                    cmd->frame_time == SystemClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_time, system_now)),
-                    cmd->capture_time == SystemClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->capture_time, system_now)),
+                    cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_ready, steady_now)),
+                    cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, steady_now)),
                     std::nullopt,
                     std::nullopt);
             }
@@ -1349,7 +1569,7 @@ void DeltaApp::controlLoop() {
             && (last_trigger_click == SystemClock::time_point{}
                 || secondsSince(last_trigger_click, system_now) >= runtime.triggerbot_click_cooldown_s);
 
-        const bool recoil_active = recoil_enabled && (toggles.left_pressed || trigger_will_click);
+        const bool recoil_active = recoil_enabled && cmd->target_detected && (toggles.left_pressed || trigger_will_click);
         if (recoil_active) {
             const auto recoil_tick = SteadyClock::now();
             if (last_recoil_integrate_tick != SteadyClock::time_point{}) {
@@ -1385,7 +1605,6 @@ void DeltaApp::controlLoop() {
         }
         const auto send_end_tick = SteadyClock::now();
         const double send_elapsed = secondsSince(send_start, send_end_tick);
-        const auto send_end_system = SystemClock::now();
 
         if (dx == 0 && dy == 0 && !trigger_sent) {
             {
@@ -1395,13 +1614,13 @@ void DeltaApp::controlLoop() {
             if (perf_) {
                 recordControlPerf(
                     *perf_,
-                    cmd->generated_at == SystemClock::time_point{} ? 0.0 : secondsSince(cmd->generated_at, system_now),
+                    cmd->cmd_generated == SteadyClock::time_point{} ? 0.0 : secondsSince(cmd->cmd_generated, steady_now),
                     false,
                     0.0,
                     false,
                     false,
-                    cmd->frame_time == SystemClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_time, system_now)),
-                    cmd->capture_time == SystemClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->capture_time, system_now)),
+                    cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_ready, steady_now)),
+                    cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, steady_now)),
                     std::nullopt,
                     std::nullopt);
             }
@@ -1414,8 +1633,16 @@ void DeltaApp::controlLoop() {
                 const float send_dt = std::max(1e-4F, static_cast<float>(secondsSince(shared_.ctrl_last_send_tick, send_end_tick)));
                 const float sent_vx = clamp(static_cast<float>(dx) / send_dt, -kEgoMotionCompMaxPxS, kEgoMotionCompMaxPxS);
                 const float sent_vy = clamp(static_cast<float>(dy) / send_dt, -kEgoMotionCompMaxPxS, kEgoMotionCompMaxPxS);
-                shared_.ctrl_sent_vx_ema = emaUpdateSigned(shared_.ctrl_sent_vx_ema, sent_vx, kEgoMotionCompAlpha);
-                shared_.ctrl_sent_vy_ema = emaUpdateSigned(shared_.ctrl_sent_vy_ema, sent_vy, kEgoMotionCompAlpha);
+                const float next_vx_ema = emaUpdateSigned(
+                    shared_.ctrl_sent_vx_ema.load(std::memory_order_relaxed),
+                    sent_vx,
+                    kEgoMotionCompAlpha);
+                const float next_vy_ema = emaUpdateSigned(
+                    shared_.ctrl_sent_vy_ema.load(std::memory_order_relaxed),
+                    sent_vy,
+                    kEgoMotionCompAlpha);
+                shared_.ctrl_sent_vx_ema.store(next_vx_ema, std::memory_order_relaxed);
+                shared_.ctrl_sent_vy_ema.store(next_vy_ema, std::memory_order_relaxed);
             }
             shared_.ctrl_last_send_tick = send_end_tick;
         } else if (!trigger_sent) {
@@ -1432,15 +1659,15 @@ void DeltaApp::controlLoop() {
             const bool sent_ok = movement_sent || trigger_sent;
             recordControlPerf(
                 *perf_,
-                cmd->generated_at == SystemClock::time_point{} ? 0.0 : secondsSince(cmd->generated_at, system_now),
+                cmd->cmd_generated == SteadyClock::time_point{} ? 0.0 : secondsSince(cmd->cmd_generated, steady_now),
                 sent_ok,
                 sent_ok ? send_elapsed : 0.0,
                 false,
                 false,
-                cmd->frame_time == SystemClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_time, system_now)),
-                cmd->capture_time == SystemClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->capture_time, system_now)),
-                sent_ok && cmd->frame_time != SystemClock::time_point{} ? std::optional<double>(secondsSince(cmd->frame_time, send_end_system)) : std::nullopt,
-                sent_ok && cmd->capture_time != SystemClock::time_point{} ? std::optional<double>(secondsSince(cmd->capture_time, send_end_system)) : std::nullopt);
+                cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_ready, steady_now)),
+                cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, steady_now)),
+                sent_ok && cmd->frame_ready != SteadyClock::time_point{} ? std::optional<double>(secondsSince(cmd->frame_ready, send_end_tick)) : std::nullopt,
+                sent_ok && cmd->acquire_started != SteadyClock::time_point{} ? std::optional<double>(secondsSince(cmd->acquire_started, send_end_tick)) : std::nullopt);
         }
     }
 }
@@ -1482,11 +1709,24 @@ void DeltaApp::perfLoop() {
 
         std::cout << std::fixed << std::setprecision(2)
                   << "[PERF] "
-                  << "cap=" << snapshot->cap_fps << "fps grab=" << snapshot->cap_grab_ms << "ms none=" << snapshot->cap_none
+                  << "cap=" << snapshot->cap_fps << "fps grab=" << snapshot->cap_grab_ms
+                  << "ms acq/d3d/sync/cuda/cpu=" << snapshot->cap_acquire_ms
+                  << "/" << snapshot->cap_d3d_copy_ms
+                  << "/" << snapshot->cap_d3d_sync_ms
+                  << "/" << snapshot->cap_cuda_copy_ms
+                  << "/" << snapshot->cap_cpu_copy_ms
+                  << "ms cached=" << (snapshot->cap_cached_rate * 100.0)
+                  << "%@" << snapshot->cap_cached_reuse_ms << "ms none=" << snapshot->cap_none
                   << " | inf=" << snapshot->infer_fps << "fps loop=" << snapshot->infer_loop_ms << "ms age="
                   << snapshot->infer_age_ms << "/" << snapshot->infer_age_max_ms << "ms stale=" << snapshot->infer_stale
-                  << " lock=" << (snapshot->infer_lock_rate * 100.0) << "% | trk=" << snapshot->tracker_hz
-                  << "Hz@" << snapshot->tracker_ms << "ms";
+                  << " lock=" << (snapshot->infer_lock_rate * 100.0) << "% | app(sel/trk/pred/pid/sync/prev/q)="
+                  << snapshot->infer_select_ms
+                  << "/" << snapshot->infer_tracker_update_ms
+                  << "/" << snapshot->infer_aim_predict_ms
+                  << "/" << snapshot->infer_aim_pid_ms
+                  << "/" << snapshot->infer_aim_sync_ms
+                  << "/" << snapshot->infer_preview_ms
+                  << "/" << snapshot->infer_queue_ms << "ms";
         if (snapshot->infer_backend_samples > 0) {
             std::cout << " onnx(pre/exec/post)="
                       << snapshot->infer_backend_pre_ms << "/"

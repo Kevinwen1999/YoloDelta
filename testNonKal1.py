@@ -54,8 +54,8 @@ if torch is not None:
         pass
 
 # ---------------- CONFIG ----------------
-MODEL_PATH = r"C:\YOLO\Delta\runs\detect\train2\weights\best.pt"
-IMGSZ = 640  # latency-first input size; fixed-shape ONNX models may override at runtime
+MODEL_PATH = r"C:\YOLO\Delta\runs\detect\train3\weights\best.pt"
+IMGSZ = 416  # latency-first input size; fixed-shape ONNX models may override at runtime
 CONF = 0.2
 DEVICE = "cuda"
 INFER_BACKEND = "auto"   # "auto" | "ultralytics" | "onnxruntime"

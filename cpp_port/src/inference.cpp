@@ -86,6 +86,19 @@ bool envFlag(const char* key) {
     return false;
 }
 
+std::optional<bool> envFlagOptional(const char* key) {
+    if (auto value = envVar(key); value.has_value()) {
+        const std::string lowered = lowerCopy(*value);
+        if (lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on") {
+            return true;
+        }
+        if (lowered == "0" || lowered == "false" || lowered == "no" || lowered == "off") {
+            return false;
+        }
+    }
+    return std::nullopt;
+}
+
 bool hasDllPrefix(const fs::path& dir, const std::string& prefix) {
     if (!directoryExists(dir)) return false;
     std::error_code ec;
@@ -106,6 +119,28 @@ void checkCuda(cudaError_t status, std::string_view what) {
     }
 }
 #endif
+
+size_t tensorElementByteSize(const ONNXTensorElementDataType type) {
+    switch (type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+        return sizeof(float);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+        return sizeof(Ort::Float16_t);
+    default:
+        throw std::runtime_error("Only float32 and float16 ONNX tensors are supported.");
+    }
+}
+
+size_t tensorElementCount(const std::vector<int64_t>& shape) {
+    size_t count = 1;
+    for (const int64_t dim : shape) {
+        if (dim <= 0) {
+            return 0;
+        }
+        count *= static_cast<size_t>(dim);
+    }
+    return count;
+}
 
 void addAncestorCandidates(std::vector<fs::path>& out, fs::path start, const std::vector<fs::path>& suffixes) {
     for (int depth = 0; depth < 6 && !start.empty(); ++depth) {
@@ -225,6 +260,17 @@ Detection makeDetection(const Candidate& c) {
 struct OnnxRuntimeEngine::Impl {
     explicit Impl(StaticConfig cfg) : config(std::move(cfg)) { init(); }
     ~Impl() {
+#if defined(DELTA_WITH_CUDA_PIPELINE)
+        gpu_binding.reset();
+        gpu_output_values.clear();
+        gpu_input_value = Ort::Value(nullptr);
+        for (void*& buffer : gpu_output_buffers) {
+            if (buffer != nullptr) {
+                cudaFree(buffer);
+                buffer = nullptr;
+            }
+        }
+#endif
         session.reset();
         device_memory_info.reset();
         memory_info.reset();
@@ -263,6 +309,10 @@ struct OnnxRuntimeEngine::Impl {
     std::string input_name;
     std::vector<std::string> output_names;
     std::vector<const char*> output_name_ptrs;
+    std::vector<std::vector<int64_t>> output_shapes;
+    std::vector<ONNXTensorElementDataType> output_types;
+    std::vector<size_t> output_tensor_bytes;
+    std::vector<size_t> output_element_counts;
     std::array<int64_t, 4> input_shape{1, 3, 0, 0};
     ONNXTensorElementDataType input_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
     int input_w = 0;
@@ -272,10 +322,27 @@ struct OnnxRuntimeEngine::Impl {
     std::vector<float> input_f32;
     std::vector<Ort::Float16_t> input_f16;
     bool session_uses_gpu = false;
+    bool session_uses_tensorrt = false;
     bool gpu_input_ready = false;
+    bool gpu_binding_ready = false;
+    bool cuda_graph_enabled = false;
+    bool ort_cuda_graph_requested = false;
+    bool trt_cuda_graph_requested = false;
+    bool trt_fp16_requested = false;
+    bool trt_outputs_bound_on_device = false;
+    bool output_has_nms = true;
+    bool force_target_class_decode = true;
+    bool output_debug_enabled = envFlag("DELTA_DEBUG_ONNX_OUTPUT");
+    int output_debug_remaining = 6;
     float model_conf_override = -1.0F;
 #if defined(DELTA_WITH_CUDA_PIPELINE)
     void* gpu_input_buffer = nullptr;
+    Ort::Value gpu_input_value{nullptr};
+    std::vector<void*> gpu_output_buffers;
+    std::vector<Ort::Value> gpu_output_values;
+    std::vector<std::vector<float>> gpu_output_host_f32;
+    std::vector<std::vector<Ort::Float16_t>> gpu_output_host_f16;
+    std::unique_ptr<Ort::IoBinding> gpu_binding;
     cudaStream_t ort_stream = nullptr;
 #endif
 #if defined(_WIN32)
@@ -285,6 +352,39 @@ struct OnnxRuntimeEngine::Impl {
 
     void warmup() {
         if (!session) return;
+#if defined(DELTA_WITH_CUDA_PIPELINE)
+        if (session_uses_tensorrt && trt_cuda_graph_requested && gpu_input_ready) {
+            try {
+                for (int i = 0; i < 3; ++i) {
+                    warmupGpu();
+                }
+                if (config.debug_log) {
+                    std::cout << "[inference] TensorRT CUDA graph warmup completed.\n";
+                }
+            } catch (const std::exception& e) {
+                if (config.debug_log) {
+                    std::cout << "[inference] TensorRT CUDA graph warmup failed; continuing without explicit warmup. reason: "
+                              << e.what() << "\n";
+                }
+            }
+            return;
+        }
+        if (cuda_graph_enabled) {
+            try {
+                warmupGpu();
+                if (config.debug_log) {
+                    std::cout << "[inference] CUDA graph warmup completed.\n";
+                }
+            } catch (const std::exception& e) {
+                cuda_graph_enabled = false;
+                if (config.debug_log) {
+                    std::cout << "[inference] CUDA graph warmup failed; continuing without graph replay. reason: "
+                              << e.what() << "\n";
+                }
+            }
+            return;
+        }
+#endif
         FramePacket frame{};
         frame.width = input_w;
         frame.height = input_h;
@@ -310,7 +410,7 @@ struct OnnxRuntimeEngine::Impl {
         result.timings.execute_ms = ms(t2, t3);
         const auto t4 = SteadyClock::now();
         if (!outputs.empty()) {
-            if (config.onnx_output_has_nms) {
+            if (output_has_nms) {
                 if (auto decoded = decodeNms(toFlatTensor(outputs.front()), frame.width, frame.height, target_class); decoded.has_value()) {
                     result.detections = std::move(decoded.value());
                     result.timings.postprocess_ms = ms(t4, SteadyClock::now());
@@ -343,7 +443,12 @@ struct OnnxRuntimeEngine::Impl {
     void createSession(bool use_tensorrt);
     void cacheMetadata();
     void initializeGpuInput();
+    void initializeGpuBindings();
     void preprocess(const FramePacket& frame);
+    void updateGpuInput(const GpuFramePacket& frame);
+    FlatTensor readBoundGpuOutput(size_t index);
+    void maybeLogTensorSummary(const FlatTensor& tensor, std::string_view tag);
+    void warmupGpu();
     Ort::Value makeInput();
     Ort::Value makeGpuInput(const GpuFramePacket& frame);
     std::optional<std::vector<Detection>> decodeNms(const FlatTensor& tensor, int fw, int fh, int target_class) const;
@@ -386,6 +491,8 @@ ProviderPreference OnnxRuntimeEngine::Impl::requestedProvider() const {
 void OnnxRuntimeEngine::Impl::init() {
     runtime_root = findRuntimeRoot();
     model_path = findModelPath();
+    output_has_nms = envFlagOptional("DELTA_ONNX_OUTPUT_HAS_NMS").value_or(config.onnx_output_has_nms);
+    force_target_class_decode = envFlagOptional("DELTA_ONNX_FORCE_TARGET_CLASS_DECODE").value_or(config.onnx_force_target_class_decode);
     loadRuntime(runtime_root);
     env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "delta-native");
     allocator = std::make_unique<Ort::AllocatorWithDefaultOptions>();
@@ -426,6 +533,7 @@ void OnnxRuntimeEngine::Impl::init() {
     }
     cacheMetadata();
     initializeGpuInput();
+    initializeGpuBindings();
 }
 
 fs::path OnnxRuntimeEngine::Impl::findRuntimeRoot() const {
@@ -598,7 +706,11 @@ void OnnxRuntimeEngine::Impl::createSession(const bool use_tensorrt) {
     so.EnableMemPattern();
     so.EnableCpuMemArena();
     std::vector<std::string> providers;
+    ort_cuda_graph_requested = envFlagOptional("DELTA_ORT_CUDA_GRAPH_ENABLE").value_or(config.onnx_enable_cuda_graph);
+    trt_cuda_graph_requested = envFlagOptional("DELTA_TRT_CUDA_GRAPH_ENABLE").value_or(config.onnx_trt_cuda_graph_enable);
+    trt_fp16_requested = envFlagOptional("DELTA_TRT_FP16_ENABLE").value_or(config.onnx_trt_fp16);
     session_uses_gpu = false;
+    session_uses_tensorrt = false;
     if (wantsCuda()) {
         if (use_tensorrt) {
             Ort::TensorRTProviderOptions trt;
@@ -609,19 +721,20 @@ void OnnxRuntimeEngine::Impl::createSession(const bool use_tensorrt) {
             fs::create_directories(trt_cache, ec);
             trt.Update({
                 {"device_id", std::to_string(config.onnx_cuda_device_id)},
-                {"trt_fp16_enable", config.onnx_trt_fp16 ? "1" : "0"},
+                {"trt_fp16_enable", trt_fp16_requested ? "1" : "0"},
                 {"trt_engine_cache_enable", "1"},
                 {"trt_engine_cache_path", trt_cache.string()},
-                {"trt_cuda_graph_enable", config.onnx_trt_cuda_graph_enable ? "1" : "0"},
+                {"trt_cuda_graph_enable", trt_cuda_graph_requested ? "1" : "0"},
             });
 #if defined(DELTA_WITH_CUDA_PIPELINE)
-            if (ort_stream != nullptr) {
+            if (ort_stream != nullptr && !trt_cuda_graph_requested) {
                 trt.UpdateWithValue("user_compute_stream", ort_stream);
             }
 #endif
             so.AppendExecutionProvider_TensorRT_V2(*trt);
             providers.push_back("TensorrtExecutionProvider");
             session_uses_gpu = true;
+            session_uses_tensorrt = true;
         }
         Ort::CUDAProviderOptions cuda;
         cuda.Update({
@@ -630,7 +743,7 @@ void OnnxRuntimeEngine::Impl::createSession(const bool use_tensorrt) {
             {"cudnn_conv_algo_search", "EXHAUSTIVE"},
             {"do_copy_in_default_stream", "1"},
             {"cudnn_conv_use_max_workspace", "1"},
-            {"enable_cuda_graph", config.onnx_enable_cuda_graph ? "1" : "0"},
+            {"enable_cuda_graph", ort_cuda_graph_requested ? "1" : "0"},
         });
 #if defined(DELTA_WITH_CUDA_PIPELINE)
         if (ort_stream != nullptr) {
@@ -642,6 +755,21 @@ void OnnxRuntimeEngine::Impl::createSession(const bool use_tensorrt) {
         session_uses_gpu = true;
     }
     providers.push_back("CPUExecutionProvider");
+    if (config.debug_log) {
+        std::cout << "[inference] Creating ONNX session with providers: ";
+        for (size_t i = 0; i < providers.size(); ++i) {
+            if (i) std::cout << ", ";
+            std::cout << providers[i];
+        }
+        std::cout << "\n";
+        if (use_tensorrt) {
+            std::cout << "[inference] TensorRT engine initialization can take a while on a new model. "
+                         "Set DELTA_ONNX_PROVIDER=cuda to skip TensorRT.\n";
+            if (trt_cuda_graph_requested && ort_stream != nullptr) {
+                std::cout << "[inference] TensorRT CUDA graph requested; leaving user_compute_stream unset so capture stays inside TensorRT.\n";
+            }
+        }
+    }
     session = std::make_unique<Ort::Session>(*env, model_path.c_str(), so);
     name = "onnxruntime[" + [&]() {
         std::string joined;
@@ -681,9 +809,20 @@ void OnnxRuntimeEngine::Impl::cacheMetadata() {
     }
     output_names.clear();
     output_name_ptrs.clear();
+    output_shapes.clear();
+    output_types.clear();
+    output_tensor_bytes.clear();
+    output_element_counts.clear();
     for (size_t i = 0; i < session->GetOutputCount(); ++i) {
         auto alloc = session->GetOutputNameAllocated(i, *allocator);
         output_names.push_back(alloc.get() ? alloc.get() : ("output_" + std::to_string(i)));
+        auto type_info = session->GetOutputTypeInfo(i);
+        auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+        output_shapes.push_back(tensor_info.GetShape());
+        output_types.push_back(tensor_info.GetElementType());
+        const size_t count = tensorElementCount(output_shapes.back());
+        output_element_counts.push_back(count);
+        output_tensor_bytes.push_back(count == 0 ? 0 : (count * tensorElementByteSize(output_types.back())));
     }
     for (const auto& name_value : output_names) output_name_ptrs.push_back(name_value.c_str());
     if ((input_w != config.imgsz || input_h != config.imgsz) && config.debug_log) {
@@ -694,6 +833,8 @@ void OnnxRuntimeEngine::Impl::cacheMetadata() {
 
 void OnnxRuntimeEngine::Impl::initializeGpuInput() {
     gpu_input_ready = false;
+    gpu_binding_ready = false;
+    cuda_graph_enabled = false;
     if (!session_uses_gpu || !wantsCuda()) {
         return;
     }
@@ -711,6 +852,164 @@ void OnnxRuntimeEngine::Impl::initializeGpuInput() {
 #else
     if (config.debug_log) {
         std::cout << "[inference] Session is GPU-backed, but delta_native was built without DELTA_WITH_CUDA_PIPELINE.\n";
+    }
+#endif
+}
+
+void OnnxRuntimeEngine::Impl::initializeGpuBindings() {
+#if defined(DELTA_WITH_CUDA_PIPELINE)
+    gpu_binding_ready = false;
+    cuda_graph_enabled = false;
+    trt_outputs_bound_on_device = false;
+    gpu_binding.reset();
+    gpu_output_values.clear();
+    gpu_output_host_f32.clear();
+    gpu_output_host_f16.clear();
+    gpu_input_value = Ort::Value(nullptr);
+    for (void*& buffer : gpu_output_buffers) {
+        if (buffer != nullptr) {
+            cudaFree(buffer);
+            buffer = nullptr;
+        }
+    }
+    gpu_output_buffers.clear();
+
+    if (!gpu_input_ready || !device_memory_info || !session) {
+        return;
+    }
+
+    bool outputs_are_static = !output_names.empty();
+    for (size_t i = 0; i < output_names.size(); ++i) {
+        if (output_element_counts[i] == 0 || output_tensor_bytes[i] == 0) {
+            outputs_are_static = false;
+            break;
+        }
+    }
+    if (!outputs_are_static) {
+        if (ort_cuda_graph_requested && config.debug_log) {
+            std::cout << "[inference] CUDA graph requires fixed tensor outputs; leaving graph mode off for this model.\n";
+        }
+        return;
+    }
+
+    gpu_input_value = Ort::Value::CreateTensor(
+        *device_memory_info,
+        gpu_input_buffer,
+        input_tensor_bytes,
+        input_shape.data(),
+        input_shape.size(),
+        input_type);
+
+    if (session_uses_tensorrt) {
+        if (!outputs_are_static) {
+            if (config.debug_log) {
+                std::cout << "[inference] TensorRT path has dynamic outputs; falling back to per-run output allocation.\n";
+            }
+            return;
+        }
+
+        gpu_output_buffers.resize(output_names.size(), nullptr);
+        gpu_output_values.reserve(output_names.size());
+        gpu_output_host_f32.resize(output_names.size());
+        gpu_output_host_f16.resize(output_names.size());
+        for (size_t i = 0; i < output_names.size(); ++i) {
+            if (trt_cuda_graph_requested) {
+                trt_outputs_bound_on_device = true;
+                checkCuda(cudaMalloc(&gpu_output_buffers[i], output_tensor_bytes[i]), "cudaMalloc(trt graph output)");
+                gpu_output_values.emplace_back(Ort::Value::CreateTensor(
+                    *device_memory_info,
+                    gpu_output_buffers[i],
+                    output_tensor_bytes[i],
+                    output_shapes[i].data(),
+                    output_shapes[i].size(),
+                    output_types[i]));
+                if (output_types[i] == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+                    gpu_output_host_f16[i].resize(output_element_counts[i]);
+                } else {
+                    gpu_output_host_f32[i].resize(output_element_counts[i]);
+                }
+            } else if (output_types[i] == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+                gpu_output_host_f16[i].resize(output_element_counts[i]);
+                gpu_output_values.emplace_back(Ort::Value::CreateTensor(
+                    *memory_info,
+                    gpu_output_host_f16[i].data(),
+                    output_tensor_bytes[i],
+                    output_shapes[i].data(),
+                    output_shapes[i].size(),
+                    output_types[i]));
+            } else {
+                gpu_output_host_f32[i].resize(output_element_counts[i]);
+                gpu_output_values.emplace_back(Ort::Value::CreateTensor(
+                    *memory_info,
+                    gpu_output_host_f32[i].data(),
+                    output_tensor_bytes[i],
+                    output_shapes[i].data(),
+                    output_shapes[i].size(),
+                    output_types[i]));
+            }
+        }
+
+        gpu_binding = std::make_unique<Ort::IoBinding>(*session);
+        gpu_binding->BindInput(input_name.c_str(), gpu_input_value);
+        for (size_t i = 0; i < output_names.size(); ++i) {
+            gpu_binding->BindOutput(output_names[i].c_str(), gpu_output_values[i]);
+        }
+        gpu_binding_ready = true;
+        if (config.debug_log) {
+            if (trt_cuda_graph_requested) {
+                std::cout << "[inference] Using persistent GPU input/output binding for TensorRT CUDA graph path; "
+                             "outputs will be copied back to host after run.\n";
+            } else {
+                std::cout << "[inference] Using persistent GPU-input/CPU-output binding for TensorRT path; "
+                             "TensorRT manages optional trt_cuda_graph_enable internally.\n";
+            }
+        }
+        return;
+    }
+
+    gpu_output_buffers.resize(output_names.size(), nullptr);
+    gpu_output_values.reserve(output_names.size());
+    gpu_output_host_f32.resize(output_names.size());
+    gpu_output_host_f16.resize(output_names.size());
+    for (size_t i = 0; i < output_names.size(); ++i) {
+        checkCuda(cudaMalloc(&gpu_output_buffers[i], output_tensor_bytes[i]), "cudaMalloc(onnx output)");
+        gpu_output_values.emplace_back(Ort::Value::CreateTensor(
+            *device_memory_info,
+            gpu_output_buffers[i],
+            output_tensor_bytes[i],
+            output_shapes[i].data(),
+            output_shapes[i].size(),
+            output_types[i]));
+        if (output_types[i] == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+            gpu_output_host_f16[i].resize(output_element_counts[i]);
+        } else {
+            gpu_output_host_f32[i].resize(output_element_counts[i]);
+        }
+    }
+
+    gpu_binding = std::make_unique<Ort::IoBinding>(*session);
+    gpu_binding->BindInput(input_name.c_str(), gpu_input_value);
+    for (size_t i = 0; i < output_names.size(); ++i) {
+        gpu_binding->BindOutput(output_names[i].c_str(), gpu_output_values[i]);
+    }
+    gpu_binding_ready = true;
+
+    if (ort_cuda_graph_requested) {
+        if (session_uses_tensorrt) {
+            if (config.debug_log) {
+                std::cout << "[inference] ONNX Runtime CUDA graph replay is only available on the CUDA EP path. ";
+                if (trt_cuda_graph_requested) {
+                    std::cout << "TensorRT's own CUDA graph is still requested via trt_cuda_graph_enable.\n";
+                } else {
+                    std::cout << "Use onnx_provider=cuda if you want ORT-managed CUDA graph replay.\n";
+                }
+            }
+        } else {
+            cuda_graph_enabled = true;
+            if (config.debug_log) {
+                std::cout << "[inference] CUDA graph path ready with persistent GPU input/output bindings.\n";
+            }
+        }
     }
 #endif
 }
@@ -753,7 +1052,7 @@ Ort::Value OnnxRuntimeEngine::Impl::makeInput() {
     return Ort::Value::CreateTensor<float>(*memory_info, input_f32.data(), input_f32.size(), input_shape.data(), input_shape.size());
 }
 
-Ort::Value OnnxRuntimeEngine::Impl::makeGpuInput(const GpuFramePacket& frame) {
+void OnnxRuntimeEngine::Impl::updateGpuInput(const GpuFramePacket& frame) {
 #if defined(DELTA_WITH_CUDA_PIPELINE)
     if (!gpu_input_ready || gpu_input_buffer == nullptr || !device_memory_info) {
         throw std::runtime_error("GPU input path is not initialized.");
@@ -769,6 +1068,135 @@ Ort::Value OnnxRuntimeEngine::Impl::makeGpuInput(const GpuFramePacket& frame) {
     if (!gpu::preprocessBgraToNchw(frame, gpu_input_buffer, input_w, input_h, tensor_type, ort_stream, &error)) {
         throw std::runtime_error("GPU preprocess failed: " + error);
     }
+#else
+    (void)frame;
+    throw std::runtime_error("GPU input path is unavailable in this build.");
+#endif
+}
+
+FlatTensor OnnxRuntimeEngine::Impl::readBoundGpuOutput(const size_t index) {
+#if defined(DELTA_WITH_CUDA_PIPELINE)
+    FlatTensor tensor{};
+    tensor.shape = output_shapes[index];
+    tensor.data.resize(output_element_counts[index]);
+    if (session_uses_tensorrt && !trt_outputs_bound_on_device) {
+        if (output_types[index] == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+            const auto& host = gpu_output_host_f16[index];
+            for (size_t i = 0; i < host.size(); ++i) {
+                tensor.data[i] = static_cast<float>(host[i]);
+            }
+            return tensor;
+        }
+        const auto& host = gpu_output_host_f32[index];
+        tensor.data.assign(host.begin(), host.end());
+        return tensor;
+    }
+    if (output_types[index] == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+        auto& host = gpu_output_host_f16[index];
+        checkCuda(
+            cudaMemcpy(host.data(), gpu_output_buffers[index], output_tensor_bytes[index], cudaMemcpyDeviceToHost),
+            "cudaMemcpy(output fp16)");
+        for (size_t i = 0; i < host.size(); ++i) {
+            tensor.data[i] = static_cast<float>(host[i]);
+        }
+        return tensor;
+    }
+    auto& host = gpu_output_host_f32[index];
+    checkCuda(
+        cudaMemcpy(host.data(), gpu_output_buffers[index], output_tensor_bytes[index], cudaMemcpyDeviceToHost),
+        "cudaMemcpy(output fp32)");
+    tensor.data.assign(host.begin(), host.end());
+    return tensor;
+#else
+    (void)index;
+    throw std::runtime_error("GPU output path is unavailable in this build.");
+#endif
+}
+
+void OnnxRuntimeEngine::Impl::maybeLogTensorSummary(const FlatTensor& tensor, const std::string_view tag) {
+    if (!output_debug_enabled || output_debug_remaining <= 0) {
+        return;
+    }
+    --output_debug_remaining;
+    if (tensor.data.empty()) {
+        std::cout << "[inference] output debug [" << tag << "] empty tensor\n";
+        return;
+    }
+
+    const auto [min_it, max_it] = std::minmax_element(tensor.data.begin(), tensor.data.end());
+    std::cout << "[inference] output debug [" << tag << "] shape=";
+    for (size_t i = 0; i < tensor.shape.size(); ++i) {
+        if (i) std::cout << "x";
+        std::cout << tensor.shape[i];
+    }
+    std::cout << " range=[" << *min_it << ", " << *max_it << "]";
+
+    int rows = 0;
+    int cols = 0;
+    if (tensor.shape.size() == 3 && tensor.shape[0] == 1) {
+        rows = static_cast<int>(tensor.shape[1]);
+        cols = static_cast<int>(tensor.shape[2]);
+    } else if (tensor.shape.size() == 2) {
+        rows = static_cast<int>(tensor.shape[0]);
+        cols = static_cast<int>(tensor.shape[1]);
+    }
+
+    if (rows > 0 && cols >= 6) {
+        int best_row = -1;
+        float best_conf = -1.0F;
+        for (int row = 0; row < rows; ++row) {
+            const float conf = tensor.data[static_cast<size_t>(row) * static_cast<size_t>(cols) + 4U];
+            if (conf > best_conf) {
+                best_conf = conf;
+                best_row = row;
+            }
+        }
+        if (best_row >= 0) {
+            const size_t base = static_cast<size_t>(best_row) * static_cast<size_t>(cols);
+            std::cout << " bestRow=" << best_row
+                      << " conf=" << tensor.data[base + 4U]
+                      << " cls=" << tensor.data[base + 5U]
+                      << " box=(" << tensor.data[base + 0U]
+                      << "," << tensor.data[base + 1U]
+                      << "," << tensor.data[base + 2U]
+                      << "," << tensor.data[base + 3U] << ")";
+        }
+    }
+
+    std::cout << "\n";
+}
+
+void OnnxRuntimeEngine::Impl::warmupGpu() {
+#if defined(DELTA_WITH_CUDA_PIPELINE)
+    if (!gpu_input_ready) {
+        return;
+    }
+
+    void* warmup_bgra = nullptr;
+    const size_t warmup_bytes = static_cast<size_t>(input_w) * static_cast<size_t>(input_h) * 4U;
+    checkCuda(cudaMalloc(&warmup_bgra, warmup_bytes), "cudaMalloc(graph warmup)");
+    try {
+        checkCuda(cudaMemsetAsync(warmup_bgra, 0, warmup_bytes, ort_stream), "cudaMemsetAsync(graph warmup)");
+        checkCuda(cudaStreamSynchronize(ort_stream), "cudaStreamSynchronize(graph warmup)");
+        GpuFramePacket frame{};
+        frame.device_ptr = warmup_bgra;
+        frame.pitch_bytes = static_cast<size_t>(input_w) * 4U;
+        frame.width = input_w;
+        frame.height = input_h;
+        frame.pixel_format = PixelFormat::Bgra8;
+        frame.cuda_stream = ort_stream;
+        (void)predictGpu(frame, 0);
+    } catch (...) {
+        cudaFree(warmup_bgra);
+        throw;
+    }
+    cudaFree(warmup_bgra);
+#endif
+}
+
+Ort::Value OnnxRuntimeEngine::Impl::makeGpuInput(const GpuFramePacket& frame) {
+    updateGpuInput(frame);
+#if defined(DELTA_WITH_CUDA_PIPELINE)
     return Ort::Value::CreateTensor(*device_memory_info, gpu_input_buffer, input_tensor_bytes, input_shape.data(), input_shape.size(), input_type);
 #else
     (void)frame;
@@ -783,41 +1211,135 @@ InferenceResult OnnxRuntimeEngine::Impl::predictGpu(const GpuFramePacket& frame,
     }
 
     const auto t0 = SteadyClock::now();
-    Ort::Value input = makeGpuInput(frame);
+    updateGpuInput(frame);
+#if defined(DELTA_WITH_CUDA_PIPELINE)
+    if (session_uses_tensorrt && trt_cuda_graph_requested && ort_stream != nullptr) {
+        checkCuda(cudaStreamSynchronize(ort_stream), "cudaStreamSynchronize(trt graph input)");
+    }
+#endif
     const auto t1 = SteadyClock::now();
     result.timings.preprocess_ms = ms(t0, t1);
 
     Ort::RunOptions run_options;
-    Ort::IoBinding binding(*session);
-    binding.BindInput(input_name.c_str(), input);
-    for (const auto& name_value : output_names) {
-        binding.BindOutput(name_value.c_str(), *memory_info);
+    if (cuda_graph_enabled) {
+        run_options.AddConfigEntry("gpu_graph_id", "0");
+    }
+
+    if (!(gpu_binding_ready && gpu_binding)) {
+        Ort::Value input = Ort::Value::CreateTensor(
+            *device_memory_info,
+            gpu_input_buffer,
+            input_tensor_bytes,
+            input_shape.data(),
+            input_shape.size(),
+            input_type);
+        const auto t2 = SteadyClock::now();
+        std::vector<Ort::Value> outputs;
+        if (session_uses_tensorrt) {
+            const char* input_names[] = {input_name.c_str()};
+            outputs = session->Run(run_options, input_names, &input, 1, output_name_ptrs.data(), output_name_ptrs.size());
+        } else {
+            Ort::IoBinding binding(*session);
+            binding.BindInput(input_name.c_str(), input);
+            for (const auto& name_value : output_names) {
+                binding.BindOutput(name_value.c_str(), *memory_info);
+            }
+            session->Run(run_options, binding);
+            binding.SynchronizeOutputs();
+            outputs = binding.GetOutputValues();
+        }
+        const auto t3 = SteadyClock::now();
+        result.timings.execute_ms = ms(t2, t3);
+
+        const auto t4 = SteadyClock::now();
+        std::optional<FlatTensor> first_tensor_debug;
+        if (!outputs.empty() && output_debug_enabled) {
+            first_tensor_debug = toFlatTensor(outputs.front());
+            maybeLogTensorSummary(
+                *first_tensor_debug,
+                session_uses_tensorrt
+                    ? (trt_cuda_graph_requested ? "tensorrt-run graph=on" : "tensorrt-run graph=off")
+                    : "cuda-run");
+        }
+        if (!outputs.empty()) {
+            if (output_has_nms) {
+                if (auto decoded = decodeNms(
+                        first_tensor_debug.has_value() ? *first_tensor_debug : toFlatTensor(outputs.front()),
+                        frame.width,
+                        frame.height,
+                        target_class);
+                    decoded.has_value()) {
+                    result.detections = std::move(decoded.value());
+                    result.timings.postprocess_ms = ms(t4, SteadyClock::now());
+                    return result;
+                }
+            }
+            for (const auto& out : outputs) {
+                if (auto decoded = decodeNms(toFlatTensor(out), frame.width, frame.height, target_class); decoded.has_value()) {
+                    result.detections = std::move(decoded.value());
+                    result.timings.postprocess_ms = ms(t4, SteadyClock::now());
+                    return result;
+                }
+            }
+            result.detections = decodeRaw(
+                first_tensor_debug.has_value() ? *first_tensor_debug : toFlatTensor(outputs.front()),
+                frame.width,
+                frame.height,
+                target_class);
+        }
+        result.timings.postprocess_ms = ms(t4, SteadyClock::now());
+        return result;
     }
 
     const auto t2 = SteadyClock::now();
-    session->Run(run_options, binding);
-    binding.SynchronizeOutputs();
+    gpu_binding->SynchronizeInputs();
+    try {
+        session->Run(run_options, *gpu_binding);
+    } catch (const std::exception& e) {
+        if (!cuda_graph_enabled) {
+            throw;
+        }
+        cuda_graph_enabled = false;
+        if (config.debug_log) {
+            std::cout << "[inference] CUDA graph run failed; retrying without graph replay. reason: "
+                      << e.what() << "\n";
+        }
+        Ort::RunOptions retry_options;
+        session->Run(retry_options, *gpu_binding);
+    }
+    gpu_binding->SynchronizeOutputs();
     const auto t3 = SteadyClock::now();
     result.timings.execute_ms = ms(t2, t3);
 
     const auto t4 = SteadyClock::now();
-    std::vector<Ort::Value> outputs = binding.GetOutputValues();
+    std::vector<FlatTensor> outputs;
+    outputs.reserve(output_names.size());
+    for (size_t i = 0; i < output_names.size(); ++i) {
+        outputs.push_back(readBoundGpuOutput(i));
+    }
     if (!outputs.empty()) {
-        if (config.onnx_output_has_nms) {
-            if (auto decoded = decodeNms(toFlatTensor(outputs.front()), frame.width, frame.height, target_class); decoded.has_value()) {
+        maybeLogTensorSummary(
+            outputs.front(),
+            session_uses_tensorrt
+                ? (trt_cuda_graph_requested ? "tensorrt-bound graph=on" : "tensorrt-bound graph=off")
+                : "cuda-bound");
+    }
+    if (!outputs.empty()) {
+        if (output_has_nms) {
+            if (auto decoded = decodeNms(outputs.front(), frame.width, frame.height, target_class); decoded.has_value()) {
                 result.detections = std::move(decoded.value());
                 result.timings.postprocess_ms = ms(t4, SteadyClock::now());
                 return result;
             }
         }
         for (const auto& out : outputs) {
-            if (auto decoded = decodeNms(toFlatTensor(out), frame.width, frame.height, target_class); decoded.has_value()) {
+            if (auto decoded = decodeNms(out, frame.width, frame.height, target_class); decoded.has_value()) {
                 result.detections = std::move(decoded.value());
                 result.timings.postprocess_ms = ms(t4, SteadyClock::now());
                 return result;
             }
         }
-        result.detections = decodeRaw(toFlatTensor(outputs.front()), frame.width, frame.height, target_class);
+        result.detections = decodeRaw(outputs.front(), frame.width, frame.height, target_class);
     }
     result.timings.postprocess_ms = ms(t4, SteadyClock::now());
     return result;
@@ -870,7 +1392,7 @@ std::optional<std::vector<Detection>> OnnxRuntimeEngine::Impl::decodeNms(
         c.box[3] = std::clamp(c.box[3], 0.0F, static_cast<float>(fh - 1));
     }
     std::sort(candidates.begin(), candidates.end(), [](const auto& l, const auto& r) { return l.conf > r.conf; });
-    if (!config.onnx_output_has_nms) {
+    if (!output_has_nms) {
         std::vector<std::array<float, 4>> boxes;
         std::vector<float> scores;
         for (const auto& c : candidates) { boxes.push_back(c.box); scores.push_back(c.conf); }
@@ -915,7 +1437,7 @@ std::vector<Detection> OnnxRuntimeEngine::Impl::decodeRaw(
     for (int row = 0; row < rows; ++row) {
         int cls = 0;
         float conf = at(row, 4);
-        if (target_class >= 0 && config.onnx_force_target_class_decode) {
+        if (target_class >= 0 && force_target_class_decode) {
             cls = target_class;
             conf = at(row, 4 + cls);
         } else {

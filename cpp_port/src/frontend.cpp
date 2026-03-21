@@ -128,6 +128,7 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"pid_enable\":" << (cfg.pid_enable ? "true" : "false") << ","
         << "\"tracking_enabled\":" << (cfg.tracking_enabled ? "true" : "false") << ","
         << "\"debug_preview_enable\":" << (cfg.debug_preview_enable ? "true" : "false") << ","
+        << "\"capture_cached_timeout_ms\":" << cfg.capture_cached_timeout_ms << ","
         << "\"body_y_ratio\":" << cfg.body_y_ratio << ","
         << "\"tracking_strategy\":\"" << trackingStrategyName(cfg.tracking_strategy) << "\","
         << "\"tracking_velocity_alpha\":" << cfg.tracking_velocity_alpha << ","
@@ -240,6 +241,7 @@ std::string buildPageHtml() {
       {key:"pid_enable",label:"PID Enabled",type:"bool"},
       {key:"tracking_enabled",label:"Tracking Enabled",type:"bool"},
       {key:"debug_preview_enable",label:"Debug Preview",type:"bool"},
+      {key:"capture_cached_timeout_ms",label:"Cached Capture Timeout (ms)",type:"number",step:1,min:0},
       {key:"body_y_ratio",label:"Body Aim Y Ratio",type:"number",step:0.01,min:0,max:1},
       {key:"tracking_strategy",label:"Tracking Strategy",type:"select",options:[{value:"raw",label:"Raw Detection"},{value:"raw_delta",label:"Raw + Velocity"}]},
       {key:"tracking_velocity_alpha",label:"Velocity Beta",type:"number",step:0.001},
@@ -347,6 +349,9 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     if (const auto value = extractJsonBool(body, "pid_enable"); value.has_value()) cfg.pid_enable = *value;
     if (const auto value = extractJsonBool(body, "tracking_enabled"); value.has_value()) cfg.tracking_enabled = *value;
     if (const auto value = extractJsonBool(body, "debug_preview_enable"); value.has_value()) cfg.debug_preview_enable = *value;
+    if (const auto value = extractJsonNumber(body, "capture_cached_timeout_ms"); value.has_value()) {
+        cfg.capture_cached_timeout_ms = std::max(0, static_cast<int>(std::lround(*value)));
+    }
     if (const auto value = extractJsonNumber(body, "body_y_ratio"); value.has_value()) cfg.body_y_ratio = clamp(static_cast<float>(*value), 0.0F, 1.0F);
     if (const auto value = extractJsonString(body, "tracking_strategy"); value.has_value()) cfg.tracking_strategy = parseTrackingStrategy(*value);
     if (const auto value = extractJsonNumber(body, "tracking_velocity_alpha"); value.has_value()) cfg.tracking_velocity_alpha = clamp(static_cast<float>(*value), 0.0F, 1.0F);
