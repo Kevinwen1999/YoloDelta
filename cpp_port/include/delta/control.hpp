@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string_view>
 
@@ -11,8 +12,10 @@ struct InputSnapshot {
     bool insert_pressed = false;
     bool left_pressed = false;
     bool right_pressed = false;
+    bool f4_pressed = false;
     bool x1_pressed = false;
     bool x2_pressed = false;
+    bool f5_pressed = false;
     bool f6_pressed = false;
     bool f7_pressed = false;
     bool f8_pressed = false;
@@ -58,6 +61,10 @@ bool isLeftHoldEngageSatisfied(
     bool right_pressed);
 
 void playToggleBeep(int frequency_hz, int duration_ms = 100);
+
+bool sendVirtualKeyTap(std::uint16_t virtual_key, int hold_ms = 0);
+bool sendLeftClickTap(double hold_s = 0.0);
+bool sendRightClickTap(double hold_s = 0.0);
 
 std::unique_ptr<IInputSender> makeInputSender();
 

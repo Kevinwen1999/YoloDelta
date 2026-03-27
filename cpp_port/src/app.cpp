@@ -118,6 +118,7 @@ namespace {
 constexpr auto kToggleCooldown = std::chrono::milliseconds(200);
 constexpr auto kControlIdleSleep = std::chrono::milliseconds(2);
 constexpr auto kControlCommandWait = std::chrono::milliseconds(1);
+constexpr auto kSideButtonKeySequenceIdleSleep = std::chrono::milliseconds(1);
 constexpr auto kCaptureIdleSleep = std::chrono::milliseconds(1);
 constexpr auto kInferenceIdleSleep = std::chrono::milliseconds(1);
 constexpr auto kPerfLoopSleep = std::chrono::milliseconds(50);
@@ -219,8 +220,9 @@ float pointToBoxDistance(const std::array<int, 4>& box, const float x, const flo
 }
 
 CaptureRegion buildCaptureRegion(const StaticConfig& config, const int center_x, const int center_y) {
-    const int width = clamp(config.imgsz, 1, config.screen_w);
-    const int height = clamp(config.imgsz, 1, config.screen_h);
+    const int size = clamp(effectiveCaptureCropSize(config), 1, std::min(config.screen_w, config.screen_h));
+    const int width = size;
+    const int height = size;
     return CaptureRegion{
         .left = clamp(center_x - (width / 2), 0, config.screen_w - width),
         .top = clamp(center_y - (height / 2), 0, config.screen_h - height),
@@ -646,6 +648,7 @@ int DeltaApp::run() {
         }
         inference_thread_ = AppThread([this]() { inferenceLoop(); });
         control_thread_ = AppThread([this]() { controlLoop(); });
+        side_button_key_sequence_thread_ = AppThread([this]() { sideButtonKeySequenceLoop(); });
 
         while (true) {
             {
@@ -676,6 +679,9 @@ int DeltaApp::run() {
     }
     if (control_thread_.joinable()) {
         control_thread_.join();
+    }
+    if (side_button_key_sequence_thread_.joinable()) {
+        side_button_key_sequence_thread_.join();
     }
     if (perf_thread_.joinable()) {
         perf_thread_.join();
@@ -1408,7 +1414,7 @@ void DeltaApp::controlLoop() {
                 }
                 playToggleBeep(mode == 1 ? 1000 : 500);
             }
-            if (risingEdge(snapshot.x1_pressed, previous.x1_pressed) && (steady_now - last_aimmode_toggle) >= kToggleCooldown) {
+            if (risingEdge(snapshot.f4_pressed, previous.f4_pressed) && (steady_now - last_aimmode_toggle) >= kToggleCooldown) {
                 shared_.toggles.aimmode = (shared_.toggles.aimmode + 1) % 2;
                 last_aimmode_toggle = steady_now;
                 if (config_.debug_log) {
@@ -1668,6 +1674,73 @@ void DeltaApp::controlLoop() {
                 cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, steady_now)),
                 sent_ok && cmd->frame_ready != SteadyClock::time_point{} ? std::optional<double>(secondsSince(cmd->frame_ready, send_end_tick)) : std::nullopt,
                 sent_ok && cmd->acquire_started != SteadyClock::time_point{} ? std::optional<double>(secondsSince(cmd->acquire_started, send_end_tick)) : std::nullopt);
+        }
+    }
+}
+
+void DeltaApp::sideButtonKeySequenceLoop() {
+    Win32HotkeySource hotkeys;
+    InputSnapshot previous{};
+    SteadyClock::time_point last_toggle{};
+
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(shared_.mutex);
+            if (!shared_.running) {
+                break;
+            }
+        }
+
+        const auto steady_now = SteadyClock::now();
+        const InputSnapshot snapshot = hotkeys.poll();
+        const RuntimeConfig runtime = runtime_store_.snapshot();
+        bool sequence_enabled = false;
+        bool toggle_changed = false;
+
+        {
+            std::lock_guard<std::mutex> lock(shared_.mutex);
+            if (risingEdge(snapshot.f5_pressed, previous.f5_pressed) && (steady_now - last_toggle) >= kToggleCooldown) {
+                shared_.side_button_key_sequence_enabled = !shared_.side_button_key_sequence_enabled;
+                last_toggle = steady_now;
+                toggle_changed = true;
+            }
+            sequence_enabled = shared_.side_button_key_sequence_enabled;
+        }
+
+        if (toggle_changed) {
+            if (config_.debug_log) {
+                std::cout << "[control] SideButtonKeySequence31RClickLClick: " << (sequence_enabled ? "ON" : "OFF") << "\n";
+            }
+            playToggleBeep(sequence_enabled ? 1700 : 950);
+        }
+
+        if (!sequence_enabled || !snapshot.x1_pressed) {
+            previous = snapshot;
+            std::this_thread::sleep_for(kSideButtonKeySequenceIdleSleep);
+            continue;
+        }
+
+        const int key3_press_time_ms = std::max(0, runtime.side_button_key_sequence_key3_press_time_ms);
+        const int key1_press_time_ms = std::max(0, runtime.side_button_key_sequence_key1_press_time_ms);
+        const int right_click_hold_ms = std::max(0, runtime.side_button_key_sequence_right_click_hold_ms);
+        const int left_click_hold_ms = std::max(0, runtime.side_button_key_sequence_left_click_hold_ms);
+        const int loop_delay_ms = std::max(0, runtime.side_button_key_sequence_loop_delay_ms);
+
+        const bool sent_three = !runtime.side_button_key_sequence_use_key3
+            || sendVirtualKeyTap(static_cast<std::uint16_t>('3'), key3_press_time_ms);
+        const bool sent_one = !runtime.side_button_key_sequence_use_key1
+            || sendVirtualKeyTap(static_cast<std::uint16_t>('1'), key1_press_time_ms);
+        const bool sent_right_click = !runtime.side_button_key_sequence_use_right_click
+            || sendRightClickTap(static_cast<double>(right_click_hold_ms) / 1000.0);
+        const bool sent_left_click = !runtime.side_button_key_sequence_use_left_click
+            || sendLeftClickTap(static_cast<double>(left_click_hold_ms) / 1000.0);
+        if (config_.debug_log && (!sent_three || !sent_one || !sent_right_click || !sent_left_click)) {
+            std::cerr << "[control] SideButtonKeySequence31RClickLClick send failed.\n";
+        }
+
+        previous = snapshot;
+        if (loop_delay_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(loop_delay_ms));
         }
     }
 }

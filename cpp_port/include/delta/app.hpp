@@ -34,6 +34,7 @@ private:
     void captureLoop();
     void inferenceLoop();
     void controlLoop();
+    void sideButtonKeySequenceLoop();
     void perfLoop();
 
     StaticConfig config_{};
@@ -51,6 +52,7 @@ private:
     AppThread capture_thread_;
     AppThread inference_thread_;
     AppThread control_thread_;
+    AppThread side_button_key_sequence_thread_;
     AppThread perf_thread_;
 };
 

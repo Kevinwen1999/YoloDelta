@@ -62,6 +62,7 @@ What the current C++ inference path does:
   - `DELTA_ONNX_PROVIDER` with `tensorrt`, `cuda`, or `cpu`
   - `DELTA_CUDA_ROOT`
   - `DELTA_TENSORRT_ROOT`
+  - `DELTA_CAPTURE_CROP_SIZE` to capture a larger square region and resize it down to model input
   - `DELTA_ONNX_REQUIRE_GPU=1` to fail instead of falling back to CPU
 - On Windows it adds the resolved ONNX Runtime, CUDA, and TensorRT folders to the process DLL search path before ONNX Runtime starts, so Visual Studio launches do not depend on shell state alone.
 
@@ -109,8 +110,9 @@ The `vs2022-cuda-probe` preset now also builds `delta_native` with the CUDA pipe
 - `src/control.cpp` uses Win32 hotkey polling and `SendInput` directly for relative mouse movement and left-click injection.
 - The low-level sender now mirrors the Python GHUB-style behavior more closely by keeping fractional movement remainders and splitting large moves into bounded steps.
 - `delta_native` now starts the full native runtime by default: capture, inference, raw/raw-delta tracking, frontend, and `SendInput` control.
+- `StaticConfig.imgsz` stays the inference input size. `StaticConfig.capture_crop_size` controls the square desktop crop size, and `0` keeps it locked to `imgsz`.
 - Use `Insert` to stop the app.
-- `XBUTTON2` toggles mode, `XBUTTON1` toggles head/body class, `F6` toggles left-hold engage, `F7` toggles recoil fallback, and `F8` toggles triggerbot.
+- `XBUTTON2` toggles mode, `F4` toggles head/body class, `F5` toggles the async `XBUTTON1`-held configurable sequence loop, `F6` toggles left-hold engage, `F7` toggles recoil fallback, and `F8` toggles triggerbot.
 - Toggle beeps now mirror the Python version.
 - Periodic `[PERF]` logs are emitted from the native runtime for benchmarking.
 

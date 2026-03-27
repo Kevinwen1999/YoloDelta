@@ -110,6 +110,7 @@ struct SharedState {
     std::atomic<float> ctrl_sent_vy_ema{0.0F};
     SteadyClock::time_point ctrl_last_send_tick{};
     std::string tracking_strategy = "raw_delta";
+    bool side_button_key_sequence_enabled = false;
 };
 
 }  // namespace delta

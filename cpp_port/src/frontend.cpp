@@ -156,6 +156,15 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"triggerbot_enable\":" << (cfg.triggerbot_enable ? "true" : "false") << ","
         << "\"triggerbot_click_hold_s\":" << cfg.triggerbot_click_hold_s << ","
         << "\"triggerbot_click_cooldown_s\":" << cfg.triggerbot_click_cooldown_s << ","
+        << "\"side_button_key_sequence_use_key3\":" << (cfg.side_button_key_sequence_use_key3 ? "true" : "false") << ","
+        << "\"side_button_key_sequence_key3_press_time_ms\":" << cfg.side_button_key_sequence_key3_press_time_ms << ","
+        << "\"side_button_key_sequence_use_key1\":" << (cfg.side_button_key_sequence_use_key1 ? "true" : "false") << ","
+        << "\"side_button_key_sequence_key1_press_time_ms\":" << cfg.side_button_key_sequence_key1_press_time_ms << ","
+        << "\"side_button_key_sequence_use_right_click\":" << (cfg.side_button_key_sequence_use_right_click ? "true" : "false") << ","
+        << "\"side_button_key_sequence_right_click_hold_ms\":" << cfg.side_button_key_sequence_right_click_hold_ms << ","
+        << "\"side_button_key_sequence_use_left_click\":" << (cfg.side_button_key_sequence_use_left_click ? "true" : "false") << ","
+        << "\"side_button_key_sequence_left_click_hold_ms\":" << cfg.side_button_key_sequence_left_click_hold_ms << ","
+        << "\"side_button_key_sequence_loop_delay_ms\":" << cfg.side_button_key_sequence_loop_delay_ms << ","
         << "\"recoil_compensation_y_rate_px_s\":" << cfg.recoil_compensation_y_rate_px_s << ","
         << "\"recoil_compensation_y_px\":" << cfg.recoil_compensation_y_px << ","
         << "\"left_hold_engage_button\":\"" << engageButtonName(cfg.left_hold_engage_button) << "\","
@@ -180,6 +189,8 @@ std::string buildStatusJson(const SharedState& shared_state) {
         << "\"mode_label\":\"" << (shared_state.toggles.mode == 0 ? "OFF" : "ACTIVE") << "\","
         << "\"aimmode\":" << shared_state.toggles.aimmode << ","
         << "\"aimmode_label\":\"" << (shared_state.toggles.aimmode == 0 ? "HEAD" : "BODY") << "\","
+        << "\"side_button_key_sequence_enabled\":"
+        << (shared_state.side_button_key_sequence_enabled ? "true" : "false") << ","
         << "\"tracking_strategy\":\"" << jsonEscape(shared_state.tracking_strategy) << "\","
         << "\"target_found\":" << (shared_state.target_found ? "true" : "false") << ","
         << "\"target_speed\":" << shared_state.target_speed << ","
@@ -268,6 +279,15 @@ std::string buildPageHtml() {
       {key:"triggerbot_enable",label:"Trigger Bot",type:"bool"},
       {key:"triggerbot_click_hold_s",label:"Trigger Hold (s)",type:"number",step:0.001,min:0},
       {key:"triggerbot_click_cooldown_s",label:"Trigger Cooldown (s)",type:"number",step:0.001,min:0},
+      {key:"side_button_key_sequence_use_key3",label:"F5 X1 Step 1: Use Key 3",type:"bool"},
+      {key:"side_button_key_sequence_key3_press_time_ms",label:"F5 X1 Step 1: Key 3 Hold (ms)",type:"number",step:1,min:0},
+      {key:"side_button_key_sequence_use_key1",label:"F5 X1 Step 2: Use Key 1",type:"bool"},
+      {key:"side_button_key_sequence_key1_press_time_ms",label:"F5 X1 Step 2: Key 1 Hold (ms)",type:"number",step:1,min:0},
+      {key:"side_button_key_sequence_use_right_click",label:"F5 X1 Step 3: Use Right Click",type:"bool"},
+      {key:"side_button_key_sequence_right_click_hold_ms",label:"F5 X1 Step 3: Right Click Hold (ms)",type:"number",step:1,min:0},
+      {key:"side_button_key_sequence_use_left_click",label:"F5 X1 Step 4: Use Left Click",type:"bool"},
+      {key:"side_button_key_sequence_left_click_hold_ms",label:"F5 X1 Step 4: Left Click Hold (ms)",type:"number",step:1,min:0},
+      {key:"side_button_key_sequence_loop_delay_ms",label:"F5 X1 Step 5: Wait Before Next Loop (ms)",type:"number",step:1,min:0},
       {key:"recoil_compensation_y_rate_px_s",label:"Recoil Comp Y Rate (px/s)",type:"number",step:1},
       {key:"recoil_compensation_y_px",label:"Legacy Recoil Comp Y (px/cmd)",type:"number",step:0.1},
       {key:"left_hold_engage_button",label:"F6 Engage Button",type:"select",options:[{value:"rightkey",label:"Right Key"},{value:"leftkey",label:"Left Key"},{value:"both",label:"Either Key"}]},
@@ -310,7 +330,7 @@ std::string buildPageHtml() {
       }
     }
     function renderStatus(status){
-      runtime.textContent=`Runtime ${status.running ? "running" : "stopped"} | mode ${status.mode_label} | aim ${status.aimmode_label} | track ${status.tracking_strategy} | target ${status.target_found ? "locked" : "none"} | speed ${Number(status.target_speed).toFixed(1)} | cmd (${status.aim_dx}, ${status.aim_dy})`;
+      runtime.textContent=`Runtime ${status.running ? "running" : "stopped"} | mode ${status.mode_label} | aim ${status.aimmode_label} | F5 X1 custom sequence ${status.side_button_key_sequence_enabled ? "ON" : "OFF"} | track ${status.tracking_strategy} | target ${status.target_found ? "locked" : "none"} | speed ${Number(status.target_speed).toFixed(1)} | cmd (${status.aim_dx}, ${status.aim_dy})`;
     }
     function collectPayload(){
       const payload={};
@@ -378,6 +398,33 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     if (const auto value = extractJsonBool(body, "triggerbot_enable"); value.has_value()) cfg.triggerbot_enable = *value;
     if (const auto value = extractJsonNumber(body, "triggerbot_click_hold_s"); value.has_value()) cfg.triggerbot_click_hold_s = std::max(0.0F, static_cast<float>(*value));
     if (const auto value = extractJsonNumber(body, "triggerbot_click_cooldown_s"); value.has_value()) cfg.triggerbot_click_cooldown_s = std::max(0.0F, static_cast<float>(*value));
+    if (const auto value = extractJsonBool(body, "side_button_key_sequence_use_key3"); value.has_value()) {
+        cfg.side_button_key_sequence_use_key3 = *value;
+    }
+    if (const auto value = extractJsonNumber(body, "side_button_key_sequence_key3_press_time_ms"); value.has_value()) {
+        cfg.side_button_key_sequence_key3_press_time_ms = std::max(0, static_cast<int>(std::lround(*value)));
+    }
+    if (const auto value = extractJsonBool(body, "side_button_key_sequence_use_key1"); value.has_value()) {
+        cfg.side_button_key_sequence_use_key1 = *value;
+    }
+    if (const auto value = extractJsonNumber(body, "side_button_key_sequence_key1_press_time_ms"); value.has_value()) {
+        cfg.side_button_key_sequence_key1_press_time_ms = std::max(0, static_cast<int>(std::lround(*value)));
+    }
+    if (const auto value = extractJsonBool(body, "side_button_key_sequence_use_right_click"); value.has_value()) {
+        cfg.side_button_key_sequence_use_right_click = *value;
+    }
+    if (const auto value = extractJsonNumber(body, "side_button_key_sequence_right_click_hold_ms"); value.has_value()) {
+        cfg.side_button_key_sequence_right_click_hold_ms = std::max(0, static_cast<int>(std::lround(*value)));
+    }
+    if (const auto value = extractJsonBool(body, "side_button_key_sequence_use_left_click"); value.has_value()) {
+        cfg.side_button_key_sequence_use_left_click = *value;
+    }
+    if (const auto value = extractJsonNumber(body, "side_button_key_sequence_left_click_hold_ms"); value.has_value()) {
+        cfg.side_button_key_sequence_left_click_hold_ms = std::max(0, static_cast<int>(std::lround(*value)));
+    }
+    if (const auto value = extractJsonNumber(body, "side_button_key_sequence_loop_delay_ms"); value.has_value()) {
+        cfg.side_button_key_sequence_loop_delay_ms = std::max(0, static_cast<int>(std::lround(*value)));
+    }
     if (const auto value = extractJsonNumber(body, "recoil_compensation_y_rate_px_s"); value.has_value()) cfg.recoil_compensation_y_rate_px_s = static_cast<float>(*value);
     if (const auto value = extractJsonNumber(body, "recoil_compensation_y_px"); value.has_value()) cfg.recoil_compensation_y_px = static_cast<float>(*value);
     if (const auto value = extractJsonString(body, "left_hold_engage_button"); value.has_value()) cfg.left_hold_engage_button = parseEngageButton(*value);

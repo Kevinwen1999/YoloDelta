@@ -20,7 +20,7 @@ enum class LeftHoldEngageButton {
 };
 
 struct StaticConfig {
-    std::string model_path = R"(C:\YOLO\Delta\runs\detect\train3\weights\best.onnx)";
+    std::string model_path = R"(C:\YOLO\Delta\runs\detect\train4\weights\best.onnx)";
     std::string onnxruntime_root;
     std::string cuda_root;
     std::string tensorrt_root;
@@ -28,6 +28,7 @@ struct StaticConfig {
     int screen_w = 2560;
     int screen_h = 1440;
     int imgsz = 416;
+    int capture_crop_size = 800;
     float conf = 0.30F;
     int max_detections = 6;
     std::string inference_device = "cuda";
@@ -56,16 +57,20 @@ struct StaticConfig {
     std::string frontend_host = "127.0.0.1";
 };
 
+inline int effectiveCaptureCropSize(const StaticConfig& config) {
+    return config.capture_crop_size > 0 ? config.capture_crop_size : config.imgsz;
+}
+
 struct RuntimeConfig {
     bool pid_enable = true;
     bool tracking_enabled = true;
     bool debug_preview_enable = true;
     int capture_cached_timeout_ms = 0;
     float body_y_ratio = 0.15F;
-    TrackingStrategy tracking_strategy = TrackingStrategy::Raw;
+    TrackingStrategy tracking_strategy = TrackingStrategy::RawDelta;
     float tracking_alpha = 0.42F;
     float tracking_velocity_alpha = 0.5F;
-    float kp = 0.30F;
+    float kp = 0.50F;
     float ki = 0.7F;
     float kd = 0.009F;
     float integral_limit = 2000.0F;
@@ -80,8 +85,8 @@ struct RuntimeConfig {
     float kalman_process_noise = 1.5F;
     float kalman_measurement_noise = 16.0F;
     bool ego_motion_comp_enable = true;
-    float ego_motion_comp_gain_x = 0.1F;
-    float ego_motion_comp_gain_y = 0.1F;
+    float ego_motion_comp_gain_x = 0.3F;
+    float ego_motion_comp_gain_y = 0.3F;
     bool ego_motion_error_gate_enable = false;
     float ego_motion_error_gate_px = 500.0F;
     bool ego_motion_error_gate_normalize_by_box = false;
@@ -94,6 +99,15 @@ struct RuntimeConfig {
     bool triggerbot_enable = false;
     float triggerbot_click_hold_s = 0.001F;
     float triggerbot_click_cooldown_s = 0.001F;
+    bool side_button_key_sequence_use_key3 = true;
+    int side_button_key_sequence_key3_press_time_ms = 0;
+    bool side_button_key_sequence_use_key1 = true;
+    int side_button_key_sequence_key1_press_time_ms = 0;
+    bool side_button_key_sequence_use_right_click = true;
+    int side_button_key_sequence_right_click_hold_ms = 1;
+    bool side_button_key_sequence_use_left_click = true;
+    int side_button_key_sequence_left_click_hold_ms = 0;
+    int side_button_key_sequence_loop_delay_ms = 8;
     float sendinput_gain_x = 1.0F;
     float sendinput_gain_y = 1.0F;
     int sendinput_max_step = 1270;

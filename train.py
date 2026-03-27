@@ -11,7 +11,7 @@ def main():
         print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
     path = "data.yaml"
-    model = YOLO("yolo26s.pt")
+    model = YOLO("yolo26m.pt")
 
     model.train(
         data=path,
@@ -38,7 +38,7 @@ def main():
         save_period=10,
 
         # Run name
-        name="yolo11s_3090_run",
+        name="train4",
         exist_ok=True,
     )
 

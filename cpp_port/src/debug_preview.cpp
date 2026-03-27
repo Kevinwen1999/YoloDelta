@@ -313,7 +313,7 @@ private:
     }
 
     int defaultClientWidth() const {
-        return clamp(static_cast<int>(config_.imgsz * 0.65F), 280, 520);
+        return clamp(static_cast<int>(effectiveCaptureCropSize(config_) * 0.65F), 280, 520);
     }
 
     int defaultClientHeight() const {
