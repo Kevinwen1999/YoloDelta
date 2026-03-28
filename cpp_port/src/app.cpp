@@ -139,7 +139,6 @@ constexpr float kTrackerReinitMinIou = 0.35F;
 constexpr float kAssocPredictDt = 0.02F;
 constexpr float kAssocSpeedJumpGain = 0.05F;
 constexpr float kAssocMaxJumpPad = 220.0F;
-constexpr int kRawMaxStepX = 280;
 constexpr bool kPerfLogWhenModeOff = true;
 
 bool risingEdge(const bool current, const bool previous) {
@@ -170,7 +169,10 @@ std::pair<int, int> screenCenter(const StaticConfig& config) {
     return {config.screen_w / 2, config.screen_h / 2};
 }
 
-std::pair<float, float> detectionAimPoint(const Detection& detection, const float body_y_ratio) {
+std::pair<float, float> detectionAimPoint(
+    const Detection& detection,
+    const float body_y_ratio,
+    const float head_y_ratio) {
     const float x1 = static_cast<float>(detection.bbox[0]);
     const float y1 = static_cast<float>(detection.bbox[1]);
     const float x2 = static_cast<float>(detection.bbox[2]);
@@ -180,7 +182,9 @@ std::pair<float, float> detectionAimPoint(const Detection& detection, const floa
     const float aim_x = x1 + (width * 0.5F);
     const float aim_y = detection.cls == 0
         ? (y1 + (height * clamp(body_y_ratio, 0.0F, 1.0F)))
-        : (y1 + (height * 0.5F));
+        : (detection.cls == 1
+            ? (y1 + (height * clamp(head_y_ratio, 0.0F, 1.0F)))
+            : (y1 + (height * 0.5F)));
     return {aim_x, clamp(aim_y, y1, y2)};
 }
 
@@ -600,6 +604,7 @@ DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
       capture_(makeDefaultCaptureSource(config_)),
       inference_(makeInferenceEngine(config_)),
       input_sender_(makeInputSender()),
+      recoil_scheduler_(std::make_unique<RecoilScheduler>(config_)),
       debug_preview_(makeDebugPreviewWindow(config_)),
       frontend_(makeRuntimeFrontend(config_, runtime_store_, shared_)),
       perf_(std::make_unique<RuntimePerfWindow>()) {
@@ -614,6 +619,8 @@ DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
     shared_.last_target_full = center;
     shared_.capture_focus_full = center;
     shared_.tracking_strategy = trackingStrategyName(runtime_store_.snapshot().tracking_strategy);
+    shared_.recoil.mode = runtime_store_.snapshot().recoil_mode;
+    shared_.recoil.selected_profile_id = runtime_store_.snapshot().selected_recoil_profile_id;
 }
 
 DeltaApp::~DeltaApp() = default;
@@ -647,6 +654,7 @@ int DeltaApp::run() {
             capture_thread_ = AppThread([this]() { captureLoop(); });
         }
         inference_thread_ = AppThread([this]() { inferenceLoop(); });
+        recoil_thread_ = AppThread([this]() { recoilLoop(); });
         control_thread_ = AppThread([this]() { controlLoop(); });
         side_button_key_sequence_thread_ = AppThread([this]() { sideButtonKeySequenceLoop(); });
 
@@ -679,6 +687,9 @@ int DeltaApp::run() {
     }
     if (control_thread_.joinable()) {
         control_thread_.join();
+    }
+    if (recoil_thread_.joinable()) {
+        recoil_thread_.join();
     }
     if (side_button_key_sequence_thread_.joinable()) {
         side_button_key_sequence_thread_.join();
@@ -915,7 +926,8 @@ void DeltaApp::inferenceLoop() {
                     toggles.left_hold_engage,
                     runtime.left_hold_engage_button,
                     toggles.left_pressed,
-                    toggles.right_pressed);
+                    toggles.right_pressed,
+                    toggles.x1_pressed);
             const bool triggerbot_monitor_active = (toggles.mode != 0) && runtime.triggerbot_enable;
 
             if (!(engage_active || triggerbot_monitor_active)) {
@@ -1020,7 +1032,7 @@ void DeltaApp::inferenceLoop() {
                 detection.bbox[1] += capture_region.top;
                 detection.bbox[2] += capture_region.left;
                 detection.bbox[3] += capture_region.top;
-                const auto [aim_x, aim_y] = detectionAimPoint(detection, runtime.body_y_ratio);
+                const auto [aim_x, aim_y] = detectionAimPoint(detection, runtime.body_y_ratio, runtime.head_y_ratio);
                 detection.x = aim_x;
                 detection.y = aim_y;
             }
@@ -1272,7 +1284,12 @@ void DeltaApp::inferenceLoop() {
             const float ff_y = (vy * dt) * ff_scale;
             const float desired_x = pid_term_x + ff_x;
             const float desired_y = pid_term_y + ff_y;
-            const int dx = engage_active ? static_cast<int>(std::lround(clamp(desired_x, -static_cast<float>(kRawMaxStepX), static_cast<float>(kRawMaxStepX)))) : 0;
+            const int dx = engage_active
+                ? static_cast<int>(std::lround(clamp(
+                    desired_x,
+                    -static_cast<float>(runtime.raw_max_step_x),
+                    static_cast<float>(runtime.raw_max_step_x))))
+                : 0;
             const int dy = engage_active
                 ? static_cast<int>(std::lround(clamp(desired_y, -static_cast<float>(runtime.raw_max_step_y), static_cast<float>(runtime.raw_max_step_y))))
                 : 0;
@@ -1358,6 +1375,58 @@ void DeltaApp::inferenceLoop() {
     }
 }
 
+void DeltaApp::recoilLoop() {
+    if (!recoil_scheduler_) {
+        return;
+    }
+
+    for (;;) {
+        RuntimeConfig runtime = runtime_store_.snapshot();
+        bool running = true;
+        bool recoil_enabled = false;
+        bool left_pressed = false;
+        bool mode_active = false;
+        bool hold_engage_toggle = false;
+        {
+            std::lock_guard<std::mutex> lock(shared_.mutex);
+            running = shared_.running;
+            recoil_enabled = shared_.toggles.recoil_tune_fallback;
+            left_pressed = shared_.toggles.left_pressed;
+            mode_active = shared_.toggles.mode != 0;
+            hold_engage_toggle = shared_.toggles.left_hold_engage;
+        }
+        if (!running) {
+            break;
+        }
+
+        const RecoilSchedulerUpdate update = recoil_scheduler_->tick(runtime, recoil_enabled, left_pressed);
+        {
+            std::lock_guard<std::mutex> lock(shared_.mutex);
+            if (!shared_.running) {
+                break;
+            }
+            const int last_applied_dx = shared_.recoil.last_applied_dx;
+            const int last_applied_dy = shared_.recoil.last_applied_dy;
+            const int last_applied_shot_index = shared_.recoil.last_applied_shot_index;
+            const std::uint64_t apply_count = shared_.recoil.apply_count;
+            shared_.recoil = update.state;
+            shared_.recoil.mode_active = mode_active;
+            shared_.recoil.hold_engage_toggle = hold_engage_toggle;
+            shared_.recoil.last_applied_dx = last_applied_dx;
+            shared_.recoil.last_applied_dy = last_applied_dy;
+            shared_.recoil.last_applied_shot_index = last_applied_shot_index;
+            shared_.recoil.apply_count = apply_count;
+            if (update.clear_pending) {
+                shared_.pending_recoil = {};
+            }
+            shared_.pending_recoil.dx += update.delta.dx;
+            shared_.pending_recoil.dy += update.delta.dy;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 void DeltaApp::controlLoop() {
     if (!input_sender_) {
         return;
@@ -1400,6 +1469,7 @@ void DeltaApp::controlLoop() {
             std::lock_guard<std::mutex> lock(shared_.mutex);
             shared_.toggles.left_pressed = snapshot.left_pressed;
             shared_.toggles.right_pressed = snapshot.right_pressed;
+            shared_.toggles.x1_pressed = snapshot.x1_pressed;
 
             if (risingEdge(snapshot.x2_pressed, previous.x2_pressed) && (steady_now - last_mode_toggle) >= kToggleCooldown) {
                 shared_.toggles.mode = (shared_.toggles.mode + 1) % 2;
@@ -1429,7 +1499,8 @@ void DeltaApp::controlLoop() {
                         true,
                         runtime.left_hold_engage_button,
                         shared_.toggles.left_pressed,
-                        shared_.toggles.right_pressed)) {
+                        shared_.toggles.right_pressed,
+                        shared_.toggles.x1_pressed)) {
                     command_slot_.clear();
                     clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                 }
@@ -1478,25 +1549,25 @@ void DeltaApp::controlLoop() {
 
         ToggleState toggles{};
         bool target_detected = false;
+        PendingRecoilDelta pending_recoil{};
+        RecoilRuntimeState recoil_state{};
         {
             std::lock_guard<std::mutex> lock(shared_.mutex);
             toggles = shared_.toggles;
             target_detected = shared_.target_found;
+            pending_recoil = shared_.pending_recoil;
+            recoil_state = shared_.recoil;
+            shared_.pending_recoil = {};
         }
+        const bool advanced_recoil_pending = pending_recoil.dx != 0 || pending_recoil.dy != 0;
 
         std::optional<CommandPacket> cmd = command_slot_.wait_take_for(kControlCommandWait);
         const double recoil_rate_y_px_s = std::abs(runtime.recoil_compensation_y_rate_px_s) > 1e-6F
             ? static_cast<double>(runtime.recoil_compensation_y_rate_px_s)
             : (static_cast<double>(runtime.recoil_compensation_y_px) * kLegacyRecoilReferenceHz);
-        const bool recoil_enabled = std::abs(recoil_rate_y_px_s) > 1e-6;
+        const bool legacy_recoil_enabled = runtime.recoil_mode == RecoilMode::Legacy && std::abs(recoil_rate_y_px_s) > 1e-6;
         if (!cmd.has_value()) {
-            const bool mode_ok = runtime.recoil_tune_fallback_ignore_mode_check || (toggles.mode != 0);
-            const bool engage_ok = isLeftHoldEngageSatisfied(
-                toggles.left_hold_engage,
-                runtime.left_hold_engage_button,
-                toggles.left_pressed,
-                toggles.right_pressed);
-            if (recoil_enabled && toggles.recoil_tune_fallback && target_detected && toggles.left_pressed && mode_ok && engage_ok) {
+            if (advanced_recoil_pending) {
                 cmd = CommandPacket{
                     .dx = 0,
                     .dy = 0,
@@ -1504,17 +1575,38 @@ void DeltaApp::controlLoop() {
                     .generated_at = system_now,
                     .frame_time = system_now,
                     .capture_time = system_now,
-                    .target_detected = true,
+                    .target_detected = false,
                     .synthetic_recoil = true,
                     .trigger_fire = false,
                 };
             } else {
-                {
-                    std::lock_guard<std::mutex> lock(shared_.mutex);
-                    decayEgoMotionStateLocked(shared_);
+                const bool mode_ok = runtime.recoil_tune_fallback_ignore_mode_check || (toggles.mode != 0);
+                const bool engage_ok = isLeftHoldEngageSatisfied(
+                    toggles.left_hold_engage,
+                    runtime.left_hold_engage_button,
+                    toggles.left_pressed,
+                    toggles.right_pressed,
+                    toggles.x1_pressed);
+                if (legacy_recoil_enabled && toggles.recoil_tune_fallback && target_detected && toggles.left_pressed && mode_ok && engage_ok) {
+                    cmd = CommandPacket{
+                        .dx = 0,
+                        .dy = 0,
+                        .cmd_generated = steady_now,
+                        .generated_at = system_now,
+                        .frame_time = system_now,
+                        .capture_time = system_now,
+                        .target_detected = true,
+                        .synthetic_recoil = true,
+                        .trigger_fire = false,
+                    };
+                } else {
+                    {
+                        std::lock_guard<std::mutex> lock(shared_.mutex);
+                        decayEgoMotionStateLocked(shared_);
+                    }
+                    std::this_thread::sleep_for(kControlIdleSleep);
+                    continue;
                 }
-                std::this_thread::sleep_for(kControlIdleSleep);
-                continue;
             }
         }
 
@@ -1544,7 +1636,8 @@ void DeltaApp::controlLoop() {
                 toggles.left_hold_engage,
                 runtime.left_hold_engage_button,
                 toggles.left_pressed,
-                toggles.right_pressed));
+                toggles.right_pressed,
+                toggles.x1_pressed));
         const bool trigger_enabled = runtime.triggerbot_enable;
         const bool trigger_fire = trigger_enabled && cmd->trigger_fire;
         if (!(engage_active || trigger_fire)) {
@@ -1575,7 +1668,7 @@ void DeltaApp::controlLoop() {
             && (last_trigger_click == SystemClock::time_point{}
                 || secondsSince(last_trigger_click, system_now) >= runtime.triggerbot_click_cooldown_s);
 
-        const bool recoil_active = recoil_enabled && cmd->target_detected && (toggles.left_pressed || trigger_will_click);
+        const bool recoil_active = legacy_recoil_enabled && cmd->target_detected && (toggles.left_pressed || trigger_will_click);
         if (recoil_active) {
             const auto recoil_tick = SteadyClock::now();
             if (last_recoil_integrate_tick != SteadyClock::time_point{}) {
@@ -1596,6 +1689,18 @@ void DeltaApp::controlLoop() {
             recoil_carry_y = 0.0;
             last_recoil_integrate_tick = {};
         }
+        const int base_dx_before_advanced = dx;
+        const int base_dy_before_advanced = dy;
+        if (advanced_recoil_pending) {
+            dx += pending_recoil.dx;
+            dy += pending_recoil.dy;
+        }
+        const int base_clamped_dx = clamp(base_dx_before_advanced, -runtime.raw_max_step_x, runtime.raw_max_step_x);
+        const int base_clamped_dy = clamp(base_dy_before_advanced, -runtime.raw_max_step_y, runtime.raw_max_step_y);
+        dx = clamp(dx, -runtime.raw_max_step_x, runtime.raw_max_step_x);
+        dy = clamp(dy, -runtime.raw_max_step_y, runtime.raw_max_step_y);
+        const int applied_advanced_dx = advanced_recoil_pending ? (dx - base_clamped_dx) : 0;
+        const int applied_advanced_dy = advanced_recoil_pending ? (dy - base_clamped_dy) : 0;
 
         bool movement_sent = false;
         const auto send_start = SteadyClock::now();
@@ -1611,6 +1716,33 @@ void DeltaApp::controlLoop() {
         }
         const auto send_end_tick = SteadyClock::now();
         const double send_elapsed = secondsSince(send_start, send_end_tick);
+
+        if (advanced_recoil_pending) {
+            const bool recoil_applied = movement_sent && (applied_advanced_dx != 0 || applied_advanced_dy != 0);
+            {
+                std::lock_guard<std::mutex> lock(shared_.mutex);
+                shared_.recoil.last_applied_dx = recoil_applied ? applied_advanced_dx : 0;
+                shared_.recoil.last_applied_dy = recoil_applied ? applied_advanced_dy : 0;
+                if (recoil_applied) {
+                    shared_.recoil.last_applied_shot_index = recoil_state.shot_index;
+                    ++shared_.recoil.apply_count;
+                }
+            }
+            if (config_.debug_log) {
+                std::cout << "[recoil] Advanced profile="
+                          << (recoil_state.selected_profile_name.empty() ? recoil_state.selected_profile_id : recoil_state.selected_profile_name)
+                          << " shot=" << recoil_state.shot_index << "/" << recoil_state.shot_count
+                          << " scheduled=(" << pending_recoil.dx << ", " << pending_recoil.dy << ")"
+                          << " applied=(" << (recoil_applied ? applied_advanced_dx : 0) << ", " << (recoil_applied ? applied_advanced_dy : 0) << ")"
+                          << " send=" << (movement_sent ? "OK" : "SKIP")
+                          << " F7=" << (toggles.recoil_tune_fallback ? "ON" : "OFF")
+                          << " ignore_mode=" << (runtime.recoil_tune_fallback_ignore_mode_check ? "ON" : "OFF")
+                          << " mode=" << (toggles.mode != 0 ? "ACTIVE" : "OFF")
+                          << " F6=" << (toggles.left_hold_engage ? "ON" : "OFF")
+                          << " left=" << (toggles.left_pressed ? "DOWN" : "UP")
+                          << "\n";
+            }
+        }
 
         if (dx == 0 && dy == 0 && !trigger_sent) {
             {
@@ -1775,7 +1907,8 @@ void DeltaApp::perfLoop() {
                 toggles.left_hold_engage,
                 runtime.left_hold_engage_button,
                 toggles.left_pressed,
-                toggles.right_pressed);
+                toggles.right_pressed,
+                toggles.x1_pressed);
         if (!kPerfLogWhenModeOff && !perf_engaged) {
             continue;
         }

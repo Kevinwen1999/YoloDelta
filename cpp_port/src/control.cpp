@@ -125,17 +125,20 @@ bool isLeftHoldEngageSatisfied(
     const bool left_hold_engage,
     const LeftHoldEngageButton engage_button,
     const bool left_pressed,
-    const bool right_pressed) {
+    const bool right_pressed,
+    const bool x1_pressed) {
     if (!left_hold_engage) {
         return true;
     }
     switch (engage_button) {
     case LeftHoldEngageButton::Left:
         return left_pressed;
+    case LeftHoldEngageButton::X1:
+        return x1_pressed;
     case LeftHoldEngageButton::Both:
         // "Both" is the legacy stored value; intended behavior is that
-        // either mouse button satisfies engage when this mode is selected.
-        return left_pressed || right_pressed;
+        // left, right, or the X1 side button satisfies engage when selected.
+        return left_pressed || right_pressed || x1_pressed;
     case LeftHoldEngageButton::Right:
     default:
         return right_pressed;

@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <string>
 
+#include "delta/recoil_types.hpp"
+
 namespace delta {
 
 enum class TrackingStrategy {
@@ -16,6 +18,7 @@ enum class TrackingStrategy {
 enum class LeftHoldEngageButton {
     Left,
     Right,
+    X1,
     Both,
 };
 
@@ -25,6 +28,7 @@ struct StaticConfig {
     std::string cuda_root;
     std::string tensorrt_root;
     std::string tensorrt_cache_dir;
+    std::string recoil_profiles_dir = R"(C:\YOLO\Delta\cpp_port\runtime\recoil_profiles)";
     int screen_w = 2560;
     int screen_h = 1440;
     int imgsz = 416;
@@ -67,10 +71,11 @@ struct RuntimeConfig {
     bool debug_preview_enable = true;
     int capture_cached_timeout_ms = 0;
     float body_y_ratio = 0.15F;
+    float head_y_ratio = 0.50F;
     TrackingStrategy tracking_strategy = TrackingStrategy::RawDelta;
     float tracking_alpha = 0.42F;
     float tracking_velocity_alpha = 0.5F;
-    float kp = 0.50F;
+    float kp = 0.40F;
     float ki = 0.7F;
     float kd = 0.009F;
     float integral_limit = 2000.0F;
@@ -92,6 +97,8 @@ struct RuntimeConfig {
     bool ego_motion_error_gate_normalize_by_box = false;
     float ego_motion_error_gate_norm_threshold = 2.0F;
     bool ego_motion_reset_on_switch = true;
+    RecoilMode recoil_mode = RecoilMode::Legacy;
+    std::string selected_recoil_profile_id;
     float recoil_compensation_y_rate_px_s = 0.0F;
     float recoil_compensation_y_px = 4.0F;
     LeftHoldEngageButton left_hold_engage_button = LeftHoldEngageButton::Both;
@@ -111,6 +118,7 @@ struct RuntimeConfig {
     float sendinput_gain_x = 1.0F;
     float sendinput_gain_y = 1.0F;
     int sendinput_max_step = 1270;
+    int raw_max_step_x = 280;
     int raw_max_step_y = 2800;
 };
 
@@ -121,6 +129,7 @@ struct ToggleState {
     bool recoil_tune_fallback = false;
     bool left_pressed = false;
     bool right_pressed = false;
+    bool x1_pressed = false;
 };
 
 }  // namespace delta

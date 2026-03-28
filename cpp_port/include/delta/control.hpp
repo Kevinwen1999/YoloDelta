@@ -58,7 +58,8 @@ bool isLeftHoldEngageSatisfied(
     bool left_hold_engage,
     LeftHoldEngageButton engage_button,
     bool left_pressed,
-    bool right_pressed);
+    bool right_pressed,
+    bool x1_pressed);
 
 void playToggleBeep(int frequency_hz, int duration_ms = 100);
 

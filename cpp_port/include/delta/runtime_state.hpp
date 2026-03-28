@@ -111,6 +111,8 @@ struct SharedState {
     SteadyClock::time_point ctrl_last_send_tick{};
     std::string tracking_strategy = "raw_delta";
     bool side_button_key_sequence_enabled = false;
+    RecoilRuntimeState recoil{};
+    PendingRecoilDelta pending_recoil{};
 };
 
 }  // namespace delta

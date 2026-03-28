@@ -1,5 +1,7 @@
 #include "delta/frontend.hpp"
+#include "delta/recoil.hpp"
 
+#include <array>
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -12,6 +14,8 @@
 #include <string_view>
 #include <utility>
 
+#include <nlohmann/json.hpp>
+
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -21,6 +25,8 @@
 namespace delta {
 
 namespace {
+
+using json = nlohmann::json;
 
 std::string jsonEscape(std::string_view text) {
     std::string out;
@@ -49,6 +55,7 @@ TrackingStrategy parseTrackingStrategy(const std::string& value) {
 const char* engageButtonName(const LeftHoldEngageButton button) {
     switch (button) {
     case LeftHoldEngageButton::Left: return "leftkey";
+    case LeftHoldEngageButton::X1: return "x1";
     case LeftHoldEngageButton::Both: return "both";
     case LeftHoldEngageButton::Right:
     default: return "rightkey";
@@ -57,6 +64,7 @@ const char* engageButtonName(const LeftHoldEngageButton button) {
 
 LeftHoldEngageButton parseEngageButton(const std::string& value) {
     if (value == "leftkey") return LeftHoldEngageButton::Left;
+    if (value == "x1") return LeftHoldEngageButton::X1;
     if (value == "both") return LeftHoldEngageButton::Both;
     return LeftHoldEngageButton::Right;
 }
@@ -122,6 +130,98 @@ std::optional<bool> extractJsonBool(const std::string& body, const char* key) {
     return std::nullopt;
 }
 
+json buildRecoilProfilesJson(const StaticConfig& config) {
+    json profiles = json::array();
+    for (const auto& profile : listRecoilProfiles(config)) {
+        profiles.push_back(json{
+            {"id", profile.id},
+            {"name", profile.name},
+            {"updated_at", profile.updated_at},
+            {"shot_count", profile.shot_count},
+            {"scale_factor", profile.scale_factor},
+            {"horizontal_scale_factor", profile.horizontal_scale_factor},
+            {"fire_interval_ms", profile.fire_interval_ms},
+            {"valid", profile.valid},
+            {"error", profile.error},
+        });
+    }
+    return profiles;
+}
+
+json buildRecoilConfigJson(const RuntimeConfig& cfg) {
+    return json{
+        {"recoil_mode", recoilModeName(cfg.recoil_mode)},
+        {"selected_recoil_profile_id", cfg.selected_recoil_profile_id},
+    };
+}
+
+json buildRecoilStatusObject(const SharedState& shared_state) {
+    std::lock_guard<std::mutex> lock(shared_state.mutex);
+    return json{
+        {"recoil_mode", recoilModeName(shared_state.recoil.mode)},
+        {"recoil_enabled", shared_state.recoil.enabled},
+        {"recoil_ignore_mode_check", shared_state.recoil.ignore_mode_check},
+        {"recoil_mode_active", shared_state.recoil.mode_active},
+        {"recoil_hold_engage_toggle", shared_state.recoil.hold_engage_toggle},
+        {"recoil_left_pressed", shared_state.recoil.left_pressed},
+        {"recoil_spray_active", shared_state.recoil.spray_active},
+        {"selected_profile_id", shared_state.recoil.selected_profile_id},
+        {"selected_profile_name", shared_state.recoil.selected_profile_name},
+        {"recoil_profile_loaded", shared_state.recoil.profile_loaded},
+        {"recoil_shot_index", shared_state.recoil.shot_index},
+        {"recoil_shot_count", shared_state.recoil.shot_count},
+        {"recoil_scale_factor", shared_state.recoil.scale_factor},
+        {"recoil_horizontal_scale_factor", shared_state.recoil.horizontal_scale_factor},
+        {"recoil_fire_interval_ms", shared_state.recoil.fire_interval_ms},
+        {"recoil_scheduled_dx", shared_state.recoil.scheduled_dx},
+        {"recoil_scheduled_dy", shared_state.recoil.scheduled_dy},
+        {"recoil_last_applied_dx", shared_state.recoil.last_applied_dx},
+        {"recoil_last_applied_dy", shared_state.recoil.last_applied_dy},
+        {"recoil_last_applied_shot_index", shared_state.recoil.last_applied_shot_index},
+        {"recoil_apply_count", shared_state.recoil.apply_count},
+        {"recoil_debug_state", shared_state.recoil.debug_state},
+        {"recoil_error", shared_state.recoil.error},
+    };
+}
+
+std::string buildRecoilPayload(const StaticConfig& config, RuntimeConfigStore& store, SharedState& shared_state) {
+    json payload{
+        {"config", buildRecoilConfigJson(store.snapshot())},
+        {"status", buildRecoilStatusObject(shared_state)},
+        {"profiles", buildRecoilProfilesJson(config)},
+    };
+    return payload.dump();
+}
+
+std::string buildRecoilProfilesPayload(const StaticConfig& config) {
+    return json{{"profiles", buildRecoilProfilesJson(config)}}.dump();
+}
+
+bool applyRecoilPatch(const std::string& body, RuntimeConfig& cfg, std::string& error) {
+    error.clear();
+    json payload = json::parse(body, nullptr, false);
+    if (payload.is_discarded() || !payload.is_object()) {
+        error = "Request body must be a JSON object.";
+        return false;
+    }
+
+    if (const auto it = payload.find("recoil_mode"); it != payload.end()) {
+        if (!it->is_string()) {
+            error = "recoil_mode must be a string.";
+            return false;
+        }
+        cfg.recoil_mode = parseRecoilMode(it->get<std::string>());
+    }
+    if (const auto it = payload.find("selected_recoil_profile_id"); it != payload.end()) {
+        if (!it->is_string()) {
+            error = "selected_recoil_profile_id must be a string.";
+            return false;
+        }
+        cfg.selected_recoil_profile_id = it->get<std::string>();
+    }
+    return true;
+}
+
 std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t version, const std::uint64_t reset_token) {
     std::ostringstream oss;
     oss << "{"
@@ -130,6 +230,7 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"debug_preview_enable\":" << (cfg.debug_preview_enable ? "true" : "false") << ","
         << "\"capture_cached_timeout_ms\":" << cfg.capture_cached_timeout_ms << ","
         << "\"body_y_ratio\":" << cfg.body_y_ratio << ","
+        << "\"head_y_ratio\":" << cfg.head_y_ratio << ","
         << "\"tracking_strategy\":\"" << trackingStrategyName(cfg.tracking_strategy) << "\","
         << "\"tracking_velocity_alpha\":" << cfg.tracking_velocity_alpha << ","
         << "\"kp\":" << cfg.kp << ","
@@ -153,6 +254,8 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << (cfg.ego_motion_error_gate_normalize_by_box ? "true" : "false") << ","
         << "\"ego_motion_error_gate_norm_threshold\":" << cfg.ego_motion_error_gate_norm_threshold << ","
         << "\"ego_motion_reset_on_switch\":" << (cfg.ego_motion_reset_on_switch ? "true" : "false") << ","
+        << "\"recoil_mode\":\"" << recoilModeName(cfg.recoil_mode) << "\","
+        << "\"selected_recoil_profile_id\":\"" << jsonEscape(cfg.selected_recoil_profile_id) << "\","
         << "\"triggerbot_enable\":" << (cfg.triggerbot_enable ? "true" : "false") << ","
         << "\"triggerbot_click_hold_s\":" << cfg.triggerbot_click_hold_s << ","
         << "\"triggerbot_click_cooldown_s\":" << cfg.triggerbot_click_cooldown_s << ","
@@ -173,6 +276,7 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"sendinput_gain_x\":" << cfg.sendinput_gain_x << ","
         << "\"sendinput_gain_y\":" << cfg.sendinput_gain_y << ","
         << "\"sendinput_max_step\":" << cfg.sendinput_max_step << ","
+        << "\"raw_max_step_x\":" << cfg.raw_max_step_x << ","
         << "\"raw_max_step_y\":" << cfg.raw_max_step_y << ","
         << "\"version\":" << version << ","
         << "\"reset_token\":" << reset_token
@@ -196,7 +300,30 @@ std::string buildStatusJson(const SharedState& shared_state) {
         << "\"target_speed\":" << shared_state.target_speed << ","
         << "\"target_cls\":" << shared_state.target_cls << ","
         << "\"aim_dx\":" << shared_state.aim_dx << ","
-        << "\"aim_dy\":" << shared_state.aim_dy
+        << "\"aim_dy\":" << shared_state.aim_dy << ","
+        << "\"recoil_mode\":\"" << recoilModeName(shared_state.recoil.mode) << "\","
+        << "\"recoil_enabled\":" << (shared_state.recoil.enabled ? "true" : "false") << ","
+        << "\"recoil_ignore_mode_check\":" << (shared_state.recoil.ignore_mode_check ? "true" : "false") << ","
+        << "\"recoil_mode_active\":" << (shared_state.recoil.mode_active ? "true" : "false") << ","
+        << "\"recoil_hold_engage_toggle\":" << (shared_state.recoil.hold_engage_toggle ? "true" : "false") << ","
+        << "\"recoil_left_pressed\":" << (shared_state.recoil.left_pressed ? "true" : "false") << ","
+        << "\"recoil_spray_active\":" << (shared_state.recoil.spray_active ? "true" : "false") << ","
+        << "\"selected_profile_id\":\"" << jsonEscape(shared_state.recoil.selected_profile_id) << "\","
+        << "\"selected_profile_name\":\"" << jsonEscape(shared_state.recoil.selected_profile_name) << "\","
+        << "\"recoil_profile_loaded\":" << (shared_state.recoil.profile_loaded ? "true" : "false") << ","
+        << "\"recoil_shot_index\":" << shared_state.recoil.shot_index << ","
+        << "\"recoil_shot_count\":" << shared_state.recoil.shot_count << ","
+        << "\"recoil_scale_factor\":" << shared_state.recoil.scale_factor << ","
+        << "\"recoil_horizontal_scale_factor\":" << shared_state.recoil.horizontal_scale_factor << ","
+        << "\"recoil_fire_interval_ms\":" << shared_state.recoil.fire_interval_ms << ","
+        << "\"recoil_scheduled_dx\":" << shared_state.recoil.scheduled_dx << ","
+        << "\"recoil_scheduled_dy\":" << shared_state.recoil.scheduled_dy << ","
+        << "\"recoil_last_applied_dx\":" << shared_state.recoil.last_applied_dx << ","
+        << "\"recoil_last_applied_dy\":" << shared_state.recoil.last_applied_dy << ","
+        << "\"recoil_last_applied_shot_index\":" << shared_state.recoil.last_applied_shot_index << ","
+        << "\"recoil_apply_count\":" << shared_state.recoil.apply_count << ","
+        << "\"recoil_debug_state\":\"" << jsonEscape(shared_state.recoil.debug_state) << "\","
+        << "\"recoil_error\":\"" << jsonEscape(shared_state.recoil.error) << "\""
         << "}";
     return oss.str();
 }
@@ -254,6 +381,7 @@ std::string buildPageHtml() {
       {key:"debug_preview_enable",label:"Debug Preview",type:"bool"},
       {key:"capture_cached_timeout_ms",label:"Cached Capture Timeout (ms)",type:"number",step:1,min:0},
       {key:"body_y_ratio",label:"Body Aim Y Ratio",type:"number",step:0.01,min:0,max:1},
+      {key:"head_y_ratio",label:"Head Aim Y Ratio",type:"number",step:0.01,min:0,max:1},
       {key:"tracking_strategy",label:"Tracking Strategy",type:"select",options:[{value:"raw",label:"Raw Detection"},{value:"raw_delta",label:"Raw + Velocity"}]},
       {key:"tracking_velocity_alpha",label:"Velocity Beta",type:"number",step:0.001},
       {key:"kp",label:"Kp (X/Y)",type:"number",step:0.001},
@@ -290,7 +418,7 @@ std::string buildPageHtml() {
       {key:"side_button_key_sequence_loop_delay_ms",label:"F5 X1 Step 5: Wait Before Next Loop (ms)",type:"number",step:1,min:0},
       {key:"recoil_compensation_y_rate_px_s",label:"Recoil Comp Y Rate (px/s)",type:"number",step:1},
       {key:"recoil_compensation_y_px",label:"Legacy Recoil Comp Y (px/cmd)",type:"number",step:0.1},
-      {key:"left_hold_engage_button",label:"F6 Engage Button",type:"select",options:[{value:"rightkey",label:"Right Key"},{value:"leftkey",label:"Left Key"},{value:"both",label:"Either Key"}]},
+      {key:"left_hold_engage_button",label:"F6 Engage Button",type:"select",options:[{value:"rightkey",label:"Right Key"},{value:"leftkey",label:"Left Key"},{value:"x1",label:"X1 Side Button"},{value:"both",label:"Left / Right / X1"}]},
       {key:"recoil_tune_fallback_ignore_mode_check",label:"F7 Ignore Mode Check",type:"bool"},
       {key:"sendinput_gain_x",label:"SendInput Gain X",type:"number",step:0.001},
       {key:"sendinput_gain_y",label:"SendInput Gain Y",type:"number",step:0.001},
@@ -365,6 +493,40 @@ std::string buildPageHtml() {
 </html>)HTML";
 }
 
+std::string buildRuntimePageHtml() {
+    return std::string(R"HTML(<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Delta Runtime</title><style>
+body{margin:0;padding:18px;background:#0f1518;color:#eef6fa;font:14px "Segoe UI",sans-serif}main{max-width:1100px;margin:0 auto}section{background:#162126;border:1px solid #2b3b42;border-radius:16px;padding:16px;margin:0 0 16px}h1,h2{margin:0 0 10px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.field{display:grid;gap:6px}.toggle{display:flex;align-items:center;justify-content:space-between;gap:8px}.bar{padding:10px 12px;border:1px solid #2b3b42;border-radius:12px;background:#10181c;margin:0 0 10px;color:#c7d7de}input,select,a,button{box-sizing:border-box}input,select,a{width:100%;padding:9px 10px;border-radius:10px;border:1px solid #34464f;background:#0c1215;color:#eef6fa;text-decoration:none}button{padding:10px 14px;border:0;border-radius:999px;cursor:pointer}button.primary{background:#f0b35a;color:#1e1408;font-weight:700}button.secondary{background:#223038;color:#eef6fa;border:1px solid #34464f}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+</style></head><body><main>
+<section><h1>Delta Native Runtime</h1><div id="runtime" class="bar">Connecting...</div><div id="message" class="bar">Loading configuration...</div></section>
+<section><h2>Advanced Recoil</h2><div class="grid"><div class="field"><label for="recoil-mode">Recoil Mode</label><select id="recoil-mode"><option value="legacy">Legacy</option><option value="advanced_profile">Advanced Profile</option></select></div><div class="field"><label for="recoil-profile">Saved Profiles</label><select id="recoil-profile"></select></div><div class="field"><label for="recoil-editor-link">Profile Editor</label><a id="recoil-editor-link" href="http://127.0.0.1:8766/" target="_blank" rel="noreferrer">Open Python Recoil Editor</a></div></div><div id="recoil-status" class="bar">Loading recoil status...</div><div id="recoil-debug" class="bar">Loading recoil debug...</div><div class="actions"><button class="primary" type="button" id="recoil-apply">Apply Recoil Selection</button><button class="secondary" type="button" id="recoil-refresh">Refresh Recoil Profiles</button></div></section>
+<section><h2>Runtime Tuning</h2><form id="form"><div class="grid" id="grid"></div><div class="actions"><button class="primary" type="submit">Apply Runtime Changes</button><button class="secondary" type="button" id="reload">Reload</button><button class="secondary" type="button" id="reset">Reset PID</button></div></form></section>
+<script>
+const F=[{k:"pid_enable",l:"PID Enabled",t:"b"},{k:"tracking_enabled",l:"Tracking Enabled",t:"b"},{k:"debug_preview_enable",l:"Debug Preview",t:"b"},{k:"capture_cached_timeout_ms",l:"Cached Capture Timeout (ms)",t:"n",s:1,n:0},{k:"body_y_ratio",l:"Body Aim Y Ratio",t:"n",s:0.01,n:0,x:1},{k:"head_y_ratio",l:"Head Aim Y Ratio",t:"n",s:0.01,n:0,x:1},{k:"tracking_strategy",l:"Tracking Strategy",t:"s",o:[["raw","Raw Detection"],["raw_delta","Raw + Velocity"]]},{k:"tracking_velocity_alpha",l:"Velocity Beta",t:"n",s:0.001},{k:"kp",l:"Kp (X/Y)",t:"n",s:0.001},{k:"ki",l:"Ki (X/Y)",t:"n",s:0.001},{k:"kd",l:"Kd (X/Y)",t:"n",s:0.001},{k:"integral_limit",l:"Integral Limit",t:"n",s:1},{k:"anti_windup_gain",l:"Anti-Windup Gain",t:"n",s:0.001},{k:"derivative_alpha",l:"Derivative Alpha",t:"n",s:0.001},{k:"output_limit",l:"PID Output Limit",t:"n",s:1},{k:"sticky_bias_px",l:"Sticky Bias (px)",t:"n",s:1},{k:"prediction_time",l:"Lead Time (s)",t:"n",s:0.001},{k:"target_max_lost_frames",l:"Max Lost Frames",t:"n",s:1,n:1},{k:"model_conf",l:"Model Conf",t:"n",s:0.001,n:0,x:1},{k:"detection_min_conf",l:"Detection Min Conf",t:"n",s:0.001,n:0,x:1},{k:"ego_motion_comp_enable",l:"Ego Motion Comp",t:"b"},{k:"ego_motion_comp_gain_x",l:"Ego Comp Gain X",t:"n",s:0.001},{k:"ego_motion_comp_gain_y",l:"Ego Comp Gain Y",t:"n",s:0.001},{k:"ego_motion_error_gate_enable",l:"Ego Error Gate",t:"b"},{k:"ego_motion_error_gate_px",l:"Ego Gate Error (px)",t:"n",s:1,n:0},{k:"ego_motion_error_gate_normalize_by_box",l:"Ego Gate Normalize By Box",t:"b"},{k:"ego_motion_error_gate_norm_threshold",l:"Ego Gate Norm Threshold",t:"n",s:0.01,n:0},{k:"ego_motion_reset_on_switch",l:"Reset Ego On Switch",t:"b"},{k:"triggerbot_enable",l:"Trigger Bot",t:"b"},{k:"triggerbot_click_hold_s",l:"Trigger Hold (s)",t:"n",s:0.001,n:0},{k:"triggerbot_click_cooldown_s",l:"Trigger Cooldown (s)",t:"n",s:0.001,n:0},{k:"side_button_key_sequence_use_key3",l:"F5 X1 Step 1: Use Key 3",t:"b"},{k:"side_button_key_sequence_key3_press_time_ms",l:"F5 X1 Step 1: Key 3 Hold (ms)",t:"n",s:1,n:0},{k:"side_button_key_sequence_use_key1",l:"F5 X1 Step 2: Use Key 1",t:"b"},{k:"side_button_key_sequence_key1_press_time_ms",l:"F5 X1 Step 2: Key 1 Hold (ms)",t:"n",s:1,n:0},{k:"side_button_key_sequence_use_right_click",l:"F5 X1 Step 3: Use Right Click",t:"b"},{k:"side_button_key_sequence_right_click_hold_ms",l:"F5 X1 Step 3: Right Click Hold (ms)",t:"n",s:1,n:0},{k:"side_button_key_sequence_use_left_click",l:"F5 X1 Step 4: Use Left Click",t:"b"},{k:"side_button_key_sequence_left_click_hold_ms",l:"F5 X1 Step 4: Left Click Hold (ms)",t:"n",s:1,n:0},{k:"side_button_key_sequence_loop_delay_ms",l:"F5 X1 Step 5: Wait Before Next Loop (ms)",t:"n",s:1,n:0},{k:"recoil_compensation_y_rate_px_s",l:"Legacy Recoil Y Rate (px/s)",t:"n",s:1},{k:"recoil_compensation_y_px",l:"Legacy Recoil Y (px/cmd)",t:"n",s:0.1},{k:"left_hold_engage_button",l:"F6 Engage Button",t:"s",o:[["rightkey","Right Key"],["leftkey","Left Key"],["x1","X1 Side Button"],["both","Left / Right / X1"]]},{k:"recoil_tune_fallback_ignore_mode_check",l:"F7 Ignore Mode Check",t:"b"},{k:"sendinput_gain_x",l:"SendInput Gain X",t:"n",s:0.001},{k:"sendinput_gain_y",l:"SendInput Gain Y",t:"n",s:0.001},{k:"sendinput_max_step",l:"SendInput Max Step",t:"n",s:1,n:1},{k:"raw_max_step_x",l:"Raw Max Step X",t:"n",s:1,n:1},{k:"raw_max_step_y",l:"Raw Max Step Y",t:"n",s:1,n:1}];
+)HTML")
+        + R"HTML(const G=id=>document.getElementById(id),grid=G("grid"),runtime=G("runtime"),recoilStatus=G("recoil-status"),recoilDebug=G("recoil-debug"),recoilMode=G("recoil-mode"),recoilProfile=G("recoil-profile"),message=G("message"),form=G("form");
+const setMessage=t=>message.textContent=t;
+function buildFields(){for(const f of F){const w=document.createElement("div");w.className=f.t==="b"?"field toggle":"field";const l=document.createElement("label");l.htmlFor=f.k;l.textContent=f.l;w.appendChild(l);let i;if(f.t==="s"){i=document.createElement("select");for(const [v,t] of f.o){const o=document.createElement("option");o.value=v;o.textContent=t;i.appendChild(o);}}else{i=document.createElement("input");i.type=f.t==="b"?"checkbox":"number";if(f.t==="n"){i.step=f.s??"any";if(f.n!==undefined)i.min=String(f.n);if(f.x!==undefined)i.max=String(f.x);}}i.id=f.k;w.appendChild(i);grid.appendChild(w);}}
+function applyConfig(cfg){for(const f of F){const i=G(f.k);if(!i)continue;if(f.t==="b")i.checked=Boolean(cfg[f.k]);else if(cfg[f.k]!==undefined)i.value=cfg[f.k];}}
+function applyRecoilConfig(cfg){recoilMode.value=String(cfg.recoil_mode??"legacy");recoilProfile.value=String(cfg.selected_recoil_profile_id??"");}
+function renderRecoilStatus(s){const loaded=s.recoil_profile_loaded?"loaded":"not loaded";const name=s.selected_profile_name||s.selected_profile_id||"none";const err=s.recoil_error?` | error ${s.recoil_error}`:"";const hScale=s.recoil_horizontal_scale_factor ?? s.recoil_scale_factor ?? 0;recoilStatus.textContent=`F7 ${s.recoil_enabled?"ON":"OFF"} | mode ${s.recoil_mode} | profile ${name} (${loaded}) | shot ${s.recoil_shot_index}/${s.recoil_shot_count} | scale V/H ${Number(s.recoil_scale_factor||0).toFixed(3)} / ${Number(hScale).toFixed(3)} | interval ${s.recoil_fire_interval_ms||0}ms${err}`;recoilDebug.textContent=`debug ${s.recoil_debug_state||"idle"} | mode-toggle ${s.recoil_mode_active?"ON":"OFF"} | F6 ${s.recoil_hold_engage_toggle?"ON":"OFF"} | ignore-mode ${s.recoil_ignore_mode_check?"ON":"OFF"} | left ${s.recoil_left_pressed?"DOWN":"UP"} | spray ${s.recoil_spray_active?"ACTIVE":"IDLE"} | scheduled (${s.recoil_scheduled_dx||0}, ${s.recoil_scheduled_dy||0}) | last applied (${s.recoil_last_applied_dx||0}, ${s.recoil_last_applied_dy||0}) @ shot ${s.recoil_last_applied_shot_index||0} | applied count ${s.recoil_apply_count||0}`;}
+function renderStatus(s){runtime.textContent=`Runtime ${s.running?"running":"stopped"} | mode ${s.mode_label} | aim ${s.aimmode_label} | F7 ${s.recoil_enabled?"ON":"OFF"} | recoil ${s.recoil_mode} | profile ${s.selected_profile_name||s.selected_profile_id||"none"} | target ${s.target_found?"locked":"none"} | speed ${Number(s.target_speed).toFixed(1)} | cmd (${s.aim_dx}, ${s.aim_dy})`;renderRecoilStatus(s);}
+function collectPayload(){const out={};for(const f of F){const i=G(f.k);if(!i)continue;out[f.k]=f.t==="b"?Boolean(i.checked):f.t==="s"?String(i.value):Number(i.value);}return out;}
+const collectRecoilPayload=()=>({recoil_mode:String(recoilMode.value),selected_recoil_profile_id:String(recoilProfile.value||"")});
+function renderProfiles(profiles,selectedId){const want=String(selectedId??recoilProfile.value??"");recoilProfile.innerHTML="";const empty=document.createElement("option");empty.value="";empty.textContent="No profile selected";recoilProfile.appendChild(empty);for(const p of profiles||[]){const o=document.createElement("option");o.value=String(p.id);o.textContent=p.valid?`${p.name} (${p.shot_count} shots)`:`${p.name} [invalid]`;o.disabled=!p.valid;recoilProfile.appendChild(o);}recoilProfile.value=want;if(recoilProfile.value!==want)recoilProfile.value="";}
+async function requestJson(path,options={}){const res=await fetch(path,options);const data=await res.json();if(!res.ok)throw new Error(data.error||`HTTP ${res.status}`);return data;}
+async function loadRecoil(){const p=await requestJson("/api/recoil");applyRecoilConfig(p.config);renderProfiles(p.profiles,p.config.selected_recoil_profile_id);renderRecoilStatus(p.status);}
+async function loadAll(){const p=await requestJson("/api/pid");applyConfig(p.config);renderStatus(p.status);await loadRecoil();setMessage("Loaded runtime values.");}
+)HTML"
+        + R"HTML(async function refreshStatus(){try{renderStatus((await requestJson("/api/pid/status")).status);}catch(err){runtime.textContent=err.message;}}
+form.addEventListener("submit",async e=>{e.preventDefault();try{const p=await requestJson("/api/pid",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(collectPayload())});applyConfig(p.config);renderStatus(p.status);setMessage("Applied runtime changes.");}catch(err){setMessage(err.message);}});
+G("reload").addEventListener("click",()=>loadAll().catch(err=>setMessage(err.message)));
+G("reset").addEventListener("click",async()=>{try{renderStatus((await requestJson("/api/pid/reset",{method:"POST"})).status);setMessage("PID reset requested.");}catch(err){setMessage(err.message);}});
+G("recoil-apply").addEventListener("click",async()=>{try{const p=await requestJson("/api/recoil",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(collectRecoilPayload())});applyRecoilConfig(p.config);renderProfiles(p.profiles,p.config.selected_recoil_profile_id);renderRecoilStatus(p.status);setMessage("Applied recoil profile selection.");}catch(err){setMessage(err.message);}});
+G("recoil-refresh").addEventListener("click",async()=>{try{renderProfiles((await requestJson("/api/recoil/profiles")).profiles,recoilProfile.value);setMessage("Reloaded recoil profiles.");}catch(err){setMessage(err.message);}});
+buildFields();loadAll().catch(err=>setMessage(err.message));window.setInterval(refreshStatus,1000);
+</script></main></body></html>)HTML";
+}
+
 bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string& error) {
     if (const auto value = extractJsonBool(body, "pid_enable"); value.has_value()) cfg.pid_enable = *value;
     if (const auto value = extractJsonBool(body, "tracking_enabled"); value.has_value()) cfg.tracking_enabled = *value;
@@ -373,6 +535,7 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
         cfg.capture_cached_timeout_ms = std::max(0, static_cast<int>(std::lround(*value)));
     }
     if (const auto value = extractJsonNumber(body, "body_y_ratio"); value.has_value()) cfg.body_y_ratio = clamp(static_cast<float>(*value), 0.0F, 1.0F);
+    if (const auto value = extractJsonNumber(body, "head_y_ratio"); value.has_value()) cfg.head_y_ratio = clamp(static_cast<float>(*value), 0.0F, 1.0F);
     if (const auto value = extractJsonString(body, "tracking_strategy"); value.has_value()) cfg.tracking_strategy = parseTrackingStrategy(*value);
     if (const auto value = extractJsonNumber(body, "tracking_velocity_alpha"); value.has_value()) cfg.tracking_velocity_alpha = clamp(static_cast<float>(*value), 0.0F, 1.0F);
     if (const auto value = extractJsonNumber(body, "kp"); value.has_value()) cfg.kp = static_cast<float>(*value);
@@ -395,6 +558,8 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     if (const auto value = extractJsonBool(body, "ego_motion_error_gate_normalize_by_box"); value.has_value()) cfg.ego_motion_error_gate_normalize_by_box = *value;
     if (const auto value = extractJsonNumber(body, "ego_motion_error_gate_norm_threshold"); value.has_value()) cfg.ego_motion_error_gate_norm_threshold = std::max(0.0F, static_cast<float>(*value));
     if (const auto value = extractJsonBool(body, "ego_motion_reset_on_switch"); value.has_value()) cfg.ego_motion_reset_on_switch = *value;
+    if (const auto value = extractJsonString(body, "recoil_mode"); value.has_value()) cfg.recoil_mode = parseRecoilMode(*value);
+    if (const auto value = extractJsonString(body, "selected_recoil_profile_id"); value.has_value()) cfg.selected_recoil_profile_id = *value;
     if (const auto value = extractJsonBool(body, "triggerbot_enable"); value.has_value()) cfg.triggerbot_enable = *value;
     if (const auto value = extractJsonNumber(body, "triggerbot_click_hold_s"); value.has_value()) cfg.triggerbot_click_hold_s = std::max(0.0F, static_cast<float>(*value));
     if (const auto value = extractJsonNumber(body, "triggerbot_click_cooldown_s"); value.has_value()) cfg.triggerbot_click_cooldown_s = std::max(0.0F, static_cast<float>(*value));
@@ -432,6 +597,7 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     if (const auto value = extractJsonNumber(body, "sendinput_gain_x"); value.has_value()) cfg.sendinput_gain_x = static_cast<float>(*value);
     if (const auto value = extractJsonNumber(body, "sendinput_gain_y"); value.has_value()) cfg.sendinput_gain_y = static_cast<float>(*value);
     if (const auto value = extractJsonNumber(body, "sendinput_max_step"); value.has_value()) cfg.sendinput_max_step = std::max(1, static_cast<int>(std::lround(*value)));
+    if (const auto value = extractJsonNumber(body, "raw_max_step_x"); value.has_value()) cfg.raw_max_step_x = std::max(1, static_cast<int>(std::lround(*value)));
     if (const auto value = extractJsonNumber(body, "raw_max_step_y"); value.has_value()) cfg.raw_max_step_y = std::max(1, static_cast<int>(std::lround(*value)));
     if (body.find('{') == std::string::npos) {
         error = "Request body must be a JSON object.";
@@ -565,7 +731,7 @@ void RuntimeFrontendServer::serve() {
     }
 
     std::cout << "[frontend] Runtime UI: http://" << config_.frontend_host << ':' << config_.frontend_port << "/\n";
-    const std::string html = buildPageHtml();
+    const std::string html = buildRuntimePageHtml();
 
     while (running_) {
         fd_set readfds;
@@ -601,6 +767,19 @@ void RuntimeFrontendServer::serve() {
             response = httpResponse(html, "text/html; charset=utf-8");
         } else if (method == "GET" && (pathMatches(path, "/api/pid/status") || pathMatches(path, "/api/pidf/status"))) {
             response = httpResponse(std::string("{\"status\":") + buildStatusJson(shared_state_) + "}", "application/json; charset=utf-8");
+        } else if (method == "GET" && pathMatches(path, "/api/recoil/profiles")) {
+            response = httpResponse(buildRecoilProfilesPayload(config_), "application/json; charset=utf-8");
+        } else if (method == "GET" && pathMatches(path, "/api/recoil")) {
+            response = httpResponse(buildRecoilPayload(config_, config_store_, shared_state_), "application/json; charset=utf-8");
+        } else if (method == "POST" && pathMatches(path, "/api/recoil")) {
+            RuntimeConfig next = config_store_.snapshot();
+            std::string error;
+            if (applyRecoilPatch(body, next, error)) {
+                config_store_.update(next);
+                response = httpResponse(buildRecoilPayload(config_, config_store_, shared_state_), "application/json; charset=utf-8");
+            } else {
+                response = httpResponse(std::string("{\"error\":\"") + jsonEscape(error) + "\"}", "application/json; charset=utf-8", 400, "Bad Request");
+            }
         } else if (method == "POST" && (pathMatches(path, "/api/pid/reset") || pathMatches(path, "/api/pidf/reset"))) {
             config_store_.requestReset();
             response = httpResponse(buildApiPayload(config_store_, shared_state_), "application/json; charset=utf-8");
