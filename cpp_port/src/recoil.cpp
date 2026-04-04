@@ -341,11 +341,15 @@ RecoilSchedulerUpdate RecoilScheduler::tick(
     const RuntimeConfig& runtime,
     const bool recoil_enabled,
     const bool left_pressed,
+    const bool x1_pressed,
     const SteadyClock::time_point& now) {
+    const bool trigger_pressed = left_pressed || x1_pressed;
     state_.mode = runtime.recoil_mode;
     state_.enabled = recoil_enabled;
     state_.ignore_mode_check = runtime.recoil_tune_fallback_ignore_mode_check;
     state_.left_pressed = left_pressed;
+    state_.x1_pressed = x1_pressed;
+    state_.trigger_pressed = trigger_pressed;
     state_.spray_active = spray_active_;
     state_.selected_profile_id = runtime.selected_recoil_profile_id;
     state_.scheduled_dx = 0;
@@ -361,7 +365,7 @@ RecoilSchedulerUpdate RecoilScheduler::tick(
     const bool profile_ready = refreshProfile(runtime, now);
     const bool active = runtime.recoil_mode == RecoilMode::AdvancedProfile
         && recoil_enabled
-        && left_pressed
+        && trigger_pressed
         && profile_ready
         && loaded_profile_.has_value()
         && state_.error.empty();
@@ -379,8 +383,8 @@ RecoilSchedulerUpdate RecoilScheduler::tick(
             state_.debug_state = "profile_error";
         } else if (!profile_ready || !loaded_profile_.has_value()) {
             state_.debug_state = "profile_unavailable";
-        } else if (!left_pressed) {
-            state_.debug_state = "waiting_left_click";
+        } else if (!trigger_pressed) {
+            state_.debug_state = "waiting_left_or_x1";
         } else {
             state_.debug_state = "idle";
         }
@@ -433,6 +437,8 @@ RecoilSchedulerUpdate RecoilScheduler::tick(
     state_.enabled = recoil_enabled;
     state_.ignore_mode_check = runtime.recoil_tune_fallback_ignore_mode_check;
     state_.left_pressed = left_pressed;
+    state_.x1_pressed = x1_pressed;
+    state_.trigger_pressed = trigger_pressed;
     state_.spray_active = active && spray_active_;
     state_.selected_profile_id = runtime.selected_recoil_profile_id;
     update.clear_pending = pending_clear_requested_;
@@ -455,6 +461,8 @@ void RecoilScheduler::resetStateForProfile(const RuntimeConfig& runtime) {
     state_.enabled = false;
     state_.ignore_mode_check = runtime.recoil_tune_fallback_ignore_mode_check;
     state_.left_pressed = false;
+    state_.x1_pressed = false;
+    state_.trigger_pressed = false;
     state_.spray_active = false;
     state_.selected_profile_id = runtime.selected_recoil_profile_id;
     state_.selected_profile_name.clear();

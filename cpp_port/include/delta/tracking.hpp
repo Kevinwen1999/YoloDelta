@@ -70,6 +70,28 @@ private:
 
 std::unique_ptr<ITargetTracker> makeTargetTracker(TrackingStrategy strategy, float velocity_alpha);
 
+std::pair<float, float> detectionAimPoint(const Detection& detection, float body_y_ratio, float head_y_ratio);
+
+struct AimCandidatePool {
+    std::vector<Detection> candidates;
+    bool using_head_candidates = false;
+};
+
+AimCandidatePool buildAimCandidatePool(
+    const std::vector<Detection>& detections,
+    AimMode aim_mode,
+    float body_y_ratio,
+    float head_y_ratio);
+
+void resetAimTrackingState(
+    int& lost_frames,
+    int& active_target_cls,
+    float& last_box_w,
+    float& last_box_h,
+    std::optional<std::array<int, 4>>& last_target_bbox,
+    SteadyClock::time_point& last_pid_tick,
+    SteadyClock::time_point& last_track_tick);
+
 struct StickyTargetPick {
     std::optional<Detection> detection;
     bool switched = false;

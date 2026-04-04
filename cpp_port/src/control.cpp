@@ -156,7 +156,7 @@ void playToggleBeep(const int frequency_hz, const int duration_ms) {
 #endif
 }
 
-bool sendVirtualKeyTap(const std::uint16_t virtual_key, const int hold_ms) {
+bool sendVirtualKeyTap(const std::uint16_t virtual_key, const double hold_ms) {
 #if defined(_WIN32)
     INPUT key_down{};
     key_down.type = INPUT_KEYBOARD;
@@ -168,8 +168,8 @@ bool sendVirtualKeyTap(const std::uint16_t virtual_key, const int hold_ms) {
     if (SendInput(1, &key_down, sizeof(INPUT)) != 1) {
         return false;
     }
-    if (hold_ms > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+    if (hold_ms > 0.0) {
+        std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(hold_ms));
     }
     return SendInput(1, &key_up, sizeof(INPUT)) == 1;
 #else

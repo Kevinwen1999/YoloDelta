@@ -63,7 +63,7 @@ bool isLeftHoldEngageSatisfied(
 
 void playToggleBeep(int frequency_hz, int duration_ms = 100);
 
-bool sendVirtualKeyTap(std::uint16_t virtual_key, int hold_ms = 0);
+bool sendVirtualKeyTap(std::uint16_t virtual_key, double hold_ms = 0.0);
 bool sendLeftClickTap(double hold_s = 0.0);
 bool sendRightClickTap(double hold_s = 0.0);
 

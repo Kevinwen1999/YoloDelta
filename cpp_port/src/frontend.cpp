@@ -164,6 +164,8 @@ json buildRecoilStatusObject(const SharedState& shared_state) {
         {"recoil_mode_active", shared_state.recoil.mode_active},
         {"recoil_hold_engage_toggle", shared_state.recoil.hold_engage_toggle},
         {"recoil_left_pressed", shared_state.recoil.left_pressed},
+        {"recoil_x1_pressed", shared_state.recoil.x1_pressed},
+        {"recoil_trigger_pressed", shared_state.recoil.trigger_pressed},
         {"recoil_spray_active", shared_state.recoil.spray_active},
         {"selected_profile_id", shared_state.recoil.selected_profile_id},
         {"selected_profile_name", shared_state.recoil.selected_profile_name},
@@ -228,6 +230,7 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"pid_enable\":" << (cfg.pid_enable ? "true" : "false") << ","
         << "\"tracking_enabled\":" << (cfg.tracking_enabled ? "true" : "false") << ","
         << "\"debug_preview_enable\":" << (cfg.debug_preview_enable ? "true" : "false") << ","
+        << "\"aim_mode\":\"" << aimModeName(cfg.aim_mode) << "\","
         << "\"capture_cached_timeout_ms\":" << cfg.capture_cached_timeout_ms << ","
         << "\"body_y_ratio\":" << cfg.body_y_ratio << ","
         << "\"head_y_ratio\":" << cfg.head_y_ratio << ","
@@ -284,17 +287,23 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
     return oss.str();
 }
 
-std::string buildStatusJson(const SharedState& shared_state) {
+std::string buildStatusJson(const RuntimeConfig& cfg, const SharedState& shared_state) {
     std::lock_guard<std::mutex> lock(shared_state.mutex);
     std::ostringstream oss;
     oss << "{"
         << "\"running\":" << (shared_state.running ? "true" : "false") << ","
         << "\"mode\":" << shared_state.toggles.mode << ","
+        << "\"mode_active\":" << (shared_state.toggles.mode != 0 ? "true" : "false") << ","
         << "\"mode_label\":\"" << (shared_state.toggles.mode == 0 ? "OFF" : "ACTIVE") << "\","
-        << "\"aimmode\":" << shared_state.toggles.aimmode << ","
-        << "\"aimmode_label\":\"" << (shared_state.toggles.aimmode == 0 ? "HEAD" : "BODY") << "\","
+        << "\"aimmode\":" << static_cast<int>(cfg.aim_mode) << ","
+        << "\"aimmode_label\":\"" << aimModeLabel(cfg.aim_mode) << "\","
+        << "\"aim_mode\":\"" << aimModeName(cfg.aim_mode) << "\","
+        << "\"aim_mode_label\":\"" << aimModeLabel(cfg.aim_mode) << "\","
         << "\"side_button_key_sequence_enabled\":"
         << (shared_state.side_button_key_sequence_enabled ? "true" : "false") << ","
+        << "\"left_hold_engage\":" << (shared_state.toggles.left_hold_engage ? "true" : "false") << ","
+        << "\"recoil_tune_fallback\":" << (shared_state.toggles.recoil_tune_fallback ? "true" : "false") << ","
+        << "\"triggerbot_enable\":" << (cfg.triggerbot_enable ? "true" : "false") << ","
         << "\"tracking_strategy\":\"" << jsonEscape(shared_state.tracking_strategy) << "\","
         << "\"target_found\":" << (shared_state.target_found ? "true" : "false") << ","
         << "\"target_speed\":" << shared_state.target_speed << ","
@@ -307,6 +316,8 @@ std::string buildStatusJson(const SharedState& shared_state) {
         << "\"recoil_mode_active\":" << (shared_state.recoil.mode_active ? "true" : "false") << ","
         << "\"recoil_hold_engage_toggle\":" << (shared_state.recoil.hold_engage_toggle ? "true" : "false") << ","
         << "\"recoil_left_pressed\":" << (shared_state.recoil.left_pressed ? "true" : "false") << ","
+        << "\"recoil_x1_pressed\":" << (shared_state.recoil.x1_pressed ? "true" : "false") << ","
+        << "\"recoil_trigger_pressed\":" << (shared_state.recoil.trigger_pressed ? "true" : "false") << ","
         << "\"recoil_spray_active\":" << (shared_state.recoil.spray_active ? "true" : "false") << ","
         << "\"selected_profile_id\":\"" << jsonEscape(shared_state.recoil.selected_profile_id) << "\","
         << "\"selected_profile_name\":\"" << jsonEscape(shared_state.recoil.selected_profile_name) << "\","
@@ -407,15 +418,15 @@ std::string buildPageHtml() {
       {key:"triggerbot_enable",label:"Trigger Bot",type:"bool"},
       {key:"triggerbot_click_hold_s",label:"Trigger Hold (s)",type:"number",step:0.001,min:0},
       {key:"triggerbot_click_cooldown_s",label:"Trigger Cooldown (s)",type:"number",step:0.001,min:0},
-      {key:"side_button_key_sequence_use_key3",label:"F5 X1 Step 1: Use Key 3",type:"bool"},
-      {key:"side_button_key_sequence_key3_press_time_ms",label:"F5 X1 Step 1: Key 3 Hold (ms)",type:"number",step:1,min:0},
-      {key:"side_button_key_sequence_use_key1",label:"F5 X1 Step 2: Use Key 1",type:"bool"},
-      {key:"side_button_key_sequence_key1_press_time_ms",label:"F5 X1 Step 2: Key 1 Hold (ms)",type:"number",step:1,min:0},
-      {key:"side_button_key_sequence_use_right_click",label:"F5 X1 Step 3: Use Right Click",type:"bool"},
-      {key:"side_button_key_sequence_right_click_hold_ms",label:"F5 X1 Step 3: Right Click Hold (ms)",type:"number",step:1,min:0},
-      {key:"side_button_key_sequence_use_left_click",label:"F5 X1 Step 4: Use Left Click",type:"bool"},
-      {key:"side_button_key_sequence_left_click_hold_ms",label:"F5 X1 Step 4: Left Click Hold (ms)",type:"number",step:1,min:0},
-      {key:"side_button_key_sequence_loop_delay_ms",label:"F5 X1 Step 5: Wait Before Next Loop (ms)",type:"number",step:1,min:0},
+      {key:"side_button_key_sequence_use_right_click",label:"F5 X1 Step 1: Use Right Click",type:"bool"},
+      {key:"side_button_key_sequence_right_click_hold_ms",label:"F5 X1 Step 1: Right Click Hold (ms)",type:"number",step:0.001,min:0},
+      {key:"side_button_key_sequence_use_left_click",label:"F5 X1 Step 2: Use Left Click",type:"bool"},
+      {key:"side_button_key_sequence_left_click_hold_ms",label:"F5 X1 Step 2: Left Click Hold (ms)",type:"number",step:0.001,min:0},
+      {key:"side_button_key_sequence_use_key3",label:"F5 X1 Step 3: Use Key 3",type:"bool"},
+      {key:"side_button_key_sequence_key3_press_time_ms",label:"F5 X1 Step 3: Key 3 Hold (ms)",type:"number",step:0.001,min:0},
+      {key:"side_button_key_sequence_use_key1",label:"F5 X1 Step 4: Use Key 1",type:"bool"},
+      {key:"side_button_key_sequence_key1_press_time_ms",label:"F5 X1 Step 4: Key 1 Hold (ms)",type:"number",step:0.001,min:0},
+      {key:"side_button_key_sequence_loop_delay_ms",label:"F5 X1 Step 5: Wait Before Next Loop (ms)",type:"number",step:0.001,min:0},
       {key:"recoil_compensation_y_rate_px_s",label:"Recoil Comp Y Rate (px/s)",type:"number",step:1},
       {key:"recoil_compensation_y_px",label:"Legacy Recoil Comp Y (px/cmd)",type:"number",step:0.1},
       {key:"left_hold_engage_button",label:"F6 Engage Button",type:"select",options:[{value:"rightkey",label:"Right Key"},{value:"leftkey",label:"Left Key"},{value:"x1",label:"X1 Side Button"},{value:"both",label:"Left / Right / X1"}]},
@@ -495,21 +506,25 @@ std::string buildPageHtml() {
 
 std::string buildRuntimePageHtml() {
     return std::string(R"HTML(<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Delta Runtime</title><style>
-body{margin:0;padding:18px;background:#0f1518;color:#eef6fa;font:14px "Segoe UI",sans-serif}main{max-width:1100px;margin:0 auto}section{background:#162126;border:1px solid #2b3b42;border-radius:16px;padding:16px;margin:0 0 16px}h1,h2{margin:0 0 10px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.field{display:grid;gap:6px}.toggle{display:flex;align-items:center;justify-content:space-between;gap:8px}.bar{padding:10px 12px;border:1px solid #2b3b42;border-radius:12px;background:#10181c;margin:0 0 10px;color:#c7d7de}input,select,a,button{box-sizing:border-box}input,select,a{width:100%;padding:9px 10px;border-radius:10px;border:1px solid #34464f;background:#0c1215;color:#eef6fa;text-decoration:none}button{padding:10px 14px;border:0;border-radius:999px;cursor:pointer}button.primary{background:#f0b35a;color:#1e1408;font-weight:700}button.secondary{background:#223038;color:#eef6fa;border:1px solid #34464f}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+body{margin:0;padding:18px;background:#0f1518;color:#eef6fa;font:14px "Segoe UI",sans-serif}main{max-width:1100px;margin:0 auto}section{background:#162126;border:1px solid #2b3b42;border-radius:16px;padding:16px;margin:0 0 16px}h1,h2{margin:0 0 10px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.field{display:grid;gap:6px}.toggle{display:flex;align-items:center;justify-content:space-between;gap:8px}.bar{padding:10px 12px;border:1px solid #2b3b42;border-radius:12px;background:#10181c;margin:0 0 10px;color:#c7d7de}.chip{padding:9px 10px;border:1px solid #34464f;border-radius:10px;background:#0c1215;color:#eef6fa}input,select,a,button{box-sizing:border-box}input,select,a{width:100%;padding:9px 10px;border-radius:10px;border:1px solid #34464f;background:#0c1215;color:#eef6fa;text-decoration:none}button{padding:10px 14px;border:0;border-radius:999px;cursor:pointer}button.primary{background:#f0b35a;color:#1e1408;font-weight:700}button.secondary{background:#223038;color:#eef6fa;border:1px solid #34464f}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
 </style></head><body><main>
 <section><h1>Delta Native Runtime</h1><div id="runtime" class="bar">Connecting...</div><div id="message" class="bar">Loading configuration...</div></section>
+<section><h2>Mode Toggles</h2><div class="grid"><div class="field"><label for="aim-mode">F4 Aim Mode</label><select id="aim-mode"><option value="head">Head</option><option value="body">Body</option><option value="hybrid">Hybrid</option></select></div><div class="field"><label>XBUTTON2 Mode</label><div id="toggle-mode" class="chip">Loading...</div></div><div class="field"><label>F5 X1 Sequence</label><div id="toggle-f5" class="chip">Loading...</div></div><div class="field"><label>F6 Left-Hold Engage</label><div id="toggle-f6" class="chip">Loading...</div></div><div class="field"><label>F7 Recoil Fallback</label><div id="toggle-f7" class="chip">Loading...</div></div><div class="field"><label>F8 TriggerBot</label><div id="toggle-f8" class="chip">Loading...</div></div></div></section>
 <section><h2>Advanced Recoil</h2><div class="grid"><div class="field"><label for="recoil-mode">Recoil Mode</label><select id="recoil-mode"><option value="legacy">Legacy</option><option value="advanced_profile">Advanced Profile</option></select></div><div class="field"><label for="recoil-profile">Saved Profiles</label><select id="recoil-profile"></select></div><div class="field"><label for="recoil-editor-link">Profile Editor</label><a id="recoil-editor-link" href="http://127.0.0.1:8766/" target="_blank" rel="noreferrer">Open Python Recoil Editor</a></div></div><div id="recoil-status" class="bar">Loading recoil status...</div><div id="recoil-debug" class="bar">Loading recoil debug...</div><div class="actions"><button class="primary" type="button" id="recoil-apply">Apply Recoil Selection</button><button class="secondary" type="button" id="recoil-refresh">Refresh Recoil Profiles</button></div></section>
 <section><h2>Runtime Tuning</h2><form id="form"><div class="grid" id="grid"></div><div class="actions"><button class="primary" type="submit">Apply Runtime Changes</button><button class="secondary" type="button" id="reload">Reload</button><button class="secondary" type="button" id="reset">Reset PID</button></div></form></section>
 <script>
-const F=[{k:"pid_enable",l:"PID Enabled",t:"b"},{k:"tracking_enabled",l:"Tracking Enabled",t:"b"},{k:"debug_preview_enable",l:"Debug Preview",t:"b"},{k:"capture_cached_timeout_ms",l:"Cached Capture Timeout (ms)",t:"n",s:1,n:0},{k:"body_y_ratio",l:"Body Aim Y Ratio",t:"n",s:0.01,n:0,x:1},{k:"head_y_ratio",l:"Head Aim Y Ratio",t:"n",s:0.01,n:0,x:1},{k:"tracking_strategy",l:"Tracking Strategy",t:"s",o:[["raw","Raw Detection"],["raw_delta","Raw + Velocity"]]},{k:"tracking_velocity_alpha",l:"Velocity Beta",t:"n",s:0.001},{k:"kp",l:"Kp (X/Y)",t:"n",s:0.001},{k:"ki",l:"Ki (X/Y)",t:"n",s:0.001},{k:"kd",l:"Kd (X/Y)",t:"n",s:0.001},{k:"integral_limit",l:"Integral Limit",t:"n",s:1},{k:"anti_windup_gain",l:"Anti-Windup Gain",t:"n",s:0.001},{k:"derivative_alpha",l:"Derivative Alpha",t:"n",s:0.001},{k:"output_limit",l:"PID Output Limit",t:"n",s:1},{k:"sticky_bias_px",l:"Sticky Bias (px)",t:"n",s:1},{k:"prediction_time",l:"Lead Time (s)",t:"n",s:0.001},{k:"target_max_lost_frames",l:"Max Lost Frames",t:"n",s:1,n:1},{k:"model_conf",l:"Model Conf",t:"n",s:0.001,n:0,x:1},{k:"detection_min_conf",l:"Detection Min Conf",t:"n",s:0.001,n:0,x:1},{k:"ego_motion_comp_enable",l:"Ego Motion Comp",t:"b"},{k:"ego_motion_comp_gain_x",l:"Ego Comp Gain X",t:"n",s:0.001},{k:"ego_motion_comp_gain_y",l:"Ego Comp Gain Y",t:"n",s:0.001},{k:"ego_motion_error_gate_enable",l:"Ego Error Gate",t:"b"},{k:"ego_motion_error_gate_px",l:"Ego Gate Error (px)",t:"n",s:1,n:0},{k:"ego_motion_error_gate_normalize_by_box",l:"Ego Gate Normalize By Box",t:"b"},{k:"ego_motion_error_gate_norm_threshold",l:"Ego Gate Norm Threshold",t:"n",s:0.01,n:0},{k:"ego_motion_reset_on_switch",l:"Reset Ego On Switch",t:"b"},{k:"triggerbot_enable",l:"Trigger Bot",t:"b"},{k:"triggerbot_click_hold_s",l:"Trigger Hold (s)",t:"n",s:0.001,n:0},{k:"triggerbot_click_cooldown_s",l:"Trigger Cooldown (s)",t:"n",s:0.001,n:0},{k:"side_button_key_sequence_use_key3",l:"F5 X1 Step 1: Use Key 3",t:"b"},{k:"side_button_key_sequence_key3_press_time_ms",l:"F5 X1 Step 1: Key 3 Hold (ms)",t:"n",s:1,n:0},{k:"side_button_key_sequence_use_key1",l:"F5 X1 Step 2: Use Key 1",t:"b"},{k:"side_button_key_sequence_key1_press_time_ms",l:"F5 X1 Step 2: Key 1 Hold (ms)",t:"n",s:1,n:0},{k:"side_button_key_sequence_use_right_click",l:"F5 X1 Step 3: Use Right Click",t:"b"},{k:"side_button_key_sequence_right_click_hold_ms",l:"F5 X1 Step 3: Right Click Hold (ms)",t:"n",s:1,n:0},{k:"side_button_key_sequence_use_left_click",l:"F5 X1 Step 4: Use Left Click",t:"b"},{k:"side_button_key_sequence_left_click_hold_ms",l:"F5 X1 Step 4: Left Click Hold (ms)",t:"n",s:1,n:0},{k:"side_button_key_sequence_loop_delay_ms",l:"F5 X1 Step 5: Wait Before Next Loop (ms)",t:"n",s:1,n:0},{k:"recoil_compensation_y_rate_px_s",l:"Legacy Recoil Y Rate (px/s)",t:"n",s:1},{k:"recoil_compensation_y_px",l:"Legacy Recoil Y (px/cmd)",t:"n",s:0.1},{k:"left_hold_engage_button",l:"F6 Engage Button",t:"s",o:[["rightkey","Right Key"],["leftkey","Left Key"],["x1","X1 Side Button"],["both","Left / Right / X1"]]},{k:"recoil_tune_fallback_ignore_mode_check",l:"F7 Ignore Mode Check",t:"b"},{k:"sendinput_gain_x",l:"SendInput Gain X",t:"n",s:0.001},{k:"sendinput_gain_y",l:"SendInput Gain Y",t:"n",s:0.001},{k:"sendinput_max_step",l:"SendInput Max Step",t:"n",s:1,n:1},{k:"raw_max_step_x",l:"Raw Max Step X",t:"n",s:1,n:1},{k:"raw_max_step_y",l:"Raw Max Step Y",t:"n",s:1,n:1}];
+const F=[{k:"pid_enable",l:"PID Enabled",t:"b"},{k:"tracking_enabled",l:"Tracking Enabled",t:"b"},{k:"debug_preview_enable",l:"Debug Preview",t:"b"},{k:"capture_cached_timeout_ms",l:"Cached Capture Timeout (ms)",t:"n",s:1,n:0},{k:"body_y_ratio",l:"Body Aim Y Ratio",t:"n",s:0.01,n:0,x:1},{k:"head_y_ratio",l:"Head Aim Y Ratio",t:"n",s:0.01,n:0,x:1},{k:"tracking_strategy",l:"Tracking Strategy",t:"s",o:[["raw","Raw Detection"],["raw_delta","Raw + Velocity"]]},{k:"tracking_velocity_alpha",l:"Velocity Beta",t:"n",s:0.001},{k:"kp",l:"Kp (X/Y)",t:"n",s:0.001},{k:"ki",l:"Ki (X/Y)",t:"n",s:0.001},{k:"kd",l:"Kd (X/Y)",t:"n",s:0.001},{k:"integral_limit",l:"Integral Limit",t:"n",s:1},{k:"anti_windup_gain",l:"Anti-Windup Gain",t:"n",s:0.001},{k:"derivative_alpha",l:"Derivative Alpha",t:"n",s:0.001},{k:"output_limit",l:"PID Output Limit",t:"n",s:1},{k:"sticky_bias_px",l:"Sticky Bias (px)",t:"n",s:1},{k:"prediction_time",l:"Lead Time (s)",t:"n",s:0.001},{k:"target_max_lost_frames",l:"Max Lost Frames",t:"n",s:1,n:1},{k:"model_conf",l:"Model Conf",t:"n",s:0.001,n:0,x:1},{k:"detection_min_conf",l:"Detection Min Conf",t:"n",s:0.001,n:0,x:1},{k:"ego_motion_comp_enable",l:"Ego Motion Comp",t:"b"},{k:"ego_motion_comp_gain_x",l:"Ego Comp Gain X",t:"n",s:0.001},{k:"ego_motion_comp_gain_y",l:"Ego Comp Gain Y",t:"n",s:0.001},{k:"ego_motion_error_gate_enable",l:"Ego Error Gate",t:"b"},{k:"ego_motion_error_gate_px",l:"Ego Gate Error (px)",t:"n",s:1,n:0},{k:"ego_motion_error_gate_normalize_by_box",l:"Ego Gate Normalize By Box",t:"b"},{k:"ego_motion_error_gate_norm_threshold",l:"Ego Gate Norm Threshold",t:"n",s:0.01,n:0},{k:"ego_motion_reset_on_switch",l:"Reset Ego On Switch",t:"b"},{k:"triggerbot_click_hold_s",l:"Trigger Hold (s)",t:"n",s:0.001,n:0},{k:"triggerbot_click_cooldown_s",l:"Trigger Cooldown (s)",t:"n",s:0.001,n:0},{k:"side_button_key_sequence_use_right_click",l:"F5 X1 Step 1: Use Right Click",t:"b"},{k:"side_button_key_sequence_right_click_hold_ms",l:"F5 X1 Step 1: Right Click Hold (ms)",t:"n",s:0.001,n:0},{k:"side_button_key_sequence_use_left_click",l:"F5 X1 Step 2: Use Left Click",t:"b"},{k:"side_button_key_sequence_left_click_hold_ms",l:"F5 X1 Step 2: Left Click Hold (ms)",t:"n",s:0.001,n:0},{k:"side_button_key_sequence_use_key3",l:"F5 X1 Step 3: Use Key 3",t:"b"},{k:"side_button_key_sequence_key3_press_time_ms",l:"F5 X1 Step 3: Key 3 Hold (ms)",t:"n",s:0.001,n:0},{k:"side_button_key_sequence_use_key1",l:"F5 X1 Step 4: Use Key 1",t:"b"},{k:"side_button_key_sequence_key1_press_time_ms",l:"F5 X1 Step 4: Key 1 Hold (ms)",t:"n",s:0.001,n:0},{k:"side_button_key_sequence_loop_delay_ms",l:"F5 X1 Step 5: Wait Before Next Loop (ms)",t:"n",s:0.001,n:0},{k:"recoil_compensation_y_rate_px_s",l:"Legacy Recoil Y Rate (px/s)",t:"n",s:1},{k:"recoil_compensation_y_px",l:"Legacy Recoil Y (px/cmd)",t:"n",s:0.1},{k:"left_hold_engage_button",l:"F6 Engage Button",t:"s",o:[["rightkey","Right Key"],["leftkey","Left Key"],["x1","X1 Side Button"],["both","Left / Right / X1"]]},{k:"recoil_tune_fallback_ignore_mode_check",l:"F7 Ignore Mode Check",t:"b"},{k:"sendinput_gain_x",l:"SendInput Gain X",t:"n",s:0.001},{k:"sendinput_gain_y",l:"SendInput Gain Y",t:"n",s:0.001},{k:"sendinput_max_step",l:"SendInput Max Step",t:"n",s:1,n:1},{k:"raw_max_step_x",l:"Raw Max Step X",t:"n",s:1,n:1},{k:"raw_max_step_y",l:"Raw Max Step Y",t:"n",s:1,n:1}];
 )HTML")
-        + R"HTML(const G=id=>document.getElementById(id),grid=G("grid"),runtime=G("runtime"),recoilStatus=G("recoil-status"),recoilDebug=G("recoil-debug"),recoilMode=G("recoil-mode"),recoilProfile=G("recoil-profile"),message=G("message"),form=G("form");
+        + R"HTML(const G=id=>document.getElementById(id),grid=G("grid"),runtime=G("runtime"),recoilStatus=G("recoil-status"),recoilDebug=G("recoil-debug"),recoilMode=G("recoil-mode"),recoilProfile=G("recoil-profile"),message=G("message"),form=G("form"),aimMode=G("aim-mode");
+const toggleMode=G("toggle-mode"),toggleF5=G("toggle-f5"),toggleF6=G("toggle-f6"),toggleF7=G("toggle-f7"),toggleF8=G("toggle-f8");
 const setMessage=t=>message.textContent=t;
 function buildFields(){for(const f of F){const w=document.createElement("div");w.className=f.t==="b"?"field toggle":"field";const l=document.createElement("label");l.htmlFor=f.k;l.textContent=f.l;w.appendChild(l);let i;if(f.t==="s"){i=document.createElement("select");for(const [v,t] of f.o){const o=document.createElement("option");o.value=v;o.textContent=t;i.appendChild(o);}}else{i=document.createElement("input");i.type=f.t==="b"?"checkbox":"number";if(f.t==="n"){i.step=f.s??"any";if(f.n!==undefined)i.min=String(f.n);if(f.x!==undefined)i.max=String(f.x);}}i.id=f.k;w.appendChild(i);grid.appendChild(w);}}
-function applyConfig(cfg){for(const f of F){const i=G(f.k);if(!i)continue;if(f.t==="b")i.checked=Boolean(cfg[f.k]);else if(cfg[f.k]!==undefined)i.value=cfg[f.k];}}
+function applyConfig(cfg){for(const f of F){const i=G(f.k);if(!i)continue;if(f.t==="b")i.checked=Boolean(cfg[f.k]);else if(cfg[f.k]!==undefined)i.value=cfg[f.k];}if(cfg.aim_mode!==undefined)aimMode.value=String(cfg.aim_mode);}
 function applyRecoilConfig(cfg){recoilMode.value=String(cfg.recoil_mode??"legacy");recoilProfile.value=String(cfg.selected_recoil_profile_id??"");}
-function renderRecoilStatus(s){const loaded=s.recoil_profile_loaded?"loaded":"not loaded";const name=s.selected_profile_name||s.selected_profile_id||"none";const err=s.recoil_error?` | error ${s.recoil_error}`:"";const hScale=s.recoil_horizontal_scale_factor ?? s.recoil_scale_factor ?? 0;recoilStatus.textContent=`F7 ${s.recoil_enabled?"ON":"OFF"} | mode ${s.recoil_mode} | profile ${name} (${loaded}) | shot ${s.recoil_shot_index}/${s.recoil_shot_count} | scale V/H ${Number(s.recoil_scale_factor||0).toFixed(3)} / ${Number(hScale).toFixed(3)} | interval ${s.recoil_fire_interval_ms||0}ms${err}`;recoilDebug.textContent=`debug ${s.recoil_debug_state||"idle"} | mode-toggle ${s.recoil_mode_active?"ON":"OFF"} | F6 ${s.recoil_hold_engage_toggle?"ON":"OFF"} | ignore-mode ${s.recoil_ignore_mode_check?"ON":"OFF"} | left ${s.recoil_left_pressed?"DOWN":"UP"} | spray ${s.recoil_spray_active?"ACTIVE":"IDLE"} | scheduled (${s.recoil_scheduled_dx||0}, ${s.recoil_scheduled_dy||0}) | last applied (${s.recoil_last_applied_dx||0}, ${s.recoil_last_applied_dy||0}) @ shot ${s.recoil_last_applied_shot_index||0} | applied count ${s.recoil_apply_count||0}`;}
-function renderStatus(s){runtime.textContent=`Runtime ${s.running?"running":"stopped"} | mode ${s.mode_label} | aim ${s.aimmode_label} | F7 ${s.recoil_enabled?"ON":"OFF"} | recoil ${s.recoil_mode} | profile ${s.selected_profile_name||s.selected_profile_id||"none"} | target ${s.target_found?"locked":"none"} | speed ${Number(s.target_speed).toFixed(1)} | cmd (${s.aim_dx}, ${s.aim_dy})`;renderRecoilStatus(s);}
+function renderToggleChip(node,label,on){node.textContent=`${label}: ${on?"ON":"OFF"}`;}
+function renderModeToggles(s){aimMode.value=String(s.aim_mode??"head");toggleMode.textContent=`${s.mode_label||"OFF"}`;toggleF5.textContent=`${s.side_button_key_sequence_enabled?"ON":"OFF"}`;toggleF6.textContent=`${s.left_hold_engage?"ON":"OFF"}`;toggleF7.textContent=`${s.recoil_tune_fallback?"ON":"OFF"}`;toggleF8.textContent=`${s.triggerbot_enable?"ON":"OFF"}`;}
+function renderRecoilStatus(s){const loaded=s.recoil_profile_loaded?"loaded":"not loaded";const name=s.selected_profile_name||s.selected_profile_id||"none";const err=s.recoil_error?` | error ${s.recoil_error}`:"";const hScale=s.recoil_horizontal_scale_factor ?? s.recoil_scale_factor ?? 0;recoilStatus.textContent=`F7 ${s.recoil_enabled?"ON":"OFF"} | mode ${s.recoil_mode} | profile ${name} (${loaded}) | shot ${s.recoil_shot_index}/${s.recoil_shot_count} | scale V/H ${Number(s.recoil_scale_factor||0).toFixed(3)} / ${Number(hScale).toFixed(3)} | interval ${s.recoil_fire_interval_ms||0}ms${err}`;recoilDebug.textContent=`debug ${s.recoil_debug_state||"idle"} | mode-toggle ${s.recoil_mode_active?"ON":"OFF"} | F6 ${s.recoil_hold_engage_toggle?"ON":"OFF"} | ignore-mode ${s.recoil_ignore_mode_check?"ON":"OFF"} | trigger ${s.recoil_trigger_pressed?"DOWN":"UP"} | left ${s.recoil_left_pressed?"DOWN":"UP"} | x1 ${s.recoil_x1_pressed?"DOWN":"UP"} | spray ${s.recoil_spray_active?"ACTIVE":"IDLE"} | scheduled (${s.recoil_scheduled_dx||0}, ${s.recoil_scheduled_dy||0}) | last applied (${s.recoil_last_applied_dx||0}, ${s.recoil_last_applied_dy||0}) @ shot ${s.recoil_last_applied_shot_index||0} | applied count ${s.recoil_apply_count||0}`;}
+function renderStatus(s){runtime.textContent=`Runtime ${s.running?"running":"stopped"} | mode ${s.mode_label} | aim ${s.aim_mode_label||s.aimmode_label} | F8 ${s.triggerbot_enable?"ON":"OFF"} | recoil ${s.recoil_mode} | profile ${s.selected_profile_name||s.selected_profile_id||"none"} | target ${s.target_found?"locked":"none"} | speed ${Number(s.target_speed).toFixed(1)} | cmd (${s.aim_dx}, ${s.aim_dy})`;renderModeToggles(s);renderRecoilStatus(s);}
 function collectPayload(){const out={};for(const f of F){const i=G(f.k);if(!i)continue;out[f.k]=f.t==="b"?Boolean(i.checked):f.t==="s"?String(i.value):Number(i.value);}return out;}
 const collectRecoilPayload=()=>({recoil_mode:String(recoilMode.value),selected_recoil_profile_id:String(recoilProfile.value||"")});
 function renderProfiles(profiles,selectedId){const want=String(selectedId??recoilProfile.value??"");recoilProfile.innerHTML="";const empty=document.createElement("option");empty.value="";empty.textContent="No profile selected";recoilProfile.appendChild(empty);for(const p of profiles||[]){const o=document.createElement("option");o.value=String(p.id);o.textContent=p.valid?`${p.name} (${p.shot_count} shots)`:`${p.name} [invalid]`;o.disabled=!p.valid;recoilProfile.appendChild(o);}recoilProfile.value=want;if(recoilProfile.value!==want)recoilProfile.value="";}
@@ -519,6 +534,7 @@ async function loadAll(){const p=await requestJson("/api/pid");applyConfig(p.con
 )HTML"
         + R"HTML(async function refreshStatus(){try{renderStatus((await requestJson("/api/pid/status")).status);}catch(err){runtime.textContent=err.message;}}
 form.addEventListener("submit",async e=>{e.preventDefault();try{const p=await requestJson("/api/pid",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(collectPayload())});applyConfig(p.config);renderStatus(p.status);setMessage("Applied runtime changes.");}catch(err){setMessage(err.message);}});
+aimMode.addEventListener("change",async()=>{try{const p=await requestJson("/api/pid",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({aim_mode:String(aimMode.value)})});applyConfig(p.config);renderStatus(p.status);setMessage("Applied aim mode.");}catch(err){setMessage(err.message);}});
 G("reload").addEventListener("click",()=>loadAll().catch(err=>setMessage(err.message)));
 G("reset").addEventListener("click",async()=>{try{renderStatus((await requestJson("/api/pid/reset",{method:"POST"})).status);setMessage("PID reset requested.");}catch(err){setMessage(err.message);}});
 G("recoil-apply").addEventListener("click",async()=>{try{const p=await requestJson("/api/recoil",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(collectRecoilPayload())});applyRecoilConfig(p.config);renderProfiles(p.profiles,p.config.selected_recoil_profile_id);renderRecoilStatus(p.status);setMessage("Applied recoil profile selection.");}catch(err){setMessage(err.message);}});
@@ -531,6 +547,7 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     if (const auto value = extractJsonBool(body, "pid_enable"); value.has_value()) cfg.pid_enable = *value;
     if (const auto value = extractJsonBool(body, "tracking_enabled"); value.has_value()) cfg.tracking_enabled = *value;
     if (const auto value = extractJsonBool(body, "debug_preview_enable"); value.has_value()) cfg.debug_preview_enable = *value;
+    if (const auto value = extractJsonString(body, "aim_mode"); value.has_value()) cfg.aim_mode = parseAimMode(*value);
     if (const auto value = extractJsonNumber(body, "capture_cached_timeout_ms"); value.has_value()) {
         cfg.capture_cached_timeout_ms = std::max(0, static_cast<int>(std::lround(*value)));
     }
@@ -567,28 +584,28 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
         cfg.side_button_key_sequence_use_key3 = *value;
     }
     if (const auto value = extractJsonNumber(body, "side_button_key_sequence_key3_press_time_ms"); value.has_value()) {
-        cfg.side_button_key_sequence_key3_press_time_ms = std::max(0, static_cast<int>(std::lround(*value)));
+        cfg.side_button_key_sequence_key3_press_time_ms = std::max(0.0, *value);
     }
     if (const auto value = extractJsonBool(body, "side_button_key_sequence_use_key1"); value.has_value()) {
         cfg.side_button_key_sequence_use_key1 = *value;
     }
     if (const auto value = extractJsonNumber(body, "side_button_key_sequence_key1_press_time_ms"); value.has_value()) {
-        cfg.side_button_key_sequence_key1_press_time_ms = std::max(0, static_cast<int>(std::lround(*value)));
+        cfg.side_button_key_sequence_key1_press_time_ms = std::max(0.0, *value);
     }
     if (const auto value = extractJsonBool(body, "side_button_key_sequence_use_right_click"); value.has_value()) {
         cfg.side_button_key_sequence_use_right_click = *value;
     }
     if (const auto value = extractJsonNumber(body, "side_button_key_sequence_right_click_hold_ms"); value.has_value()) {
-        cfg.side_button_key_sequence_right_click_hold_ms = std::max(0, static_cast<int>(std::lround(*value)));
+        cfg.side_button_key_sequence_right_click_hold_ms = std::max(0.0, *value);
     }
     if (const auto value = extractJsonBool(body, "side_button_key_sequence_use_left_click"); value.has_value()) {
         cfg.side_button_key_sequence_use_left_click = *value;
     }
     if (const auto value = extractJsonNumber(body, "side_button_key_sequence_left_click_hold_ms"); value.has_value()) {
-        cfg.side_button_key_sequence_left_click_hold_ms = std::max(0, static_cast<int>(std::lround(*value)));
+        cfg.side_button_key_sequence_left_click_hold_ms = std::max(0.0, *value);
     }
     if (const auto value = extractJsonNumber(body, "side_button_key_sequence_loop_delay_ms"); value.has_value()) {
-        cfg.side_button_key_sequence_loop_delay_ms = std::max(0, static_cast<int>(std::lround(*value)));
+        cfg.side_button_key_sequence_loop_delay_ms = std::max(0.0, *value);
     }
     if (const auto value = extractJsonNumber(body, "recoil_compensation_y_rate_px_s"); value.has_value()) cfg.recoil_compensation_y_rate_px_s = static_cast<float>(*value);
     if (const auto value = extractJsonNumber(body, "recoil_compensation_y_px"); value.has_value()) cfg.recoil_compensation_y_px = static_cast<float>(*value);
@@ -611,7 +628,7 @@ std::string buildApiPayload(RuntimeConfigStore& store, SharedState& shared_state
     std::ostringstream oss;
     oss << "{"
         << "\"config\":" << buildConfigJson(cfg, store.version(), store.resetToken()) << ","
-        << "\"status\":" << buildStatusJson(shared_state)
+        << "\"status\":" << buildStatusJson(cfg, shared_state)
         << "}";
     return oss.str();
 }
@@ -766,7 +783,9 @@ void RuntimeFrontendServer::serve() {
         if (method == "GET" && rootPathMatches(path)) {
             response = httpResponse(html, "text/html; charset=utf-8");
         } else if (method == "GET" && (pathMatches(path, "/api/pid/status") || pathMatches(path, "/api/pidf/status"))) {
-            response = httpResponse(std::string("{\"status\":") + buildStatusJson(shared_state_) + "}", "application/json; charset=utf-8");
+            response = httpResponse(
+                std::string("{\"status\":") + buildStatusJson(config_store_.snapshot(), shared_state_) + "}",
+                "application/json; charset=utf-8");
         } else if (method == "GET" && pathMatches(path, "/api/recoil/profiles")) {
             response = httpResponse(buildRecoilProfilesPayload(config_), "application/json; charset=utf-8");
         } else if (method == "GET" && pathMatches(path, "/api/recoil")) {

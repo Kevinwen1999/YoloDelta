@@ -157,6 +157,25 @@ const char* trackingStrategyName(const TrackingStrategy strategy) {
     return strategy == TrackingStrategy::Raw ? "raw" : "raw_delta";
 }
 
+int aimModeBeepFrequency(const AimMode aim_mode) {
+    switch (aim_mode) {
+    case AimMode::Body: return 600;
+    case AimMode::Hybrid: return 900;
+    case AimMode::Head:
+    default: return 1200;
+    }
+}
+
+bool canReusePreviousTarget(
+    const AimMode aim_mode,
+    const bool using_head_candidates,
+    const int prev_target_cls) {
+    if (aim_mode == AimMode::Hybrid) {
+        return prev_target_cls == (using_head_candidates ? 1 : 0);
+    }
+    return prev_target_cls == aimModeTargetClass(aim_mode);
+}
+
 float emaUpdateSigned(const float prev, const float sample, const float alpha) {
     const float clamped_alpha = clamp(alpha, 0.0F, 1.0F);
     if (clamped_alpha <= 0.0F) {
@@ -167,25 +186,6 @@ float emaUpdateSigned(const float prev, const float sample, const float alpha) {
 
 std::pair<int, int> screenCenter(const StaticConfig& config) {
     return {config.screen_w / 2, config.screen_h / 2};
-}
-
-std::pair<float, float> detectionAimPoint(
-    const Detection& detection,
-    const float body_y_ratio,
-    const float head_y_ratio) {
-    const float x1 = static_cast<float>(detection.bbox[0]);
-    const float y1 = static_cast<float>(detection.bbox[1]);
-    const float x2 = static_cast<float>(detection.bbox[2]);
-    const float y2 = static_cast<float>(detection.bbox[3]);
-    const float width = std::max(1.0F, x2 - x1);
-    const float height = std::max(1.0F, y2 - y1);
-    const float aim_x = x1 + (width * 0.5F);
-    const float aim_y = detection.cls == 0
-        ? (y1 + (height * clamp(body_y_ratio, 0.0F, 1.0F)))
-        : (detection.cls == 1
-            ? (y1 + (height * clamp(head_y_ratio, 0.0F, 1.0F)))
-            : (y1 + (height * 0.5F)));
-    return {aim_x, clamp(aim_y, y1, y2)};
 }
 
 float bboxIou(const std::array<int, 4>& a, const std::array<int, 4>& b) {
@@ -810,6 +810,7 @@ void DeltaApp::inferenceLoop() {
         std::uint64_t last_pid_version = runtime_store_.version();
         std::uint64_t last_reset_token = runtime_store_.resetToken();
         TrackingStrategy last_tracking_strategy = runtime.tracking_strategy;
+        AimMode last_aim_mode = runtime.aim_mode;
         auto tracker = makeTargetTracker(last_tracking_strategy, runtime.tracking_velocity_alpha);
         int lost_frames = 0;
         int active_target_cls = -1;
@@ -885,19 +886,46 @@ void DeltaApp::inferenceLoop() {
                 tracker = makeTargetTracker(runtime.tracking_strategy, runtime.tracking_velocity_alpha);
                 pid_x.reset();
                 pid_y.reset();
-                lost_frames = 0;
-                active_target_cls = -1;
-                last_box_w = 0.0F;
-                last_box_h = 0.0F;
-                last_target_bbox.reset();
-                last_pid_tick = {};
-                last_track_tick = {};
+                resetAimTrackingState(
+                    lost_frames,
+                    active_target_cls,
+                    last_box_w,
+                    last_box_h,
+                    last_target_bbox,
+                    last_pid_tick,
+                    last_track_tick);
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                 }
                 last_tracking_strategy = runtime.tracking_strategy;
+                if (debug_preview_ && debug_preview_enabled) {
+                    debug_preview_->publish(makeInactiveDebugPreviewSnapshot(center));
+                }
+                preview_idle_state = true;
+                std::this_thread::sleep_for(kInferenceIdleSleep);
+                continue;
+            }
+
+            if (runtime.aim_mode != last_aim_mode) {
+                tracker->reset();
+                pid_x.reset();
+                pid_y.reset();
+                resetAimTrackingState(
+                    lost_frames,
+                    active_target_cls,
+                    last_box_w,
+                    last_box_h,
+                    last_target_bbox,
+                    last_pid_tick,
+                    last_track_tick);
+                command_slot_.clear();
+                {
+                    std::lock_guard<std::mutex> lock(shared_.mutex);
+                    clearAimStateLocked(shared_, center, runtime.tracking_strategy);
+                }
+                last_aim_mode = runtime.aim_mode;
                 if (debug_preview_ && debug_preview_enabled) {
                     debug_preview_->publish(makeInactiveDebugPreviewSnapshot(center));
                 }
@@ -934,13 +962,14 @@ void DeltaApp::inferenceLoop() {
                 tracker->reset();
                 pid_x.reset();
                 pid_y.reset();
-                lost_frames = 0;
-                active_target_cls = -1;
-                last_box_w = 0.0F;
-                last_box_h = 0.0F;
-                last_target_bbox.reset();
-                last_pid_tick = {};
-                last_track_tick = {};
+                resetAimTrackingState(
+                    lost_frames,
+                    active_target_cls,
+                    last_box_w,
+                    last_box_h,
+                    last_target_bbox,
+                    last_pid_tick,
+                    last_track_tick);
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1005,25 +1034,13 @@ void DeltaApp::inferenceLoop() {
                 continue;
             }
 
-            const int target_cls = toggles.aimmode == 0 ? 1 : 0;
-            if (active_target_cls != -1 && active_target_cls != target_cls) {
-                tracker->reset();
-                pid_x.reset();
-                pid_y.reset();
-                lost_frames = 0;
-                active_target_cls = -1;
-                last_box_w = 0.0F;
-                last_box_h = 0.0F;
-                last_target_bbox.reset();
-                last_pid_tick = {};
-                last_track_tick = {};
-            }
+            const int requested_target_cls = aimModeTargetClass(runtime.aim_mode);
 
             InferenceResult inference_result{};
             if (gpu_packet.has_value()) {
-                inference_result = inference_->predictGpu(*gpu_packet, target_cls);
+                inference_result = inference_->predictGpu(*gpu_packet, requested_target_cls);
             } else if (cpu_packet.has_value()) {
-                inference_result = inference_->predict(*cpu_packet, target_cls);
+                inference_result = inference_->predict(*cpu_packet, requested_target_cls);
             }
 
             std::vector<Detection> detections = inference_result.detections;
@@ -1044,6 +1061,11 @@ void DeltaApp::inferenceLoop() {
                         return detection.conf < runtime.detection_min_conf;
                     }),
                 detections.end());
+            const AimCandidatePool aim_pool = buildAimCandidatePool(
+                detections,
+                runtime.aim_mode,
+                runtime.body_y_ratio,
+                runtime.head_y_ratio);
 
             const auto select_start = SteadyClock::now();
             std::optional<std::pair<float, float>> locked_point;
@@ -1052,7 +1074,7 @@ void DeltaApp::inferenceLoop() {
                 locked_point = std::make_pair(tracker_state.x, tracker_state.y);
             } else if (tracking_enabled
                 && prev_target_found
-                && prev_target_cls == target_cls
+                && canReusePreviousTarget(runtime.aim_mode, aim_pool.using_head_candidates, prev_target_cls)
                 && prev_target_time != SystemClock::time_point{}
                 && secondsSince(prev_target_time, SystemClock::now()) <= kTargetTimeoutSeconds) {
                 locked_point = std::make_pair(static_cast<float>(prev_target_full.first), static_cast<float>(prev_target_full.second));
@@ -1061,7 +1083,7 @@ void DeltaApp::inferenceLoop() {
             std::optional<StickyTargetPick> sticky;
             if (!locked_point.has_value()) {
                 sticky = pickStickyTarget(
-                    detections,
+                    aim_pool.candidates,
                     center.first,
                     center.second,
                     std::nullopt,
@@ -1080,7 +1102,7 @@ void DeltaApp::inferenceLoop() {
                         std::sqrt((assoc_state.vx * assoc_state.vx) + (assoc_state.vy * assoc_state.vy)) * kAssocSpeedJumpGain);
                 }
                 sticky = pickAssociatedStickyTarget(
-                    detections,
+                    aim_pool.candidates,
                     center.first,
                     center.second,
                     assoc_ref,
@@ -1165,12 +1187,14 @@ void DeltaApp::inferenceLoop() {
                     tracker->reset();
                     pid_x.reset();
                     pid_y.reset();
-                    lost_frames = 0;
-                    active_target_cls = -1;
-                    last_box_w = 0.0F;
-                    last_box_h = 0.0F;
-                    last_target_bbox.reset();
-                    last_pid_tick = {};
+                    resetAimTrackingState(
+                        lost_frames,
+                        active_target_cls,
+                        last_box_w,
+                        last_box_h,
+                        last_target_bbox,
+                        last_pid_tick,
+                        last_track_tick);
                     command_slot_.clear();
                     {
                         std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1298,7 +1322,10 @@ void DeltaApp::inferenceLoop() {
             const auto aim_sync_start = SteadyClock::now();
             const int focus_x = clamp(static_cast<int>(std::lround(tracker_state.x)), 0, config_.screen_w - 1);
             const int focus_y = clamp(static_cast<int>(std::lround(tracker_state.y)), 0, config_.screen_h - 1);
-            const int selected_cls = active_target_cls != -1 ? active_target_cls : target_cls;
+            const int default_target_cls = runtime.aim_mode == AimMode::Hybrid
+                ? (aim_pool.using_head_candidates ? 1 : 0)
+                : aimModeTargetClass(runtime.aim_mode);
+            const int selected_cls = active_target_cls != -1 ? active_target_cls : default_target_cls;
             const auto now_system = SystemClock::now();
 
             {
@@ -1385,6 +1412,7 @@ void DeltaApp::recoilLoop() {
         bool running = true;
         bool recoil_enabled = false;
         bool left_pressed = false;
+        bool x1_pressed = false;
         bool mode_active = false;
         bool hold_engage_toggle = false;
         {
@@ -1392,6 +1420,7 @@ void DeltaApp::recoilLoop() {
             running = shared_.running;
             recoil_enabled = shared_.toggles.recoil_tune_fallback;
             left_pressed = shared_.toggles.left_pressed;
+            x1_pressed = shared_.toggles.x1_pressed;
             mode_active = shared_.toggles.mode != 0;
             hold_engage_toggle = shared_.toggles.left_hold_engage;
         }
@@ -1399,7 +1428,7 @@ void DeltaApp::recoilLoop() {
             break;
         }
 
-        const RecoilSchedulerUpdate update = recoil_scheduler_->tick(runtime, recoil_enabled, left_pressed);
+        const RecoilSchedulerUpdate update = recoil_scheduler_->tick(runtime, recoil_enabled, left_pressed, x1_pressed);
         {
             std::lock_guard<std::mutex> lock(shared_.mutex);
             if (!shared_.running) {
@@ -1435,7 +1464,7 @@ void DeltaApp::controlLoop() {
     Win32HotkeySource hotkeys;
     InputSnapshot previous{};
     SteadyClock::time_point last_mode_toggle{};
-    SteadyClock::time_point last_aimmode_toggle{};
+    SteadyClock::time_point last_aim_mode_toggle{};
     SteadyClock::time_point last_hold_toggle{};
     SteadyClock::time_point last_recoil_toggle{};
     SteadyClock::time_point last_triggerbot_toggle{};
@@ -1465,6 +1494,8 @@ void DeltaApp::controlLoop() {
         }
 
         bool triggerbot_toggle = false;
+        bool aim_mode_changed = false;
+        AimMode next_aim_mode = runtime.aim_mode;
         {
             std::lock_guard<std::mutex> lock(shared_.mutex);
             shared_.toggles.left_pressed = snapshot.left_pressed;
@@ -1484,13 +1515,12 @@ void DeltaApp::controlLoop() {
                 }
                 playToggleBeep(mode == 1 ? 1000 : 500);
             }
-            if (risingEdge(snapshot.f4_pressed, previous.f4_pressed) && (steady_now - last_aimmode_toggle) >= kToggleCooldown) {
-                shared_.toggles.aimmode = (shared_.toggles.aimmode + 1) % 2;
-                last_aimmode_toggle = steady_now;
-                if (config_.debug_log) {
-                    std::cout << "[control] AimMode: " << shared_.toggles.aimmode << "\n";
-                }
-                playToggleBeep(shared_.toggles.aimmode == 0 ? 1200 : 600);
+            if (risingEdge(snapshot.f4_pressed, previous.f4_pressed) && (steady_now - last_aim_mode_toggle) >= kToggleCooldown) {
+                next_aim_mode = nextAimMode(runtime.aim_mode);
+                last_aim_mode_toggle = steady_now;
+                aim_mode_changed = true;
+                command_slot_.clear();
+                clearAimStateLocked(shared_, center, runtime.tracking_strategy);
             }
             if (risingEdge(snapshot.f6_pressed, previous.f6_pressed) && (steady_now - last_hold_toggle) >= kToggleCooldown) {
                 shared_.toggles.left_hold_engage = !shared_.toggles.left_hold_engage;
@@ -1523,6 +1553,16 @@ void DeltaApp::controlLoop() {
             }
         }
         previous = snapshot;
+
+        if (aim_mode_changed) {
+            runtime.aim_mode = next_aim_mode;
+            runtime_store_.update(runtime);
+            if (config_.debug_log) {
+                std::cout << "[control] AimMode: " << aimModeLabel(runtime.aim_mode)
+                          << " (" << aimModeName(runtime.aim_mode) << ")\n";
+            }
+            playToggleBeep(aimModeBeepFrequency(runtime.aim_mode));
+        }
 
         if (triggerbot_toggle) {
             runtime.triggerbot_enable = !runtime.triggerbot_enable;
@@ -1566,6 +1606,7 @@ void DeltaApp::controlLoop() {
             ? static_cast<double>(runtime.recoil_compensation_y_rate_px_s)
             : (static_cast<double>(runtime.recoil_compensation_y_px) * kLegacyRecoilReferenceHz);
         const bool legacy_recoil_enabled = runtime.recoil_mode == RecoilMode::Legacy && std::abs(recoil_rate_y_px_s) > 1e-6;
+        const bool recoil_trigger_pressed = toggles.left_pressed || toggles.x1_pressed;
         if (!cmd.has_value()) {
             if (advanced_recoil_pending) {
                 cmd = CommandPacket{
@@ -1581,13 +1622,14 @@ void DeltaApp::controlLoop() {
                 };
             } else {
                 const bool mode_ok = runtime.recoil_tune_fallback_ignore_mode_check || (toggles.mode != 0);
+                const bool target_ok = runtime.recoil_tune_fallback_ignore_mode_check || !target_detected;
                 const bool engage_ok = isLeftHoldEngageSatisfied(
                     toggles.left_hold_engage,
                     runtime.left_hold_engage_button,
                     toggles.left_pressed,
                     toggles.right_pressed,
                     toggles.x1_pressed);
-                if (legacy_recoil_enabled && toggles.recoil_tune_fallback && target_detected && toggles.left_pressed && mode_ok && engage_ok) {
+                if (legacy_recoil_enabled && toggles.recoil_tune_fallback && target_ok && recoil_trigger_pressed && mode_ok && engage_ok) {
                     cmd = CommandPacket{
                         .dx = 0,
                         .dy = 0,
@@ -1595,7 +1637,7 @@ void DeltaApp::controlLoop() {
                         .generated_at = system_now,
                         .frame_time = system_now,
                         .capture_time = system_now,
-                        .target_detected = true,
+                        .target_detected = target_ok,
                         .synthetic_recoil = true,
                         .trigger_fire = false,
                     };
@@ -1664,11 +1706,11 @@ void DeltaApp::controlLoop() {
         int dx = cmd->dx;
         int dy = cmd->dy;
         const bool trigger_will_click = trigger_fire
-            && !toggles.left_pressed
+            && !recoil_trigger_pressed
             && (last_trigger_click == SystemClock::time_point{}
                 || secondsSince(last_trigger_click, system_now) >= runtime.triggerbot_click_cooldown_s);
 
-        const bool recoil_active = legacy_recoil_enabled && cmd->target_detected && (toggles.left_pressed || trigger_will_click);
+        const bool recoil_active = legacy_recoil_enabled && cmd->target_detected && (recoil_trigger_pressed || trigger_will_click);
         if (recoil_active) {
             const auto recoil_tick = SteadyClock::now();
             if (last_recoil_integrate_tick != SteadyClock::time_point{}) {
@@ -1739,7 +1781,9 @@ void DeltaApp::controlLoop() {
                           << " ignore_mode=" << (runtime.recoil_tune_fallback_ignore_mode_check ? "ON" : "OFF")
                           << " mode=" << (toggles.mode != 0 ? "ACTIVE" : "OFF")
                           << " F6=" << (toggles.left_hold_engage ? "ON" : "OFF")
+                          << " trigger=" << (recoil_trigger_pressed ? "DOWN" : "UP")
                           << " left=" << (toggles.left_pressed ? "DOWN" : "UP")
+                          << " x1=" << (toggles.x1_pressed ? "DOWN" : "UP")
                           << "\n";
             }
         }
@@ -1841,7 +1885,7 @@ void DeltaApp::sideButtonKeySequenceLoop() {
 
         if (toggle_changed) {
             if (config_.debug_log) {
-                std::cout << "[control] SideButtonKeySequence31RClickLClick: " << (sequence_enabled ? "ON" : "OFF") << "\n";
+                std::cout << "[control] SideButtonKeySequenceRClickLClick31: " << (sequence_enabled ? "ON" : "OFF") << "\n";
             }
             playToggleBeep(sequence_enabled ? 1700 : 950);
         }
@@ -1852,27 +1896,27 @@ void DeltaApp::sideButtonKeySequenceLoop() {
             continue;
         }
 
-        const int key3_press_time_ms = std::max(0, runtime.side_button_key_sequence_key3_press_time_ms);
-        const int key1_press_time_ms = std::max(0, runtime.side_button_key_sequence_key1_press_time_ms);
-        const int right_click_hold_ms = std::max(0, runtime.side_button_key_sequence_right_click_hold_ms);
-        const int left_click_hold_ms = std::max(0, runtime.side_button_key_sequence_left_click_hold_ms);
-        const int loop_delay_ms = std::max(0, runtime.side_button_key_sequence_loop_delay_ms);
+        const double key3_press_time_ms = std::max(0.0, runtime.side_button_key_sequence_key3_press_time_ms);
+        const double key1_press_time_ms = std::max(0.0, runtime.side_button_key_sequence_key1_press_time_ms);
+        const double right_click_hold_ms = std::max(0.0, runtime.side_button_key_sequence_right_click_hold_ms);
+        const double left_click_hold_ms = std::max(0.0, runtime.side_button_key_sequence_left_click_hold_ms);
+        const double loop_delay_ms = std::max(0.0, runtime.side_button_key_sequence_loop_delay_ms);
 
-        const bool sent_three = !runtime.side_button_key_sequence_use_key3
-            || sendVirtualKeyTap(static_cast<std::uint16_t>('3'), key3_press_time_ms);
-        const bool sent_one = !runtime.side_button_key_sequence_use_key1
-            || sendVirtualKeyTap(static_cast<std::uint16_t>('1'), key1_press_time_ms);
         const bool sent_right_click = !runtime.side_button_key_sequence_use_right_click
             || sendRightClickTap(static_cast<double>(right_click_hold_ms) / 1000.0);
         const bool sent_left_click = !runtime.side_button_key_sequence_use_left_click
             || sendLeftClickTap(static_cast<double>(left_click_hold_ms) / 1000.0);
+        const bool sent_three = !runtime.side_button_key_sequence_use_key3
+            || sendVirtualKeyTap(static_cast<std::uint16_t>('3'), key3_press_time_ms);
+        const bool sent_one = !runtime.side_button_key_sequence_use_key1
+            || sendVirtualKeyTap(static_cast<std::uint16_t>('1'), key1_press_time_ms);
         if (config_.debug_log && (!sent_three || !sent_one || !sent_right_click || !sent_left_click)) {
-            std::cerr << "[control] SideButtonKeySequence31RClickLClick send failed.\n";
+            std::cerr << "[control] SideButtonKeySequenceRClickLClick31 send failed.\n";
         }
 
         previous = snapshot;
-        if (loop_delay_ms > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(loop_delay_ms));
+        if (loop_delay_ms > 0.0) {
+            std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(loop_delay_ms));
         }
     }
 }

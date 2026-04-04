@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 #include "delta/recoil_types.hpp"
 
@@ -21,6 +22,58 @@ enum class LeftHoldEngageButton {
     X1,
     Both,
 };
+
+enum class AimMode {
+    Head = 0,
+    Body = 1,
+    Hybrid = 2,
+};
+
+inline const char* aimModeName(const AimMode mode) {
+    switch (mode) {
+    case AimMode::Body: return "body";
+    case AimMode::Hybrid: return "hybrid";
+    case AimMode::Head:
+    default: return "head";
+    }
+}
+
+inline const char* aimModeLabel(const AimMode mode) {
+    switch (mode) {
+    case AimMode::Body: return "BODY";
+    case AimMode::Hybrid: return "HYBRID";
+    case AimMode::Head:
+    default: return "HEAD";
+    }
+}
+
+inline AimMode parseAimMode(const std::string_view value) {
+    if (value == "body") {
+        return AimMode::Body;
+    }
+    if (value == "hybrid") {
+        return AimMode::Hybrid;
+    }
+    return AimMode::Head;
+}
+
+inline AimMode nextAimMode(const AimMode mode) {
+    switch (mode) {
+    case AimMode::Head: return AimMode::Body;
+    case AimMode::Body: return AimMode::Hybrid;
+    case AimMode::Hybrid:
+    default: return AimMode::Head;
+    }
+}
+
+inline int aimModeTargetClass(const AimMode mode) {
+    switch (mode) {
+    case AimMode::Body: return 0;
+    case AimMode::Hybrid: return -1;
+    case AimMode::Head:
+    default: return 1;
+    }
+}
 
 struct StaticConfig {
     std::string model_path = R"(C:\YOLO\Delta\runs\detect\train4\weights\best.onnx)";
@@ -69,13 +122,14 @@ struct RuntimeConfig {
     bool pid_enable = true;
     bool tracking_enabled = true;
     bool debug_preview_enable = true;
+    AimMode aim_mode = AimMode::Head;
     int capture_cached_timeout_ms = 0;
     float body_y_ratio = 0.15F;
     float head_y_ratio = 0.50F;
     TrackingStrategy tracking_strategy = TrackingStrategy::RawDelta;
     float tracking_alpha = 0.42F;
     float tracking_velocity_alpha = 0.5F;
-    float kp = 0.40F;
+    float kp = 0.30F;
     float ki = 0.7F;
     float kd = 0.009F;
     float integral_limit = 2000.0F;
@@ -107,14 +161,14 @@ struct RuntimeConfig {
     float triggerbot_click_hold_s = 0.001F;
     float triggerbot_click_cooldown_s = 0.001F;
     bool side_button_key_sequence_use_key3 = true;
-    int side_button_key_sequence_key3_press_time_ms = 0;
+    double side_button_key_sequence_key3_press_time_ms = 0.0;
     bool side_button_key_sequence_use_key1 = true;
-    int side_button_key_sequence_key1_press_time_ms = 0;
+    double side_button_key_sequence_key1_press_time_ms = 0.0;
     bool side_button_key_sequence_use_right_click = true;
-    int side_button_key_sequence_right_click_hold_ms = 1;
+    double side_button_key_sequence_right_click_hold_ms = 1.0;
     bool side_button_key_sequence_use_left_click = true;
-    int side_button_key_sequence_left_click_hold_ms = 0;
-    int side_button_key_sequence_loop_delay_ms = 8;
+    double side_button_key_sequence_left_click_hold_ms = 0.0;
+    double side_button_key_sequence_loop_delay_ms = 8.0;
     float sendinput_gain_x = 1.0F;
     float sendinput_gain_y = 1.0F;
     int sendinput_max_step = 1270;
@@ -124,7 +178,6 @@ struct RuntimeConfig {
 
 struct ToggleState {
     int mode = 0;
-    int aimmode = 0;
     bool left_hold_engage = false;
     bool recoil_tune_fallback = false;
     bool left_pressed = false;

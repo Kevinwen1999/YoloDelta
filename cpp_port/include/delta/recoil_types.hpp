@@ -23,6 +23,8 @@ struct RecoilRuntimeState {
     bool mode_active = false;
     bool hold_engage_toggle = false;
     bool left_pressed = false;
+    bool x1_pressed = false;
+    bool trigger_pressed = false;
     bool spray_active = false;
     std::string selected_profile_id;
     std::string selected_profile_name;

@@ -88,6 +88,7 @@ public:
         const RuntimeConfig& runtime,
         bool recoil_enabled,
         bool left_pressed,
+        bool x1_pressed,
         const SteadyClock::time_point& now = SteadyClock::now());
 
 private:
