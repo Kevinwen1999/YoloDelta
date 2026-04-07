@@ -109,7 +109,7 @@ The `vs2022-cuda-probe` preset now also builds `delta_native` with the CUDA pipe
 - The native port does not use the Python socket mouse backend.
 - `src/control.cpp` uses Win32 hotkey polling and `SendInput` directly for relative mouse movement and left-click injection.
 - The low-level sender now mirrors the Python GHUB-style behavior more closely by keeping fractional movement remainders and splitting large moves into bounded steps.
-- `delta_native` now starts the full native runtime by default: capture, inference, raw/raw-delta tracking, frontend, and `SendInput` control.
+- `delta_native` now starts the full native runtime by default: capture, inference, raw/raw-delta/legacy_pid tracking, frontend, and `SendInput` control.
 - `StaticConfig.imgsz` stays the inference input size. `StaticConfig.capture_crop_size` controls the square desktop crop size, and `0` keeps it locked to `imgsz`.
 - Use `Insert` to stop the app.
 - `XBUTTON2` toggles mode, `F4` toggles head/body class, `F5` toggles the async `XBUTTON1`-held configurable sequence loop, `F6` toggles left-hold engage, `F7` toggles recoil fallback, and `F8` toggles triggerbot.
@@ -118,7 +118,7 @@ The `vs2022-cuda-probe` preset now also builds `delta_native` with the CUDA pipe
 
 Current scope:
 
-- The native runtime intentionally keeps only the `raw` and `raw_delta` tracking paths from Python.
+- The native runtime currently exposes `raw`, `raw_delta`, and `legacy_pid` tracking paths.
 - The HTTP frontend serves `http://127.0.0.1:8765/` with `/api/pid` and `/api/pid/status` backed by the live native runtime state.
 
 If Visual Studio says the CUDA toolset is missing:
@@ -170,7 +170,7 @@ If you are starting to move behavior from `testNonKal1.py` into C++, these are t
 - `src/control.cpp`
   Keep the Win32 input/output path here.
 - `src/app.cpp`
-  This now owns the full native runtime loop and the trimmed `raw` / `raw_delta` behavior port.
+  This now owns the full native runtime loop plus the `raw`, `raw_delta`, and `legacy_pid` behavior branches.
 
 ## Design Intent
 

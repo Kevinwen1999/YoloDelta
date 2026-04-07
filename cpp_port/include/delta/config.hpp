@@ -14,7 +14,42 @@ enum class TrackingStrategy {
     Ema,
     Dema,
     RawDelta,
+    LegacyPid,
 };
+
+inline const char* trackingStrategyName(const TrackingStrategy strategy) {
+    switch (strategy) {
+    case TrackingStrategy::Raw: return "raw";
+    case TrackingStrategy::LegacyPid: return "legacy_pid";
+    case TrackingStrategy::Kalman:
+    case TrackingStrategy::Ema:
+    case TrackingStrategy::Dema:
+    case TrackingStrategy::RawDelta:
+    default: return "raw_delta";
+    }
+}
+
+inline const char* trackingStrategyLabel(const TrackingStrategy strategy) {
+    switch (strategy) {
+    case TrackingStrategy::Raw: return "Raw Detection";
+    case TrackingStrategy::LegacyPid: return "Legacy PID";
+    case TrackingStrategy::Kalman:
+    case TrackingStrategy::Ema:
+    case TrackingStrategy::Dema:
+    case TrackingStrategy::RawDelta:
+    default: return "Raw + Velocity";
+    }
+}
+
+inline TrackingStrategy parseTrackingStrategy(const std::string_view value) {
+    if (value == "raw") {
+        return TrackingStrategy::Raw;
+    }
+    if (value == "legacy_pid") {
+        return TrackingStrategy::LegacyPid;
+    }
+    return TrackingStrategy::RawDelta;
+}
 
 enum class LeftHoldEngageButton {
     Left,
@@ -143,6 +178,15 @@ struct RuntimeConfig {
     int pid_settle_stable_frames = 2;
     float pid_settle_error_delta_px = 3.0F;
     float pid_settle_pre_output_scale = 0.5F;
+    float legacy_pid_lock_error_px = 4.0F;
+    float legacy_pid_speed_multiplier = 1.0F;
+    float legacy_pid_threshold_min_scale = 1.6F;
+    float legacy_pid_threshold_max_scale = 2.7F;
+    float legacy_pid_transition_sharpness = 5.0F;
+    float legacy_pid_transition_midpoint = 0.0F;
+    int legacy_pid_stable_frames = 2;
+    float legacy_pid_error_delta_px = 3.0F;
+    float legacy_pid_prelock_scale = 0.5F;
     float sticky_bias_px = 800.0F;
     float prediction_time = 0.000F;
     int target_max_lost_frames = 8;
@@ -179,8 +223,8 @@ struct RuntimeConfig {
     float sendinput_gain_x = 1.0F;
     float sendinput_gain_y = 1.0F;
     int sendinput_max_step = 1270;
-    int raw_max_step_x = 280;
-    int raw_max_step_y = 2800;
+    int raw_max_step_x = 500;
+    int raw_max_step_y = 500;
 };
 
 struct ToggleState {

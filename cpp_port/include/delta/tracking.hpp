@@ -71,6 +71,61 @@ PIDSettleDecision updatePidSettleState(
     float box_width_px,
     float capture_width_px);
 
+struct LegacyPidConfig {
+    float kp = 0.0F;
+    float ki = 0.0F;
+    float kd = 0.0F;
+    float lock_error_px = 4.0F;
+    float speed_multiplier = 1.0F;
+    float threshold_min_scale = 1.6F;
+    float threshold_max_scale = 2.7F;
+    float transition_sharpness = 5.0F;
+    float transition_midpoint = 0.0F;
+    int stable_frames = 2;
+    float error_delta_px = 3.0F;
+    float prelock_scale = 0.5F;
+};
+
+struct LegacyPidAxisState {
+    float previous_error_px = 0.0F;
+    float integral_accumulator = 0.0F;
+    float velocity = 0.0F;
+    int stable_frame_count = 0;
+    bool locked = false;
+
+    void reset();
+};
+
+struct LegacyPidAxisResult {
+    float output = 0.0F;
+    float raw_output = 0.0F;
+    float proportional = 0.0F;
+    float integral = 0.0F;
+    float derivative = 0.0F;
+    float velocity = 0.0F;
+    bool locked = false;
+    bool just_unlocked = false;
+    float dynamic_threshold_px = 0.0F;
+    float error_px = 0.0F;
+};
+
+struct LegacyPidStatus {
+    bool settled = false;
+    float error_metric_px = 0.0F;
+    float threshold_px = 0.0F;
+    float speed = 0.0F;
+};
+
+float legacyPidDynamicThresholdPx(const LegacyPidConfig& config, float box_width_px, float capture_width_px);
+LegacyPidAxisResult updateLegacyPidAxis(
+    LegacyPidAxisState& state,
+    const LegacyPidConfig& config,
+    float error_px,
+    float dt,
+    float box_width_px,
+    float capture_width_px);
+LegacyPidStatus makeLegacyPidStatus(const LegacyPidAxisResult& x_axis, const LegacyPidAxisResult& y_axis);
+
 class ITargetTracker {
 public:
     virtual ~ITargetTracker() = default;

@@ -153,10 +153,6 @@ double secondsSince(const SteadyClock::time_point since, const SteadyClock::time
     return std::chrono::duration<double>(now - since).count();
 }
 
-const char* trackingStrategyName(const TrackingStrategy strategy) {
-    return strategy == TrackingStrategy::Raw ? "raw" : "raw_delta";
-}
-
 int aimModeBeepFrequency(const AimMode aim_mode) {
     switch (aim_mode) {
     case AimMode::Body: return 600;
@@ -247,6 +243,27 @@ PIDSettleConfig buildPidSettleConfig(const RuntimeConfig& runtime) {
     };
 }
 
+LegacyPidConfig buildLegacyPidConfig(const RuntimeConfig& runtime) {
+    return LegacyPidConfig{
+        .kp = runtime.kp,
+        .ki = runtime.ki,
+        .kd = runtime.kd,
+        .lock_error_px = runtime.legacy_pid_lock_error_px,
+        .speed_multiplier = runtime.legacy_pid_speed_multiplier,
+        .threshold_min_scale = runtime.legacy_pid_threshold_min_scale,
+        .threshold_max_scale = runtime.legacy_pid_threshold_max_scale,
+        .transition_sharpness = runtime.legacy_pid_transition_sharpness,
+        .transition_midpoint = runtime.legacy_pid_transition_midpoint,
+        .stable_frames = runtime.legacy_pid_stable_frames,
+        .error_delta_px = runtime.legacy_pid_error_delta_px,
+        .prelock_scale = runtime.legacy_pid_prelock_scale,
+    };
+}
+
+float trackerVelocityAlpha(const RuntimeConfig& runtime) {
+    return runtime.tracking_strategy == TrackingStrategy::LegacyPid ? 1.0F : runtime.tracking_velocity_alpha;
+}
+
 bool pidRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rhs) {
     return lhs.pid_enable != rhs.pid_enable
         || lhs.kp != rhs.kp
@@ -262,7 +279,16 @@ bool pidRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rh
         || lhs.pid_settle_threshold_max_scale != rhs.pid_settle_threshold_max_scale
         || lhs.pid_settle_stable_frames != rhs.pid_settle_stable_frames
         || lhs.pid_settle_error_delta_px != rhs.pid_settle_error_delta_px
-        || lhs.pid_settle_pre_output_scale != rhs.pid_settle_pre_output_scale;
+        || lhs.pid_settle_pre_output_scale != rhs.pid_settle_pre_output_scale
+        || lhs.legacy_pid_lock_error_px != rhs.legacy_pid_lock_error_px
+        || lhs.legacy_pid_speed_multiplier != rhs.legacy_pid_speed_multiplier
+        || lhs.legacy_pid_threshold_min_scale != rhs.legacy_pid_threshold_min_scale
+        || lhs.legacy_pid_threshold_max_scale != rhs.legacy_pid_threshold_max_scale
+        || lhs.legacy_pid_transition_sharpness != rhs.legacy_pid_transition_sharpness
+        || lhs.legacy_pid_transition_midpoint != rhs.legacy_pid_transition_midpoint
+        || lhs.legacy_pid_stable_frames != rhs.legacy_pid_stable_frames
+        || lhs.legacy_pid_error_delta_px != rhs.legacy_pid_error_delta_px
+        || lhs.legacy_pid_prelock_scale != rhs.legacy_pid_prelock_scale;
 }
 
 DebugPreviewSnapshot makeInactiveDebugPreviewSnapshot(const std::pair<int, int> center) {
@@ -818,6 +844,8 @@ void DeltaApp::inferenceLoop() {
         const auto center = screenCenter(config_);
         PIDController pid_x{};
         PIDController pid_y{};
+        LegacyPidAxisState legacy_pid_x{};
+        LegacyPidAxisState legacy_pid_y{};
 
         RuntimeConfig runtime = runtime_store_.snapshot();
         const auto configurePidControllers = [&](const RuntimeConfig& current) {
@@ -848,7 +876,7 @@ void DeltaApp::inferenceLoop() {
         std::uint64_t last_reset_token = runtime_store_.resetToken();
         TrackingStrategy last_tracking_strategy = runtime.tracking_strategy;
         AimMode last_aim_mode = runtime.aim_mode;
-        auto tracker = makeTargetTracker(last_tracking_strategy, runtime.tracking_velocity_alpha);
+        auto tracker = makeTargetTracker(last_tracking_strategy, trackerVelocityAlpha(runtime));
         PIDSettleState pid_settle_state{};
         int lost_frames = 0;
         int active_target_cls = -1;
@@ -862,6 +890,8 @@ void DeltaApp::inferenceLoop() {
         const auto resetPidControllers = [&](const SteadyClock::time_point pid_tick = SteadyClock::time_point{}) {
             pid_x.reset();
             pid_y.reset();
+            legacy_pid_x.reset();
+            legacy_pid_y.reset();
             pid_settle_state.reset();
             last_pid_tick = pid_tick;
         };
@@ -911,9 +941,9 @@ void DeltaApp::inferenceLoop() {
                 last_reset_token = reset_token;
             }
 
-            tracker->configure(runtime.tracking_velocity_alpha);
+            tracker->configure(trackerVelocityAlpha(runtime));
             if (runtime.tracking_strategy != last_tracking_strategy) {
-                tracker = makeTargetTracker(runtime.tracking_strategy, runtime.tracking_velocity_alpha);
+                tracker = makeTargetTracker(runtime.tracking_strategy, trackerVelocityAlpha(runtime));
                 resetPidControllers();
                 resetAimTrackingState(
                     lost_frames,
@@ -1167,7 +1197,9 @@ void DeltaApp::inferenceLoop() {
                 last_box_w = static_cast<float>(std::max(1, sticky->detection->bbox[2] - sticky->detection->bbox[0]));
                 last_box_h = static_cast<float>(std::max(1, sticky->detection->bbox[3] - sticky->detection->bbox[1]));
                 last_target_bbox = sticky->detection->bbox;
-                if (target_switched && runtime.ego_motion_reset_on_switch) {
+                if (target_switched
+                    && runtime.tracking_strategy != TrackingStrategy::LegacyPid
+                    && runtime.ego_motion_reset_on_switch) {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     resetEgoMotionStateLocked(shared_);
                 }
@@ -1251,64 +1283,80 @@ void DeltaApp::inferenceLoop() {
 
             const auto aim_predict_start = SteadyClock::now();
             const TrackerState tracker_state = tracker->state();
-            const float ff_scale = tracker->feedforwardScale();
-            const float ctrl_sent_vx_ema = shared_.ctrl_sent_vx_ema.load(std::memory_order_relaxed);
-            const float ctrl_sent_vy_ema = shared_.ctrl_sent_vy_ema.load(std::memory_order_relaxed);
-            float vx = tracker_state.vx;
-            float vy = tracker_state.vy;
-            const float prediction_time = std::max(0.0F, runtime.prediction_time);
-            const float base_predicted_x = tracker_state.x + (vx * prediction_time);
-            const float base_predicted_y = tracker_state.y + (vy * prediction_time);
-            const float base_aim_y = base_predicted_y;
-            float ego_gate_x = 1.0F;
-            float ego_gate_y = 1.0F;
-            if (runtime.ego_motion_error_gate_enable) {
-                if (runtime.ego_motion_error_gate_normalize_by_box && runtime.ego_motion_error_gate_norm_threshold > 1e-6F) {
-                    const float norm_box_w = std::max(1.0F, last_box_w);
-                    const float norm_box_h = std::max(1.0F, last_box_h);
-                    const float normalized_error_x = std::abs(base_predicted_x - static_cast<float>(center.first)) / norm_box_w;
-                    const float normalized_error_y = std::abs(base_aim_y - static_cast<float>(center.second)) / norm_box_h;
-                    ego_gate_x = clamp(
-                        1.0F - (normalized_error_x / runtime.ego_motion_error_gate_norm_threshold),
-                        0.0F,
-                        1.0F);
-                    ego_gate_y = clamp(
-                        1.0F - (normalized_error_y / runtime.ego_motion_error_gate_norm_threshold),
-                        0.0F,
-                        1.0F);
-                } else if (runtime.ego_motion_error_gate_px > 1e-6F) {
-                    ego_gate_x = clamp(
-                        1.0F - (std::abs(base_predicted_x - static_cast<float>(center.first)) / runtime.ego_motion_error_gate_px),
-                        0.0F,
-                        1.0F);
-                    ego_gate_y = clamp(
-                        1.0F - (std::abs(base_aim_y - static_cast<float>(center.second)) / runtime.ego_motion_error_gate_px),
-                        0.0F,
-                        1.0F);
+            const bool use_legacy_pid = runtime.tracking_strategy == TrackingStrategy::LegacyPid;
+            float predicted_x = tracker_state.x;
+            float aim_y = tracker_state.y;
+            float speed = 0.0F;
+            float pid_error_metric_px = 0.0F;
+            float pid_threshold_px = 0.0F;
+            bool pid_settled = false;
+            float desired_x = predicted_x - static_cast<float>(center.first);
+            float desired_y = aim_y - static_cast<float>(center.second);
+
+            float ff_scale = 0.0F;
+            float vx = 0.0F;
+            float vy = 0.0F;
+            if (!use_legacy_pid) {
+                ff_scale = tracker->feedforwardScale();
+                const float ctrl_sent_vx_ema = shared_.ctrl_sent_vx_ema.load(std::memory_order_relaxed);
+                const float ctrl_sent_vy_ema = shared_.ctrl_sent_vy_ema.load(std::memory_order_relaxed);
+                vx = tracker_state.vx;
+                vy = tracker_state.vy;
+                const float prediction_time = std::max(0.0F, runtime.prediction_time);
+                const float base_predicted_x = tracker_state.x + (vx * prediction_time);
+                const float base_predicted_y = tracker_state.y + (vy * prediction_time);
+                const float base_aim_y = base_predicted_y;
+                float ego_gate_x = 1.0F;
+                float ego_gate_y = 1.0F;
+                if (runtime.ego_motion_error_gate_enable) {
+                    if (runtime.ego_motion_error_gate_normalize_by_box && runtime.ego_motion_error_gate_norm_threshold > 1e-6F) {
+                        const float norm_box_w = std::max(1.0F, last_box_w);
+                        const float norm_box_h = std::max(1.0F, last_box_h);
+                        const float normalized_error_x = std::abs(base_predicted_x - static_cast<float>(center.first)) / norm_box_w;
+                        const float normalized_error_y = std::abs(base_aim_y - static_cast<float>(center.second)) / norm_box_h;
+                        ego_gate_x = clamp(
+                            1.0F - (normalized_error_x / runtime.ego_motion_error_gate_norm_threshold),
+                            0.0F,
+                            1.0F);
+                        ego_gate_y = clamp(
+                            1.0F - (normalized_error_y / runtime.ego_motion_error_gate_norm_threshold),
+                            0.0F,
+                            1.0F);
+                    } else if (runtime.ego_motion_error_gate_px > 1e-6F) {
+                        ego_gate_x = clamp(
+                            1.0F - (std::abs(base_predicted_x - static_cast<float>(center.first)) / runtime.ego_motion_error_gate_px),
+                            0.0F,
+                            1.0F);
+                        ego_gate_y = clamp(
+                            1.0F - (std::abs(base_aim_y - static_cast<float>(center.second)) / runtime.ego_motion_error_gate_px),
+                            0.0F,
+                            1.0F);
+                    }
                 }
+                if (runtime.ego_motion_comp_enable && ff_scale > 0.0F) {
+                    const float ego_vx = clamp(
+                        ctrl_sent_vx_ema * runtime.ego_motion_comp_gain_x * ff_scale * ego_gate_x,
+                        -kEgoMotionCompMaxPxS,
+                        kEgoMotionCompMaxPxS);
+                    const float ego_vy = clamp(
+                        ctrl_sent_vy_ema * runtime.ego_motion_comp_gain_y * ff_scale * ego_gate_y,
+                        -kEgoMotionCompMaxPxS,
+                        kEgoMotionCompMaxPxS);
+                    vx += ego_vx;
+                    vy += ego_vy;
+                }
+                speed = std::sqrt((vx * vx) + (vy * vy));
+                if (speed > kMaxTrackSpeedPxS && speed > 1e-6F) {
+                    const float speed_scale = kMaxTrackSpeedPxS / speed;
+                    vx *= speed_scale;
+                    vy *= speed_scale;
+                    speed = kMaxTrackSpeedPxS;
+                }
+                predicted_x = tracker_state.x + (vx * prediction_time);
+                aim_y = tracker_state.y + (vy * prediction_time);
+                desired_x = predicted_x - static_cast<float>(center.first);
+                desired_y = aim_y - static_cast<float>(center.second);
             }
-            if (runtime.ego_motion_comp_enable && ff_scale > 0.0F) {
-                const float ego_vx = clamp(
-                    ctrl_sent_vx_ema * runtime.ego_motion_comp_gain_x * ff_scale * ego_gate_x,
-                    -kEgoMotionCompMaxPxS,
-                    kEgoMotionCompMaxPxS);
-                const float ego_vy = clamp(
-                    ctrl_sent_vy_ema * runtime.ego_motion_comp_gain_y * ff_scale * ego_gate_y,
-                    -kEgoMotionCompMaxPxS,
-                    kEgoMotionCompMaxPxS);
-                vx += ego_vx;
-                vy += ego_vy;
-            }
-            float speed = std::sqrt((vx * vx) + (vy * vy));
-            if (speed > kMaxTrackSpeedPxS && speed > 1e-6F) {
-                const float speed_scale = kMaxTrackSpeedPxS / speed;
-                vx *= speed_scale;
-                vy *= speed_scale;
-                speed = kMaxTrackSpeedPxS;
-            }
-            const float predicted_x = tracker_state.x + (vx * prediction_time);
-            const float predicted_y = tracker_state.y + (vy * prediction_time);
-            const float aim_y = predicted_y;
             app_timings.aim_predict_s = secondsSince(aim_predict_start, SteadyClock::now());
 
             const auto aim_pid_start = SteadyClock::now();
@@ -1319,41 +1367,70 @@ void DeltaApp::inferenceLoop() {
                 kMinTrackDt,
                 kMaxTrackDt);
             last_pid_tick = now_tick;
+            int dx = 0;
+            int dy = 0;
+            if (use_legacy_pid) {
+                const LegacyPidConfig legacy_pid_config = buildLegacyPidConfig(runtime);
+                const LegacyPidAxisResult legacy_x = updateLegacyPidAxis(
+                    legacy_pid_x,
+                    legacy_pid_config,
+                    predicted_x - static_cast<float>(center.first),
+                    pid_dt,
+                    last_box_w,
+                    static_cast<float>(std::max(1, capture_region.width)));
+                const LegacyPidAxisResult legacy_y = updateLegacyPidAxis(
+                    legacy_pid_y,
+                    legacy_pid_config,
+                    aim_y - static_cast<float>(center.second),
+                    pid_dt,
+                    last_box_w,
+                    static_cast<float>(std::max(1, capture_region.width)));
+                const LegacyPidStatus legacy_status = makeLegacyPidStatus(legacy_x, legacy_y);
+                desired_x = runtime.pid_enable ? legacy_x.output : legacy_x.error_px;
+                desired_y = runtime.pid_enable ? legacy_y.output : legacy_y.error_px;
+                speed = legacy_status.speed;
+                pid_settled = legacy_status.settled;
+                pid_error_metric_px = legacy_status.error_metric_px;
+                pid_threshold_px = legacy_status.threshold_px;
+            } else {
+                const PIDSettleDecision pid_settle = updatePidSettleState(
+                    pid_settle_state,
+                    buildPidSettleConfig(runtime),
+                    pidSettleErrorMetricPx(
+                        predicted_x,
+                        aim_y,
+                        static_cast<float>(center.first),
+                        static_cast<float>(center.second)),
+                    last_box_w,
+                    static_cast<float>(std::max(1, capture_region.width)));
+                if (runtime.pid_enable && pid_settle.just_unsettled) {
+                    pid_x.clearIntegral();
+                    pid_y.clearIntegral();
+                }
 
-            const PIDSettleDecision pid_settle = updatePidSettleState(
-                pid_settle_state,
-                buildPidSettleConfig(runtime),
-                pidSettleErrorMetricPx(
-                    predicted_x,
-                    aim_y,
-                    static_cast<float>(center.first),
-                    static_cast<float>(center.second)),
-                last_box_w,
-                static_cast<float>(std::max(1, capture_region.width)));
-            if (runtime.pid_enable && pid_settle.just_unsettled) {
-                pid_x.clearIntegral();
-                pid_y.clearIntegral();
+                const bool pid_integrate = runtime.pid_enable && std::abs(runtime.ki) > 1e-12F && pid_settle.integrate;
+                const float pid_term_x = runtime.pid_enable
+                    ? (pid_x.update(0.0F, static_cast<float>(center.first) - predicted_x, pid_dt, pid_integrate) * pid_settle.pid_output_scale)
+                    : (predicted_x - static_cast<float>(center.first));
+                const float pid_term_y = runtime.pid_enable
+                    ? (pid_y.update(0.0F, static_cast<float>(center.second) - aim_y, pid_dt, pid_integrate) * pid_settle.pid_output_scale)
+                    : (aim_y - static_cast<float>(center.second));
+                const float ff_x = (vx * dt) * ff_scale;
+                const float ff_y = (vy * dt) * ff_scale;
+                desired_x = pid_term_x + ff_x;
+                desired_y = pid_term_y + ff_y;
+                pid_settled = pid_settle.settled;
+                pid_error_metric_px = pid_settle.error_metric_px;
+                pid_threshold_px = pid_settle.dynamic_threshold_px;
             }
 
-            const bool pid_integrate = runtime.pid_enable && std::abs(runtime.ki) > 1e-12F && pid_settle.integrate;
-            const float pid_term_x = runtime.pid_enable
-                ? (pid_x.update(0.0F, static_cast<float>(center.first) - predicted_x, pid_dt, pid_integrate) * pid_settle.pid_output_scale)
-                : (predicted_x - static_cast<float>(center.first));
-            const float pid_term_y = runtime.pid_enable
-                ? (pid_y.update(0.0F, static_cast<float>(center.second) - aim_y, pid_dt, pid_integrate) * pid_settle.pid_output_scale)
-                : (aim_y - static_cast<float>(center.second));
-
-            const float ff_x = (vx * dt) * ff_scale;
-            const float ff_y = (vy * dt) * ff_scale;
-            const float desired_x = pid_term_x + ff_x;
-            const float desired_y = pid_term_y + ff_y;
-            const int dx = engage_active
+            dx = engage_active
                 ? static_cast<int>(std::lround(clamp(
                     desired_x,
                     -static_cast<float>(runtime.raw_max_step_x),
                     static_cast<float>(runtime.raw_max_step_x))))
                 : 0;
-            const int dy = engage_active
+            dy = engage_active
                 ? static_cast<int>(std::lround(clamp(desired_y, -static_cast<float>(runtime.raw_max_step_y), static_cast<float>(runtime.raw_max_step_y))))
                 : 0;
             app_timings.aim_pid_s = secondsSince(aim_pid_start, SteadyClock::now());
@@ -1372,9 +1449,9 @@ void DeltaApp::inferenceLoop() {
                 shared_.target_found = true;
                 shared_.target_cls = selected_cls;
                 shared_.target_speed = speed;
-                shared_.pid_settled = pid_settle.settled;
-                shared_.pid_settle_error_metric_px = pid_settle.error_metric_px;
-                shared_.pid_settle_threshold_px = pid_settle.dynamic_threshold_px;
+                shared_.pid_settled = pid_settled;
+                shared_.pid_settle_error_metric_px = pid_error_metric_px;
+                shared_.pid_settle_threshold_px = pid_threshold_px;
                 shared_.aim_dx = dx;
                 shared_.aim_dy = dy;
                 shared_.last_target_full = {focus_x, focus_y};

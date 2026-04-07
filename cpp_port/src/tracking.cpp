@@ -176,6 +176,14 @@ void PIDSettleState::reset() {
     initialized = false;
 }
 
+void LegacyPidAxisState::reset() {
+    previous_error_px = 0.0F;
+    integral_accumulator = 0.0F;
+    velocity = 0.0F;
+    stable_frame_count = 0;
+    locked = false;
+}
+
 float pidSettleErrorMetricPx(const float predicted_x, const float aim_y, const float center_x, const float center_y) {
     return std::max(std::abs(predicted_x - center_x), std::abs(aim_y - center_y));
 }
@@ -247,6 +255,88 @@ PIDSettleDecision updatePidSettleState(
     decision.integrate = state.settled;
     decision.pid_output_scale = state.settled ? 1.0F : pre_output_scale;
     return decision;
+}
+
+float legacyPidDynamicThresholdPx(const LegacyPidConfig& config, const float box_width_px, const float capture_width_px) {
+    const float safe_box_width = std::max(0.0F, box_width_px);
+    const float safe_capture_width = std::max(1e-3F, capture_width_px);
+    const float min_scale = std::max(0.0F, config.threshold_min_scale);
+    const float max_scale = std::max(min_scale, config.threshold_max_scale);
+    const float ratio = safe_box_width / safe_capture_width;
+    const float transition = 1.0F + std::exp(
+        -std::max(0.0F, config.transition_sharpness) * (ratio - config.transition_midpoint));
+    const float dynamic_scale = min_scale + ((max_scale - min_scale) / transition);
+    return safe_box_width * dynamic_scale;
+}
+
+LegacyPidAxisResult updateLegacyPidAxis(
+    LegacyPidAxisState& state,
+    const LegacyPidConfig& config,
+    const float error_px,
+    const float dt,
+    const float box_width_px,
+    const float capture_width_px) {
+    LegacyPidAxisResult result{};
+    result.error_px = error_px;
+    result.dynamic_threshold_px = legacyPidDynamicThresholdPx(config, box_width_px, capture_width_px);
+
+    const float clamped_dt = std::max(1e-4F, dt);
+    const float absolute_error = std::abs(error_px);
+    const float lock_error_px = std::max(0.0F, config.lock_error_px);
+    const float error_delta_px = std::max(0.0F, config.error_delta_px);
+    const int stable_frames = std::max(1, config.stable_frames);
+    const float prelock_scale = clamp(config.prelock_scale, 0.0F, 1.0F);
+
+    if (!state.locked && absolute_error < lock_error_px) {
+        state.locked = true;
+    } else if (absolute_error >= result.dynamic_threshold_px) {
+        result.just_unlocked = state.locked;
+        state.locked = false;
+        state.integral_accumulator = 0.0F;
+        state.stable_frame_count = 0;
+    } else if (!state.locked && absolute_error >= lock_error_px && absolute_error <= result.dynamic_threshold_px) {
+        const float error_change = std::abs(error_px - state.previous_error_px);
+        if (error_change < error_delta_px) {
+            ++state.stable_frame_count;
+        } else {
+            state.stable_frame_count = 0;
+        }
+        if (state.stable_frame_count >= stable_frames) {
+            state.locked = true;
+            state.stable_frame_count = 0;
+            state.integral_accumulator = 0.0F;
+        }
+    }
+
+    const float error_rate = (error_px - state.previous_error_px) / clamped_dt;
+    if (state.locked) {
+        state.integral_accumulator += error_px * clamped_dt;
+        result.proportional = config.kp * error_px;
+    } else {
+        state.integral_accumulator += (error_px * prelock_scale) * clamped_dt;
+        result.proportional = (config.kp * prelock_scale) * error_px;
+    }
+    result.integral = config.ki * state.integral_accumulator;
+    result.derivative = config.kd * error_rate;
+    result.raw_output = result.proportional + result.integral + result.derivative;
+    result.output = result.raw_output;
+    result.velocity = state.locked
+        ? (error_rate + ((result.raw_output / clamped_dt) * config.speed_multiplier))
+        : 0.0F;
+    result.locked = state.locked;
+
+    state.velocity = result.velocity;
+    state.previous_error_px = error_px;
+    return result;
+}
+
+LegacyPidStatus makeLegacyPidStatus(const LegacyPidAxisResult& x_axis, const LegacyPidAxisResult& y_axis) {
+    return LegacyPidStatus{
+        .settled = x_axis.locked && y_axis.locked,
+        .error_metric_px = std::max(std::abs(x_axis.error_px), std::abs(y_axis.error_px)),
+        .threshold_px = std::max(x_axis.dynamic_threshold_px, y_axis.dynamic_threshold_px),
+        .speed = std::sqrt((x_axis.velocity * x_axis.velocity) + (y_axis.velocity * y_axis.velocity)),
+    };
 }
 
 ObservedMotionTracker::ObservedMotionTracker(const TrackingStrategy mode, const float velocity_alpha)
@@ -331,7 +421,10 @@ bool ObservedMotionTracker::initialized() const {
 }
 
 std::unique_ptr<ITargetTracker> makeTargetTracker(const TrackingStrategy strategy, const float velocity_alpha) {
-    return std::make_unique<ObservedMotionTracker>(strategy, velocity_alpha);
+    const TrackingStrategy tracker_mode = strategy == TrackingStrategy::LegacyPid
+        ? TrackingStrategy::RawDelta
+        : strategy;
+    return std::make_unique<ObservedMotionTracker>(tracker_mode, velocity_alpha);
 }
 
 std::pair<float, float> detectionAimPoint(
