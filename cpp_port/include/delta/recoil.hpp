@@ -104,8 +104,11 @@ private:
     std::filesystem::file_time_type watched_write_time_{};
     bool spray_active_ = false;
     std::size_t current_step_index_ = 0;
+    SteadyClock::time_point segment_started_at_{};
     SteadyClock::time_point next_step_at_{};
     SteadyClock::time_point last_file_check_{};
+    double last_target_x_ = 0.0;
+    double last_target_y_ = 0.0;
     double carry_x_ = 0.0;
     double carry_y_ = 0.0;
     bool pending_clear_requested_ = false;

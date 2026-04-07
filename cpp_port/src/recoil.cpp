@@ -392,38 +392,60 @@ RecoilSchedulerUpdate RecoilScheduler::tick(
         if (!spray_active_) {
             spray_active_ = true;
             current_step_index_ = 0;
+            segment_started_at_ = now;
             state_.shot_index = 1;
             next_step_at_ = now + std::chrono::milliseconds(durationForStep(0));
             state_.debug_state = "spray_started";
         }
 
         while (current_step_index_ + 1 < loaded_profile_->steps.size() && now >= next_step_at_) {
-            const auto& current = loaded_profile_->steps[current_step_index_];
-            const auto& next = loaded_profile_->steps[current_step_index_ + 1];
-            carry_x_ += -((next.pattern_x - current.pattern_x) * loaded_profile_->horizontal_scale_factor);
-            carry_y_ += -((next.pattern_y - current.pattern_y) * loaded_profile_->scale_factor);
-
-            const int step_dx = static_cast<int>(std::lround(carry_x_));
-            const int step_dy = static_cast<int>(std::lround(carry_y_));
-            carry_x_ -= static_cast<double>(step_dx);
-            carry_y_ -= static_cast<double>(step_dy);
-
-            update.delta.dx += step_dx;
-            update.delta.dy += step_dy;
-
             ++current_step_index_;
             state_.shot_index = static_cast<int>(current_step_index_ + 1);
-            next_step_at_ += std::chrono::milliseconds(durationForStep(current_step_index_));
+            segment_started_at_ = next_step_at_;
+            next_step_at_ = segment_started_at_ + std::chrono::milliseconds(durationForStep(current_step_index_));
         }
 
         if (state_.shot_index == 0) {
             state_.shot_index = 1;
         }
+
+        const auto& current = loaded_profile_->steps[current_step_index_];
+        double target_pattern_x = current.pattern_x;
+        double target_pattern_y = current.pattern_y;
+        if (current_step_index_ + 1 < loaded_profile_->steps.size()) {
+            const auto& next = loaded_profile_->steps[current_step_index_ + 1];
+            const double duration_ms = static_cast<double>(durationForStep(current_step_index_));
+            const double elapsed_ms = std::chrono::duration<double, std::milli>(now - segment_started_at_).count();
+            const double alpha = duration_ms > 0.0
+                ? std::clamp(elapsed_ms / duration_ms, 0.0, 1.0)
+                : 1.0;
+            target_pattern_x += (next.pattern_x - current.pattern_x) * alpha;
+            target_pattern_y += (next.pattern_y - current.pattern_y) * alpha;
+        }
+
+        const double target_x = -(target_pattern_x * loaded_profile_->horizontal_scale_factor);
+        const double target_y = -(target_pattern_y * loaded_profile_->scale_factor);
+        carry_x_ += target_x - last_target_x_;
+        carry_y_ += target_y - last_target_y_;
+        last_target_x_ = target_x;
+        last_target_y_ = target_y;
+
+        const int step_dx = static_cast<int>(std::lround(carry_x_));
+        const int step_dy = static_cast<int>(std::lround(carry_y_));
+        carry_x_ -= static_cast<double>(step_dx);
+        carry_y_ -= static_cast<double>(step_dy);
+        update.delta.dx += step_dx;
+        update.delta.dy += step_dy;
+
         state_.spray_active = true;
         state_.scheduled_dx = update.delta.dx;
         state_.scheduled_dy = update.delta.dy;
         if (update.delta.dx != 0 || update.delta.dy != 0) {
-            state_.debug_state = "step_scheduled";
+            state_.debug_state = current_step_index_ + 1 < loaded_profile_->steps.size()
+                ? "segment_scheduled"
+                : "step_scheduled";
+        } else if (current_step_index_ + 1 < loaded_profile_->steps.size()) {
+            state_.debug_state = "tracking_segment";
         } else if (current_step_index_ + 1 >= loaded_profile_->steps.size()) {
             state_.debug_state = "holding_final_shot";
         } else {
@@ -450,7 +472,10 @@ RecoilSchedulerUpdate RecoilScheduler::tick(
 void RecoilScheduler::resetSequence() {
     spray_active_ = false;
     current_step_index_ = 0;
+    segment_started_at_ = {};
     next_step_at_ = {};
+    last_target_x_ = 0.0;
+    last_target_y_ = 0.0;
     carry_x_ = 0.0;
     carry_y_ = 0.0;
     pending_clear_requested_ = true;
