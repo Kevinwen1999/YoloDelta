@@ -11,6 +11,7 @@ namespace {
 constexpr float kMinDt = 1.0F / 240.0F;
 constexpr float kMaxDt = 0.06F;
 constexpr float kMaxSpeed = 1800.0F;
+constexpr float kPidSettleThresholdSharpness = 5.0F;
 constexpr int kBodyClass = 0;
 constexpr int kHeadClass = 1;
 constexpr float kHybridHeadBottomMaxBodyRatio = 0.45F;
@@ -128,6 +129,10 @@ void PIDController::reset() {
     initialized_ = false;
 }
 
+void PIDController::clearIntegral() {
+    integral_ = 0.0F;
+}
+
 float PIDController::update(const float setpoint, const float measurement, const float dt, const bool integrate) {
     const float clamped_dt = std::max(1e-4F, dt);
     const float error = setpoint - measurement;
@@ -162,6 +167,86 @@ float PIDController::update(const float setpoint, const float measurement, const
     integral_ = integral_term;
     prev_error_ = measurement;
     return output;
+}
+
+void PIDSettleState::reset() {
+    settled = false;
+    stable_frame_count = 0;
+    previous_error_metric_px = 0.0F;
+    initialized = false;
+}
+
+float pidSettleErrorMetricPx(const float predicted_x, const float aim_y, const float center_x, const float center_y) {
+    return std::max(std::abs(predicted_x - center_x), std::abs(aim_y - center_y));
+}
+
+float pidSettleDynamicThresholdPx(const PIDSettleConfig& config, const float box_width_px, const float capture_width_px) {
+    const float safe_box_width = std::max(0.0F, box_width_px);
+    const float safe_capture_width = std::max(1e-3F, capture_width_px);
+    const float ratio = clamp(safe_box_width / safe_capture_width, 0.0F, 1.0F);
+    const float min_scale = std::max(0.0F, config.threshold_min_scale);
+    const float max_scale = std::max(min_scale, config.threshold_max_scale);
+    const float dynamic_scale = min_scale
+        + ((max_scale - min_scale) / (1.0F + std::exp(-kPidSettleThresholdSharpness * ratio)));
+    return safe_box_width * dynamic_scale;
+}
+
+PIDSettleDecision updatePidSettleState(
+    PIDSettleState& state,
+    const PIDSettleConfig& config,
+    const float error_metric_px,
+    const float box_width_px,
+    const float capture_width_px) {
+    PIDSettleDecision decision{};
+    decision.error_metric_px = std::max(0.0F, error_metric_px);
+    decision.dynamic_threshold_px = pidSettleDynamicThresholdPx(config, box_width_px, capture_width_px);
+
+    if (!config.enable) {
+        state.settled = true;
+        state.stable_frame_count = 0;
+        state.previous_error_metric_px = decision.error_metric_px;
+        state.initialized = true;
+        decision.settled = true;
+        decision.integrate = true;
+        decision.pid_output_scale = 1.0F;
+        return decision;
+    }
+
+    if (!state.initialized) {
+        state.initialized = true;
+        state.previous_error_metric_px = decision.error_metric_px;
+    }
+
+    const float settle_error_px = std::max(0.0F, config.error_px);
+    const float error_delta_px = std::max(0.0F, config.error_delta_px);
+    const int stable_frames = std::max(1, config.stable_frames);
+    const float pre_output_scale = clamp(config.pre_output_scale, 0.0F, 1.0F);
+    const bool was_settled = state.settled;
+
+    if (decision.error_metric_px < settle_error_px) {
+        state.settled = true;
+        state.stable_frame_count = 0;
+    } else if (decision.error_metric_px >= decision.dynamic_threshold_px) {
+        state.settled = false;
+        state.stable_frame_count = 0;
+        decision.just_unsettled = was_settled;
+    } else if (!state.settled) {
+        if (std::abs(decision.error_metric_px - state.previous_error_metric_px) < error_delta_px) {
+            ++state.stable_frame_count;
+        } else {
+            state.stable_frame_count = 0;
+        }
+        if (state.stable_frame_count >= stable_frames) {
+            state.settled = true;
+            state.stable_frame_count = 0;
+        }
+    }
+
+    state.previous_error_metric_px = decision.error_metric_px;
+    decision.settled = state.settled;
+    decision.integrate = state.settled;
+    decision.pid_output_scale = state.settled ? 1.0F : pre_output_scale;
+    return decision;
 }
 
 ObservedMotionTracker::ObservedMotionTracker(const TrackingStrategy mode, const float velocity_alpha)

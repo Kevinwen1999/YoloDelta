@@ -103,6 +103,9 @@ struct SharedState {
     int aim_dx = 0;
     int aim_dy = 0;
     float target_speed = 0.0F;
+    bool pid_settled = false;
+    float pid_settle_error_metric_px = 0.0F;
+    float pid_settle_threshold_px = 0.0F;
     std::pair<int, int> last_target_full{1280, 720};
     std::pair<int, int> capture_focus_full{1280, 720};
     SystemClock::time_point target_time{};

@@ -235,6 +235,36 @@ CaptureRegion buildCaptureRegion(const StaticConfig& config, const int center_x,
     };
 }
 
+PIDSettleConfig buildPidSettleConfig(const RuntimeConfig& runtime) {
+    return PIDSettleConfig{
+        .enable = runtime.pid_settle_enable,
+        .error_px = runtime.pid_settle_error_px,
+        .threshold_min_scale = runtime.pid_settle_threshold_min_scale,
+        .threshold_max_scale = runtime.pid_settle_threshold_max_scale,
+        .stable_frames = runtime.pid_settle_stable_frames,
+        .error_delta_px = runtime.pid_settle_error_delta_px,
+        .pre_output_scale = runtime.pid_settle_pre_output_scale,
+    };
+}
+
+bool pidRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rhs) {
+    return lhs.pid_enable != rhs.pid_enable
+        || lhs.kp != rhs.kp
+        || lhs.ki != rhs.ki
+        || lhs.kd != rhs.kd
+        || lhs.integral_limit != rhs.integral_limit
+        || lhs.anti_windup_gain != rhs.anti_windup_gain
+        || lhs.derivative_alpha != rhs.derivative_alpha
+        || lhs.output_limit != rhs.output_limit
+        || lhs.pid_settle_enable != rhs.pid_settle_enable
+        || lhs.pid_settle_error_px != rhs.pid_settle_error_px
+        || lhs.pid_settle_threshold_min_scale != rhs.pid_settle_threshold_min_scale
+        || lhs.pid_settle_threshold_max_scale != rhs.pid_settle_threshold_max_scale
+        || lhs.pid_settle_stable_frames != rhs.pid_settle_stable_frames
+        || lhs.pid_settle_error_delta_px != rhs.pid_settle_error_delta_px
+        || lhs.pid_settle_pre_output_scale != rhs.pid_settle_pre_output_scale;
+}
+
 DebugPreviewSnapshot makeInactiveDebugPreviewSnapshot(const std::pair<int, int> center) {
     DebugPreviewSnapshot snapshot{};
     snapshot.screen_center = center;
@@ -269,6 +299,9 @@ void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, 
     shared.target_found = false;
     shared.target_cls = -1;
     shared.target_speed = 0.0F;
+    shared.pid_settled = false;
+    shared.pid_settle_error_metric_px = 0.0F;
+    shared.pid_settle_threshold_px = 0.0F;
     shared.aim_dx = 0;
     shared.aim_dy = 0;
     shared.last_target_full = center;
@@ -787,31 +820,36 @@ void DeltaApp::inferenceLoop() {
         PIDController pid_y{};
 
         RuntimeConfig runtime = runtime_store_.snapshot();
-        pid_x.configure(
-            runtime.kp,
-            runtime.ki,
-            runtime.kd,
-            runtime.integral_limit,
-            runtime.anti_windup_gain,
-            runtime.derivative_alpha,
-            runtime.output_limit);
-        pid_y.configure(
-            runtime.kp,
-            runtime.ki,
-            runtime.kd,
-            runtime.integral_limit,
-            runtime.anti_windup_gain,
-            runtime.derivative_alpha,
-            runtime.output_limit);
+        const auto configurePidControllers = [&](const RuntimeConfig& current) {
+            pid_x.configure(
+                current.kp,
+                current.ki,
+                current.kd,
+                current.integral_limit,
+                current.anti_windup_gain,
+                current.derivative_alpha,
+                current.output_limit);
+            pid_y.configure(
+                current.kp,
+                current.ki,
+                current.kd,
+                current.integral_limit,
+                current.anti_windup_gain,
+                current.derivative_alpha,
+                current.output_limit);
+        };
+        configurePidControllers(runtime);
         if (capture_) {
             capture_->setCachedFrameTimeoutMs(runtime.capture_cached_timeout_ms);
         }
 
-        std::uint64_t last_pid_version = runtime_store_.version();
+        RuntimeConfig last_pid_runtime = runtime;
+        int last_capture_cached_timeout_ms = runtime.capture_cached_timeout_ms;
         std::uint64_t last_reset_token = runtime_store_.resetToken();
         TrackingStrategy last_tracking_strategy = runtime.tracking_strategy;
         AimMode last_aim_mode = runtime.aim_mode;
         auto tracker = makeTargetTracker(last_tracking_strategy, runtime.tracking_velocity_alpha);
+        PIDSettleState pid_settle_state{};
         int lost_frames = 0;
         int active_target_cls = -1;
         float last_box_w = 0.0F;
@@ -821,6 +859,12 @@ void DeltaApp::inferenceLoop() {
         SteadyClock::time_point last_track_tick{};
         bool last_debug_preview_enabled = runtime.debug_preview_enable;
         bool preview_idle_state = true;
+        const auto resetPidControllers = [&](const SteadyClock::time_point pid_tick = SteadyClock::time_point{}) {
+            pid_x.reset();
+            pid_y.reset();
+            pid_settle_state.reset();
+            last_pid_tick = pid_tick;
+        };
 
         {
             std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -840,7 +884,6 @@ void DeltaApp::inferenceLoop() {
             const auto loop_start = SteadyClock::now();
 
             runtime = runtime_store_.snapshot();
-            const std::uint64_t pid_version = runtime_store_.version();
             const std::uint64_t reset_token = runtime_store_.resetToken();
             inference_->setModelConfidence(runtime.model_conf);
             const bool tracking_enabled = runtime.tracking_enabled;
@@ -852,40 +895,26 @@ void DeltaApp::inferenceLoop() {
                 preview_idle_state = true;
             }
 
-            if (pid_version != last_pid_version) {
-                pid_x.configure(
-                    runtime.kp,
-                    runtime.ki,
-                    runtime.kd,
-                    runtime.integral_limit,
-                    runtime.anti_windup_gain,
-                    runtime.derivative_alpha,
-                    runtime.output_limit);
-                pid_y.configure(
-                    runtime.kp,
-                    runtime.ki,
-                    runtime.kd,
-                    runtime.integral_limit,
-                    runtime.anti_windup_gain,
-                    runtime.derivative_alpha,
-                    runtime.output_limit);
-                if (capture_) {
-                    capture_->setCachedFrameTimeoutMs(runtime.capture_cached_timeout_ms);
-                }
-                last_pid_version = pid_version;
+            if (capture_ && runtime.capture_cached_timeout_ms != last_capture_cached_timeout_ms) {
+                capture_->setCachedFrameTimeoutMs(runtime.capture_cached_timeout_ms);
+                last_capture_cached_timeout_ms = runtime.capture_cached_timeout_ms;
+            }
+
+            if (pidRuntimeSettingsChanged(runtime, last_pid_runtime)) {
+                configurePidControllers(runtime);
+                resetPidControllers();
+                last_pid_runtime = runtime;
             }
 
             if (reset_token != last_reset_token) {
-                pid_x.reset();
-                pid_y.reset();
+                resetPidControllers();
                 last_reset_token = reset_token;
             }
 
             tracker->configure(runtime.tracking_velocity_alpha);
             if (runtime.tracking_strategy != last_tracking_strategy) {
                 tracker = makeTargetTracker(runtime.tracking_strategy, runtime.tracking_velocity_alpha);
-                pid_x.reset();
-                pid_y.reset();
+                resetPidControllers();
                 resetAimTrackingState(
                     lost_frames,
                     active_target_cls,
@@ -910,8 +939,7 @@ void DeltaApp::inferenceLoop() {
 
             if (runtime.aim_mode != last_aim_mode) {
                 tracker->reset();
-                pid_x.reset();
-                pid_y.reset();
+                resetPidControllers();
                 resetAimTrackingState(
                     lost_frames,
                     active_target_cls,
@@ -960,8 +988,7 @@ void DeltaApp::inferenceLoop() {
 
             if (!(engage_active || triggerbot_monitor_active)) {
                 tracker->reset();
-                pid_x.reset();
-                pid_y.reset();
+                resetPidControllers();
                 resetAimTrackingState(
                     lost_frames,
                     active_target_cls,
@@ -1129,9 +1156,7 @@ void DeltaApp::inferenceLoop() {
                 const bool target_switched = sticky->switched
                     || (last_target_bbox.has_value() && bboxIou(sticky->detection->bbox, *last_target_bbox) < 0.05F);
                 if (target_switched) {
-                    pid_x.reset();
-                    pid_y.reset();
-                    last_pid_tick = now_tick;
+                    resetPidControllers(now_tick);
                 }
                 if (!tracking_enabled || target_switched) {
                     tracker->reset();
@@ -1185,8 +1210,7 @@ void DeltaApp::inferenceLoop() {
                 if (lost_frames > runtime.target_max_lost_frames) {
                     app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
                     tracker->reset();
-                    pid_x.reset();
-                    pid_y.reset();
+                    resetPidControllers();
                     resetAimTrackingState(
                         lost_frames,
                         active_target_cls,
@@ -1296,12 +1320,27 @@ void DeltaApp::inferenceLoop() {
                 kMaxTrackDt);
             last_pid_tick = now_tick;
 
-            const bool pid_integrate = std::abs(runtime.ki) > 1e-12F;
+            const PIDSettleDecision pid_settle = updatePidSettleState(
+                pid_settle_state,
+                buildPidSettleConfig(runtime),
+                pidSettleErrorMetricPx(
+                    predicted_x,
+                    aim_y,
+                    static_cast<float>(center.first),
+                    static_cast<float>(center.second)),
+                last_box_w,
+                static_cast<float>(std::max(1, capture_region.width)));
+            if (runtime.pid_enable && pid_settle.just_unsettled) {
+                pid_x.clearIntegral();
+                pid_y.clearIntegral();
+            }
+
+            const bool pid_integrate = runtime.pid_enable && std::abs(runtime.ki) > 1e-12F && pid_settle.integrate;
             const float pid_term_x = runtime.pid_enable
-                ? pid_x.update(0.0F, static_cast<float>(center.first) - predicted_x, pid_dt, pid_integrate)
+                ? (pid_x.update(0.0F, static_cast<float>(center.first) - predicted_x, pid_dt, pid_integrate) * pid_settle.pid_output_scale)
                 : (predicted_x - static_cast<float>(center.first));
             const float pid_term_y = runtime.pid_enable
-                ? pid_y.update(0.0F, static_cast<float>(center.second) - aim_y, pid_dt, pid_integrate)
+                ? (pid_y.update(0.0F, static_cast<float>(center.second) - aim_y, pid_dt, pid_integrate) * pid_settle.pid_output_scale)
                 : (aim_y - static_cast<float>(center.second));
 
             const float ff_x = (vx * dt) * ff_scale;
@@ -1333,6 +1372,9 @@ void DeltaApp::inferenceLoop() {
                 shared_.target_found = true;
                 shared_.target_cls = selected_cls;
                 shared_.target_speed = speed;
+                shared_.pid_settled = pid_settle.settled;
+                shared_.pid_settle_error_metric_px = pid_settle.error_metric_px;
+                shared_.pid_settle_threshold_px = pid_settle.dynamic_threshold_px;
                 shared_.aim_dx = dx;
                 shared_.aim_dy = dy;
                 shared_.last_target_full = {focus_x, focus_y};

@@ -136,6 +136,13 @@ struct RuntimeConfig {
     float anti_windup_gain = 1.0F;
     float derivative_alpha = 0.2F;
     float output_limit = 3000.0F;
+    bool pid_settle_enable = true;
+    float pid_settle_error_px = 4.0F;
+    float pid_settle_threshold_min_scale = 1.6F;
+    float pid_settle_threshold_max_scale = 2.7F;
+    int pid_settle_stable_frames = 2;
+    float pid_settle_error_delta_px = 3.0F;
+    float pid_settle_pre_output_scale = 0.5F;
     float sticky_bias_px = 800.0F;
     float prediction_time = 0.000F;
     int target_max_lost_frames = 8;

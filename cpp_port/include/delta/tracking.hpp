@@ -17,6 +17,7 @@ public:
     void configure(float kp, float ki, float kd, float integral_limit, float anti_windup_gain, float derivative_alpha,
                    float output_limit);
     void reset();
+    void clearIntegral();
     float update(float setpoint, float measurement, float dt, bool integrate);
 
 private:
@@ -32,6 +33,43 @@ private:
     float prev_derivative_ = 0.0F;
     bool initialized_ = false;
 };
+
+struct PIDSettleConfig {
+    bool enable = true;
+    float error_px = 4.0F;
+    float threshold_min_scale = 1.6F;
+    float threshold_max_scale = 2.7F;
+    int stable_frames = 2;
+    float error_delta_px = 3.0F;
+    float pre_output_scale = 0.5F;
+};
+
+struct PIDSettleState {
+    bool settled = false;
+    int stable_frame_count = 0;
+    float previous_error_metric_px = 0.0F;
+    bool initialized = false;
+
+    void reset();
+};
+
+struct PIDSettleDecision {
+    bool settled = true;
+    bool integrate = true;
+    bool just_unsettled = false;
+    float pid_output_scale = 1.0F;
+    float error_metric_px = 0.0F;
+    float dynamic_threshold_px = 0.0F;
+};
+
+float pidSettleErrorMetricPx(float predicted_x, float aim_y, float center_x, float center_y);
+float pidSettleDynamicThresholdPx(const PIDSettleConfig& config, float box_width_px, float capture_width_px);
+PIDSettleDecision updatePidSettleState(
+    PIDSettleState& state,
+    const PIDSettleConfig& config,
+    float error_metric_px,
+    float box_width_px,
+    float capture_width_px);
 
 class ITargetTracker {
 public:
