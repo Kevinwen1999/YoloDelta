@@ -20,6 +20,7 @@ struct DebugPreviewDetection {
 struct DebugPreviewSnapshot {
     bool active = false;
     CaptureRegion capture_region{};
+    std::optional<CaptureRegion> guard_region;
     std::pair<int, int> screen_center{0, 0};
     std::vector<DebugPreviewDetection> detections;
     std::optional<std::pair<float, float>> locked_point;

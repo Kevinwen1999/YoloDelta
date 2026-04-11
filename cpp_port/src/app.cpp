@@ -1,4 +1,5 @@
 #include "delta/app.hpp"
+#include "delta/target_guard.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -291,8 +292,11 @@ bool pidRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rh
         || lhs.legacy_pid_prelock_scale != rhs.legacy_pid_prelock_scale;
 }
 
-DebugPreviewSnapshot makeInactiveDebugPreviewSnapshot(const std::pair<int, int> center) {
+DebugPreviewSnapshot makeInactiveDebugPreviewSnapshot(
+    const CaptureRegion& capture_region,
+    const std::pair<int, int> center) {
     DebugPreviewSnapshot snapshot{};
+    snapshot.capture_region = capture_region;
     snapshot.screen_center = center;
     return snapshot;
 }
@@ -665,6 +669,7 @@ DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
       input_sender_(makeInputSender()),
       recoil_scheduler_(std::make_unique<RecoilScheduler>(config_)),
       debug_preview_(makeDebugPreviewWindow(config_)),
+      debug_overlay_(makeDebugOverlayWindow(config_)),
       frontend_(makeRuntimeFrontend(config_, runtime_store_, shared_)),
       perf_(std::make_unique<RuntimePerfWindow>()) {
     if (capture_ && inference_) {
@@ -706,6 +711,10 @@ int DeltaApp::run() {
             debug_preview_->start();
             debug_preview_->setEnabled(runtime_store_.snapshot().debug_preview_enable);
         }
+        if (debug_overlay_) {
+            debug_overlay_->start();
+            debug_overlay_->setEnabled(runtime_store_.snapshot().debug_overlay_enable);
+        }
         if (config_.perf_log_enable && perf_) {
             perf_thread_ = AppThread([this]() { perfLoop(); });
         }
@@ -730,6 +739,9 @@ int DeltaApp::run() {
         stop();
         if (debug_preview_) {
             debug_preview_->stop();
+        }
+        if (debug_overlay_) {
+            debug_overlay_->stop();
         }
         if (frontend_) {
             frontend_->stop();
@@ -758,6 +770,9 @@ int DeltaApp::run() {
     }
     if (debug_preview_) {
         debug_preview_->stop();
+    }
+    if (debug_overlay_) {
+        debug_overlay_->stop();
     }
     if (frontend_) {
         frontend_->stop();
@@ -877,6 +892,7 @@ void DeltaApp::inferenceLoop() {
         TrackingStrategy last_tracking_strategy = runtime.tracking_strategy;
         AimMode last_aim_mode = runtime.aim_mode;
         auto tracker = makeTargetTracker(last_tracking_strategy, trackerVelocityAlpha(runtime));
+        TargetGuardState target_guard_state{};
         PIDSettleState pid_settle_state{};
         int lost_frames = 0;
         int active_target_cls = -1;
@@ -886,6 +902,7 @@ void DeltaApp::inferenceLoop() {
         SteadyClock::time_point last_pid_tick{};
         SteadyClock::time_point last_track_tick{};
         bool last_debug_preview_enabled = runtime.debug_preview_enable;
+        bool last_debug_overlay_enabled = runtime.debug_overlay_enable;
         bool preview_idle_state = true;
         const auto resetPidControllers = [&](const SteadyClock::time_point pid_tick = SteadyClock::time_point{}) {
             pid_x.reset();
@@ -903,6 +920,9 @@ void DeltaApp::inferenceLoop() {
         if (debug_preview_) {
             debug_preview_->setEnabled(last_debug_preview_enabled);
         }
+        if (debug_overlay_) {
+            debug_overlay_->setEnabled(last_debug_overlay_enabled);
+        }
 
         for (;;) {
             {
@@ -917,11 +937,27 @@ void DeltaApp::inferenceLoop() {
             const std::uint64_t reset_token = runtime_store_.resetToken();
             inference_->setModelConfidence(runtime.model_conf);
             const bool tracking_enabled = runtime.tracking_enabled;
+            const TargetGuardConfig target_guard_config = buildTargetGuardConfig(runtime);
             const bool debug_preview_enabled = runtime.debug_preview_enable;
+            const bool debug_overlay_enabled = runtime.debug_overlay_enable;
+            const bool debug_visuals_enabled = debug_preview_enabled || debug_overlay_enabled;
+            const auto publishDebugSnapshot = [&](DebugPreviewSnapshot snapshot) {
+                if (debug_preview_ && debug_preview_enabled) {
+                    debug_preview_->publish(snapshot);
+                }
+                if (debug_overlay_ && debug_overlay_enabled) {
+                    debug_overlay_->publish(std::move(snapshot));
+                }
+            };
 
             if (debug_preview_ && debug_preview_enabled != last_debug_preview_enabled) {
                 debug_preview_->setEnabled(debug_preview_enabled);
                 last_debug_preview_enabled = debug_preview_enabled;
+                preview_idle_state = true;
+            }
+            if (debug_overlay_ && debug_overlay_enabled != last_debug_overlay_enabled) {
+                debug_overlay_->setEnabled(debug_overlay_enabled);
+                last_debug_overlay_enabled = debug_overlay_enabled;
                 preview_idle_state = true;
             }
 
@@ -938,7 +974,12 @@ void DeltaApp::inferenceLoop() {
 
             if (reset_token != last_reset_token) {
                 resetPidControllers();
+                target_guard_state.reset();
                 last_reset_token = reset_token;
+            }
+
+            if (!target_guard_config.enable) {
+                target_guard_state.reset();
             }
 
             tracker->configure(trackerVelocityAlpha(runtime));
@@ -953,14 +994,17 @@ void DeltaApp::inferenceLoop() {
                     last_target_bbox,
                     last_pid_tick,
                     last_track_tick);
+                target_guard_state.reset();
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                 }
                 last_tracking_strategy = runtime.tracking_strategy;
-                if (debug_preview_ && debug_preview_enabled) {
-                    debug_preview_->publish(makeInactiveDebugPreviewSnapshot(center));
+                if (debug_visuals_enabled) {
+                    publishDebugSnapshot(makeInactiveDebugPreviewSnapshot(
+                        buildCaptureRegion(config_, center.first, center.second),
+                        center));
                 }
                 preview_idle_state = true;
                 std::this_thread::sleep_for(kInferenceIdleSleep);
@@ -978,14 +1022,17 @@ void DeltaApp::inferenceLoop() {
                     last_target_bbox,
                     last_pid_tick,
                     last_track_tick);
+                target_guard_state.reset();
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                 }
                 last_aim_mode = runtime.aim_mode;
-                if (debug_preview_ && debug_preview_enabled) {
-                    debug_preview_->publish(makeInactiveDebugPreviewSnapshot(center));
+                if (debug_visuals_enabled) {
+                    publishDebugSnapshot(makeInactiveDebugPreviewSnapshot(
+                        buildCaptureRegion(config_, center.first, center.second),
+                        center));
                 }
                 preview_idle_state = true;
                 std::this_thread::sleep_for(kInferenceIdleSleep);
@@ -1015,8 +1062,9 @@ void DeltaApp::inferenceLoop() {
                     toggles.right_pressed,
                     toggles.x1_pressed);
             const bool triggerbot_monitor_active = (toggles.mode != 0) && runtime.triggerbot_enable;
+            const bool debug_overlay_observe_active = debug_overlay_enabled && !engage_active && !triggerbot_monitor_active;
 
-            if (!(engage_active || triggerbot_monitor_active)) {
+            if (!(engage_active || triggerbot_monitor_active || debug_overlay_observe_active)) {
                 tracker->reset();
                 resetPidControllers();
                 resetAimTrackingState(
@@ -1027,19 +1075,41 @@ void DeltaApp::inferenceLoop() {
                     last_target_bbox,
                     last_pid_tick,
                     last_track_tick);
+                target_guard_state.reset();
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                 }
-                if (debug_preview_ && debug_preview_enabled && !preview_idle_state) {
-                    debug_preview_->publish(makeInactiveDebugPreviewSnapshot(center));
+                if (debug_visuals_enabled && !preview_idle_state) {
+                    publishDebugSnapshot(makeInactiveDebugPreviewSnapshot(
+                        buildCaptureRegion(config_, center.first, center.second),
+                        center));
                 }
                 preview_idle_state = true;
                 std::this_thread::sleep_for(kInferenceIdleSleep);
                 continue;
             }
             preview_idle_state = false;
+
+            if (debug_overlay_observe_active) {
+                tracker->reset();
+                resetPidControllers();
+                resetAimTrackingState(
+                    lost_frames,
+                    active_target_cls,
+                    last_box_w,
+                    last_box_h,
+                    last_target_bbox,
+                    last_pid_tick,
+                    last_track_tick);
+                target_guard_state.reset();
+                command_slot_.clear();
+                {
+                    std::lock_guard<std::mutex> lock(shared_.mutex);
+                    clearAimStateLocked(shared_, center, runtime.tracking_strategy);
+                }
+            }
 
             InferenceAppTimings app_timings{};
             std::optional<FramePacket> cpu_packet;
@@ -1126,6 +1196,7 @@ void DeltaApp::inferenceLoop() {
 
             const auto select_start = SteadyClock::now();
             std::optional<std::pair<float, float>> locked_point;
+            bool locked_point_from_guard = false;
             if (tracking_enabled && tracker->initialized()) {
                 const TrackerState tracker_state = tracker->state();
                 locked_point = std::make_pair(tracker_state.x, tracker_state.y);
@@ -1135,31 +1206,39 @@ void DeltaApp::inferenceLoop() {
                 && prev_target_time != SystemClock::time_point{}
                 && secondsSince(prev_target_time, SystemClock::now()) <= kTargetTimeoutSeconds) {
                 locked_point = std::make_pair(static_cast<float>(prev_target_full.first), static_cast<float>(prev_target_full.second));
+            } else if (target_guard_config.enable
+                && target_guard_state.active.active
+                && target_guard_state.active.last_accepted_point.has_value()) {
+                locked_point = target_guard_state.active.last_accepted_point;
+                locked_point_from_guard = true;
             }
 
-            std::optional<StickyTargetPick> sticky;
-            if (!locked_point.has_value()) {
-                sticky = pickStickyTarget(
-                    aim_pool.candidates,
-                    center.first,
-                    center.second,
-                    std::nullopt,
-                    runtime.sticky_bias_px);
-            } else {
-                std::pair<float, float> assoc_ref = *locked_point;
-                float assoc_limit = kTargetLockMaxJump;
-                if (tracker->initialized()) {
-                    const TrackerState assoc_state = tracker->state();
-                    assoc_ref = {
-                        assoc_state.x + (assoc_state.vx * kAssocPredictDt),
-                        assoc_state.y + (assoc_state.vy * kAssocPredictDt),
-                    };
-                    assoc_limit += std::min(
-                        kAssocMaxJumpPad,
-                        std::sqrt((assoc_state.vx * assoc_state.vx) + (assoc_state.vy * assoc_state.vy)) * kAssocSpeedJumpGain);
+            std::pair<float, float> assoc_ref = locked_point.value_or(std::make_pair(
+                static_cast<float>(center.first),
+                static_cast<float>(center.second)));
+            float assoc_limit = kTargetLockMaxJump;
+            if (locked_point.has_value() && tracker->initialized()) {
+                const TrackerState assoc_state = tracker->state();
+                assoc_ref = {
+                    assoc_state.x + (assoc_state.vx * kAssocPredictDt),
+                    assoc_state.y + (assoc_state.vy * kAssocPredictDt),
+                };
+                assoc_limit += std::min(
+                    kAssocMaxJumpPad,
+                    std::sqrt((assoc_state.vx * assoc_state.vx) + (assoc_state.vy * assoc_state.vy)) * kAssocSpeedJumpGain);
+            }
+
+            const auto pickFromPool = [&](const AimCandidatePool& pool) -> std::optional<StickyTargetPick> {
+                if (!locked_point.has_value()) {
+                    return pickStickyTarget(
+                        pool.candidates,
+                        center.first,
+                        center.second,
+                        std::nullopt,
+                        runtime.sticky_bias_px);
                 }
-                sticky = pickAssociatedStickyTarget(
-                    aim_pool.candidates,
+                return pickAssociatedStickyTarget(
+                    pool.candidates,
                     center.first,
                     center.second,
                     assoc_ref,
@@ -1167,8 +1246,89 @@ void DeltaApp::inferenceLoop() {
                     locked_point,
                     last_target_bbox,
                     runtime.sticky_bias_px);
+            };
+
+            std::optional<CaptureRegion> guard_region;
+            std::optional<StickyTargetPick> sticky;
+            TargetGuardMissResult target_guard_miss = TargetGuardMissResult::Inactive;
+            const bool guard_active = target_guard_config.enable && target_guard_state.active.active;
+            if (guard_active) {
+                guard_region = buildTargetGuardRegion(
+                    target_guard_state,
+                    target_guard_config,
+                    capture_region,
+                    tracker->initialized() ? std::optional<std::pair<float, float>>(assoc_ref) : std::nullopt);
+                const std::vector<Detection> guarded_detections = filterDetectionsInTargetGuard(detections, guard_region);
+                const AimCandidatePool guarded_pool = buildAimCandidatePool(
+                    guarded_detections,
+                    runtime.aim_mode,
+                    runtime.body_y_ratio,
+                    runtime.head_y_ratio);
+                sticky = pickFromPool(guarded_pool);
+                if (!sticky.has_value() || !sticky->detection.has_value()) {
+                    target_guard_miss = noteTargetGuardMiss(target_guard_state, target_guard_config);
+                    if (target_guard_miss == TargetGuardMissResult::Expired) {
+                        if (locked_point_from_guard) {
+                            locked_point.reset();
+                            assoc_ref = std::make_pair(static_cast<float>(center.first), static_cast<float>(center.second));
+                            assoc_limit = kTargetLockMaxJump;
+                        }
+                        guard_region.reset();
+                        sticky = pickFromPool(aim_pool);
+                    }
+                }
+            } else {
+                sticky = pickFromPool(aim_pool);
+            }
+
+            if (sticky.has_value() && sticky->detection.has_value()) {
+                noteTargetGuardSelection(target_guard_state, target_guard_config, *sticky->detection);
+            } else if (!guard_active || target_guard_miss == TargetGuardMissResult::Inactive) {
+                (void)noteTargetGuardMiss(target_guard_state, target_guard_config);
+            }
+            if (target_guard_config.enable && target_guard_state.active.active) {
+                const std::optional<std::pair<float, float>> guard_center = (sticky.has_value() && sticky->detection.has_value())
+                    ? std::optional<std::pair<float, float>>(std::make_pair(sticky->detection->x, sticky->detection->y))
+                    : (tracker->initialized() ? std::optional<std::pair<float, float>>(assoc_ref) : std::nullopt);
+                guard_region = buildTargetGuardRegion(
+                    target_guard_state,
+                    target_guard_config,
+                    capture_region,
+                    guard_center);
+            } else {
+                guard_region.reset();
             }
             app_timings.select_s = secondsSince(select_start, SteadyClock::now());
+
+            if (debug_overlay_observe_active) {
+                if (debug_overlay_ && debug_overlay_enabled) {
+                    const auto preview_start = SteadyClock::now();
+                    DebugPreviewSnapshot overlay_snapshot = makeDebugPreviewSnapshot(
+                        capture_region,
+                        center,
+                        detections,
+                        sticky.has_value() ? sticky->detection : std::nullopt);
+                    overlay_snapshot.guard_region = guard_region;
+                    if (sticky.has_value() && sticky->detection.has_value()) {
+                        overlay_snapshot.target_found = true;
+                        overlay_snapshot.target_cls = sticky->detection->cls;
+                    }
+                    debug_overlay_->publish(std::move(overlay_snapshot));
+                    app_timings.preview_s = secondsSince(preview_start, SteadyClock::now());
+                }
+                if (perf_) {
+                    recordInferencePerf(
+                        *perf_,
+                        frame_age,
+                        secondsSince(loop_start, SteadyClock::now()),
+                        false,
+                        false,
+                        app_timings,
+                        inference_result.timings,
+                        std::nullopt);
+                }
+                continue;
+            }
 
             const auto tracker_start = SteadyClock::now();
             const SteadyClock::time_point now_tick = SteadyClock::now();
@@ -1216,13 +1376,14 @@ void DeltaApp::inferenceLoop() {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                 }
-                if (debug_preview_ && debug_preview_enabled) {
+                if (debug_visuals_enabled) {
                     const auto preview_start = SteadyClock::now();
                     DebugPreviewSnapshot preview_snapshot = makeDebugPreviewSnapshot(capture_region, center, detections);
+                    preview_snapshot.guard_region = guard_region;
                     if (locked_point.has_value()) {
                         preview_snapshot.locked_point = *locked_point;
                     }
-                    debug_preview_->publish(std::move(preview_snapshot));
+                    publishDebugSnapshot(std::move(preview_snapshot));
                     app_timings.preview_s = secondsSince(preview_start, SteadyClock::now());
                 }
                 if (perf_) {
@@ -1251,18 +1412,20 @@ void DeltaApp::inferenceLoop() {
                         last_target_bbox,
                         last_pid_tick,
                         last_track_tick);
+                    target_guard_state.reset();
                     command_slot_.clear();
                     {
                         std::lock_guard<std::mutex> lock(shared_.mutex);
                         clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                     }
-                    if (debug_preview_ && debug_preview_enabled) {
+                    if (debug_visuals_enabled) {
                         const auto preview_start = SteadyClock::now();
                         DebugPreviewSnapshot preview_snapshot = makeDebugPreviewSnapshot(capture_region, center, detections);
+                        preview_snapshot.guard_region = guard_region;
                         if (locked_point.has_value()) {
                             preview_snapshot.locked_point = *locked_point;
                         }
-                        debug_preview_->publish(std::move(preview_snapshot));
+                        publishDebugSnapshot(std::move(preview_snapshot));
                         app_timings.preview_s = secondsSince(preview_start, SteadyClock::now());
                     }
                     if (perf_) {
@@ -1461,13 +1624,14 @@ void DeltaApp::inferenceLoop() {
             }
             app_timings.aim_sync_s = secondsSince(aim_sync_start, SteadyClock::now());
 
-            if (debug_preview_ && debug_preview_enabled) {
+            if (debug_visuals_enabled) {
                 const auto preview_start = SteadyClock::now();
                 DebugPreviewSnapshot preview_snapshot = makeDebugPreviewSnapshot(
                     capture_region,
                     center,
                     detections,
                     sticky.has_value() ? sticky->detection : std::nullopt);
+                preview_snapshot.guard_region = guard_region;
                 if (locked_point.has_value()) {
                     preview_snapshot.locked_point = *locked_point;
                 }
@@ -1475,7 +1639,7 @@ void DeltaApp::inferenceLoop() {
                 preview_snapshot.target_found = true;
                 preview_snapshot.target_cls = selected_cls;
                 preview_snapshot.target_speed = speed;
-                debug_preview_->publish(std::move(preview_snapshot));
+                publishDebugSnapshot(std::move(preview_snapshot));
                 app_timings.preview_s = secondsSince(preview_start, SteadyClock::now());
             }
 

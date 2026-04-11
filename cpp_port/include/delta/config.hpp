@@ -120,9 +120,9 @@ struct StaticConfig {
     int screen_w = 2560;
     int screen_h = 1440;
     int imgsz = 416;
-    int capture_crop_size = 800;
+    int capture_crop_size = 832;
     float conf = 0.30F;
-    int max_detections = 6;
+    int max_detections = 10;
     std::string inference_device = "cuda";
     std::string onnx_provider = "auto";
     std::string onnx_resize_interpolation = "nearest";
@@ -156,16 +156,17 @@ inline int effectiveCaptureCropSize(const StaticConfig& config) {
 struct RuntimeConfig {
     bool pid_enable = true;
     bool tracking_enabled = true;
-    bool debug_preview_enable = true;
-    AimMode aim_mode = AimMode::Head;
+    bool debug_preview_enable = false;
+    bool debug_overlay_enable = false;
+    AimMode aim_mode = AimMode::Hybrid;
     int capture_cached_timeout_ms = 0;
     float body_y_ratio = 0.15F;
     float head_y_ratio = 0.50F;
-    TrackingStrategy tracking_strategy = TrackingStrategy::RawDelta;
+    TrackingStrategy tracking_strategy = TrackingStrategy::LegacyPid;
     float tracking_alpha = 0.42F;
     float tracking_velocity_alpha = 0.5F;
-    float kp = 0.30F;
-    float ki = 0.7F;
+    float kp = 0.50F;
+    float ki = 0.9F;
     float kd = 0.009F;
     float integral_limit = 2000.0F;
     float anti_windup_gain = 1.0F;
@@ -188,6 +189,11 @@ struct RuntimeConfig {
     float legacy_pid_error_delta_px = 3.0F;
     float legacy_pid_prelock_scale = 0.5F;
     float sticky_bias_px = 800.0F;
+    bool target_guard_enable = true;
+    int target_guard_commit_frames = 5;
+    int target_guard_hold_frames = 20;
+    float target_guard_window_scale = 2.25F;
+    int target_guard_min_window_px = 120;
     float prediction_time = 0.000F;
     int target_max_lost_frames = 8;
     float model_conf = 0.30F;

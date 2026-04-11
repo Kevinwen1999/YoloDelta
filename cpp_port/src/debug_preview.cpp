@@ -28,6 +28,8 @@ constexpr UINT kPreviewRefreshMs = 33;
 constexpr UINT kPreviewSyncMessage = WM_APP + 1;
 constexpr int kPreviewMargin = 16;
 constexpr int kPreviewHeaderHeight = 54;
+constexpr int kPreviewOverviewWidth = 92;
+constexpr int kPreviewOverviewHeight = 36;
 
 #ifndef WDA_EXCLUDEFROMCAPTURE
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
@@ -427,7 +429,81 @@ private:
         Rectangle(dc, layout.view.left, layout.view.top, layout.view.right, layout.view.bottom);
     }
 
-    void drawStatusText(HDC dc, const DebugPreviewSnapshot& snapshot) const {
+    RECT computeOverviewRect(const RECT& client) const {
+        const int right = client.right - kPreviewMargin;
+        const int left = std::max(kPreviewMargin, right - kPreviewOverviewWidth);
+        const int top = 12;
+        const int bottom = std::min(kPreviewHeaderHeight - 6, top + kPreviewOverviewHeight);
+        return RECT{left, top, right, bottom};
+    }
+
+    void drawCaptureOverview(HDC dc, const DebugPreviewSnapshot& snapshot, const RECT& client) const {
+        const RECT overview = computeOverviewRect(client);
+        if (overview.right <= overview.left || overview.bottom <= overview.top) {
+            return;
+        }
+
+        HBRUSH panel = CreateSolidBrush(RGB(12, 18, 22));
+        ScopedDeleteObject panel_cleanup(panel);
+        FillRect(dc, &overview, panel);
+
+        HPEN border_pen = CreatePen(PS_SOLID, 1, RGB(58, 74, 84));
+        ScopedDeleteObject border_cleanup(border_pen);
+        ScopedSelectObject select_border_pen(dc, border_pen);
+        ScopedSelectObject select_border_brush(dc, GetStockObject(HOLLOW_BRUSH));
+        Rectangle(dc, overview.left, overview.top, overview.right, overview.bottom);
+
+        const int screen_width = std::max(1, config_.screen_w);
+        const int screen_height = std::max(1, config_.screen_h);
+        RECT inner{
+            overview.left + 4,
+            overview.top + 4,
+            overview.right - 4,
+            overview.bottom - 4,
+        };
+        const int inner_width = std::max(1, static_cast<int>(inner.right - inner.left));
+        const int inner_height = std::max(1, static_cast<int>(inner.bottom - inner.top));
+        const float scale_x = static_cast<float>(inner_width) / static_cast<float>(screen_width);
+        const float scale_y = static_cast<float>(inner_height) / static_cast<float>(screen_height);
+        const float scale = std::max(0.01F, std::min(scale_x, scale_y));
+        const int screen_rect_width = std::max(1, static_cast<int>(screen_width * scale));
+        const int screen_rect_height = std::max(1, static_cast<int>(screen_height * scale));
+        RECT screen_rect{
+            inner.left + ((inner_width - screen_rect_width) / 2),
+            inner.top + ((inner_height - screen_rect_height) / 2),
+            inner.left + ((inner_width - screen_rect_width) / 2) + screen_rect_width,
+            inner.top + ((inner_height - screen_rect_height) / 2) + screen_rect_height,
+        };
+
+        HPEN screen_pen = CreatePen(PS_SOLID, 1, RGB(86, 105, 116));
+        ScopedDeleteObject screen_pen_cleanup(screen_pen);
+        ScopedSelectObject select_screen_pen(dc, screen_pen);
+        Rectangle(dc, screen_rect.left, screen_rect.top, screen_rect.right, screen_rect.bottom);
+
+        if (snapshot.capture_region.width > 0 && snapshot.capture_region.height > 0) {
+            RECT crop_rect{
+                screen_rect.left + static_cast<int>(static_cast<float>(snapshot.capture_region.left) * scale),
+                screen_rect.top + static_cast<int>(static_cast<float>(snapshot.capture_region.top) * scale),
+                screen_rect.left + static_cast<int>(static_cast<float>(snapshot.capture_region.left + snapshot.capture_region.width) * scale),
+                screen_rect.top + static_cast<int>(static_cast<float>(snapshot.capture_region.top + snapshot.capture_region.height) * scale),
+            };
+            crop_rect.right = std::max(crop_rect.left + 1, crop_rect.right);
+            crop_rect.bottom = std::max(crop_rect.top + 1, crop_rect.bottom);
+
+            HPEN crop_pen = CreatePen(PS_SOLID, 1, RGB(99, 186, 255));
+            ScopedDeleteObject crop_pen_cleanup(crop_pen);
+            ScopedSelectObject select_crop_pen(dc, crop_pen);
+            Rectangle(dc, crop_rect.left, crop_rect.top, crop_rect.right, crop_rect.bottom);
+        }
+
+        const POINT center{
+            screen_rect.left + static_cast<int>(static_cast<float>(snapshot.screen_center.first) * scale),
+            screen_rect.top + static_cast<int>(static_cast<float>(snapshot.screen_center.second) * scale),
+        };
+        drawMarker(dc, center, RGB(229, 229, 229), 2);
+    }
+
+    void drawStatusText(HDC dc, const DebugPreviewSnapshot& snapshot, const RECT& client) const {
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, RGB(230, 241, 246));
         ScopedSelectObject select_font(dc, GetStockObject(DEFAULT_GUI_FONT));
@@ -453,9 +529,14 @@ private:
                 snapshot.target_cls,
                 snapshot.target_speed);
         }
-        TextOutA(dc, kPreviewMargin, 14, line1, static_cast<int>(std::strlen(line1)));
+        const RECT overview = computeOverviewRect(client);
+        const int text_right = std::max(kPreviewMargin + 120, static_cast<int>(overview.left) - 12);
+        RECT line1_rect{kPreviewMargin, 11, text_right, 28};
+        RECT line2_rect{kPreviewMargin, 29, text_right, 46};
+        DrawTextA(dc, line1, -1, &line1_rect, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         SetTextColor(dc, RGB(143, 167, 177));
-        TextOutA(dc, kPreviewMargin, 32, line2, static_cast<int>(std::strlen(line2)));
+        DrawTextA(dc, line2, -1, &line2_rect, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        drawCaptureOverview(dc, snapshot, client);
     }
 
     void drawDetections(HDC dc, const DebugPreviewSnapshot& snapshot, const PreviewLayout& layout) const {
@@ -464,7 +545,7 @@ private:
         for (const auto& detection : snapshot.detections) {
             const RECT box = mapBox(layout, snapshot.capture_region, detection.bbox);
             const COLORREF color = detection.selected ? RGB(111, 231, 150) : RGB(243, 181, 95);
-            const int thickness = detection.selected ? 2 : 1;
+            const int thickness = 1;
             HPEN pen = CreatePen(PS_SOLID, thickness, color);
             ScopedDeleteObject pen_cleanup(pen);
             ScopedSelectObject select_pen(dc, pen);
@@ -481,6 +562,23 @@ private:
                 label,
                 static_cast<int>(std::strlen(label)));
         }
+    }
+
+    void drawGuardRegion(HDC dc, const DebugPreviewSnapshot& snapshot, const PreviewLayout& layout) const {
+        if (!snapshot.guard_region.has_value()) {
+            return;
+        }
+
+        const auto& guard = *snapshot.guard_region;
+        const RECT box = mapBox(
+            layout,
+            snapshot.capture_region,
+            std::array<int, 4>{guard.left, guard.top, guard.left + guard.width, guard.top + guard.height});
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(255, 122, 122));
+        ScopedDeleteObject pen_cleanup(pen);
+        ScopedSelectObject select_pen(dc, pen);
+        ScopedSelectObject select_brush(dc, GetStockObject(HOLLOW_BRUSH));
+        Rectangle(dc, box.left, box.top, box.right, box.bottom);
     }
 
     void drawGuides(HDC dc, const DebugPreviewSnapshot& snapshot, const PreviewLayout& layout) const {
@@ -527,8 +625,9 @@ private:
 
         const PreviewLayout layout = computeLayout(client, snapshot.capture_region);
         drawBackground(buffer_dc, client, layout);
-        drawStatusText(buffer_dc, snapshot);
+        drawStatusText(buffer_dc, snapshot, client);
         drawGuides(buffer_dc, snapshot, layout);
+        drawGuardRegion(buffer_dc, snapshot, layout);
         drawDetections(buffer_dc, snapshot, layout);
 
         BitBlt(hdc, 0, 0, width, height, buffer_dc, 0, 0, SRCCOPY);
