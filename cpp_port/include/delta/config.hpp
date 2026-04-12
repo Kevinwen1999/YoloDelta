@@ -165,7 +165,7 @@ struct RuntimeConfig {
     TrackingStrategy tracking_strategy = TrackingStrategy::LegacyPid;
     float tracking_alpha = 0.42F;
     float tracking_velocity_alpha = 0.5F;
-    float kp = 0.50F;
+    float kp = 0.30F;
     float ki = 0.9F;
     float kd = 0.009F;
     float integral_limit = 2000.0F;
@@ -194,6 +194,13 @@ struct RuntimeConfig {
     int target_guard_hold_frames = 20;
     float target_guard_window_scale = 2.25F;
     int target_guard_min_window_px = 120;
+    bool target_lead_enable = false;
+    int target_lead_commit_frames = 3;
+    bool target_lead_auto_latency_enable = true;
+    float target_lead_max_time_s = 0.080F;
+    float target_lead_min_speed_px_s = 120.0F;
+    float target_lead_max_offset_box_scale = 0.75F;
+    float target_lead_smoothing_alpha = 1.0F;
     float prediction_time = 0.000F;
     int target_max_lost_frames = 8;
     float model_conf = 0.30F;

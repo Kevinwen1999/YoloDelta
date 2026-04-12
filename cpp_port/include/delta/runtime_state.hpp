@@ -106,11 +106,14 @@ struct SharedState {
     bool pid_settled = false;
     float pid_settle_error_metric_px = 0.0F;
     float pid_settle_threshold_px = 0.0F;
+    bool lead_active = false;
+    float lead_time_ms = 0.0F;
     std::pair<int, int> last_target_full{1280, 720};
     std::pair<int, int> capture_focus_full{1280, 720};
     SystemClock::time_point target_time{};
     std::atomic<float> ctrl_sent_vx_ema{0.0F};
     std::atomic<float> ctrl_sent_vy_ema{0.0F};
+    std::atomic<float> cmd_send_latency_ema_s{0.0F};
     SteadyClock::time_point ctrl_last_send_tick{};
     std::string tracking_strategy = "raw_delta";
     bool side_button_key_sequence_enabled = false;

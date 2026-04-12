@@ -24,7 +24,11 @@ struct DebugPreviewSnapshot {
     std::pair<int, int> screen_center{0, 0};
     std::vector<DebugPreviewDetection> detections;
     std::optional<std::pair<float, float>> locked_point;
+    std::optional<std::pair<float, float>> detected_point;
     std::optional<std::pair<float, float>> predicted_point;
+    std::optional<float> lead_time_s;
+    bool lead_active = false;
+    bool detected_point_stale = false;
     bool target_found = false;
     int target_cls = -1;
     float target_speed = 0.0F;

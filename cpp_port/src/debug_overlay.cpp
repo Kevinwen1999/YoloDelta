@@ -574,6 +574,57 @@ private:
         draw_list->AddText(text_pos, color, label);
     }
 
+    void drawLeadTelemetry(const DebugPreviewSnapshot& snapshot) {
+        if (!snapshot.predicted_point.has_value()) {
+            return;
+        }
+
+        ImDrawList* draw_list = ImGui::GetForegroundDrawList();
+        const ImVec2 predicted(
+            snapshot.predicted_point->first,
+            snapshot.predicted_point->second);
+        const ImU32 predicted_color = snapshot.lead_active
+            ? IM_COL32(255, 146, 96, 240)
+            : IM_COL32(255, 122, 122, 220);
+        draw_list->AddCircleFilled(predicted, 4.0F, IM_COL32(8, 12, 15, 220), 12);
+        draw_list->AddCircle(predicted, 4.0F, predicted_color, 12, 1.5F);
+
+        if (snapshot.lead_active && snapshot.detected_point.has_value()) {
+            const ImVec2 detected(
+                snapshot.detected_point->first,
+                snapshot.detected_point->second);
+            const ImU32 detected_color = snapshot.detected_point_stale
+                ? IM_COL32(112, 172, 112, 180)
+                : IM_COL32(111, 231, 150, 235);
+            draw_list->AddCircleFilled(detected, 4.0F, IM_COL32(8, 12, 15, 220), 12);
+            draw_list->AddCircle(detected, 4.0F, detected_color, 12, 1.5F);
+            draw_list->AddLine(
+                detected,
+                predicted,
+                snapshot.detected_point_stale ? IM_COL32(160, 138, 108, 180) : IM_COL32(255, 184, 112, 220),
+                1.2F);
+        }
+
+        if (snapshot.lead_active && snapshot.lead_time_s.has_value()) {
+            char label[48]{};
+            std::snprintf(
+                label,
+                sizeof(label),
+                snapshot.detected_point_stale ? "lead %.0fms stale" : "lead %.0fms",
+                *snapshot.lead_time_s * 1000.0F);
+            const ImVec2 text_pos(predicted.x + 8.0F, predicted.y - 18.0F);
+            const ImVec2 text_size = ImGui::CalcTextSize(label);
+            draw_list->AddRectFilled(
+                ImVec2(text_pos.x - 3.0F, text_pos.y - 2.0F),
+                ImVec2(text_pos.x + text_size.x + 3.0F, text_pos.y + text_size.y + 2.0F),
+                IM_COL32(8, 12, 15, 190));
+            draw_list->AddText(
+                text_pos,
+                snapshot.detected_point_stale ? IM_COL32(205, 164, 126, 230) : IM_COL32(255, 214, 156, 235),
+                label);
+        }
+    }
+
     void drawScreenCenterMarker() {
         const ImVec2 display_size = ImGui::GetIO().DisplaySize;
         if (display_size.x <= 0.0F || display_size.y <= 0.0F) {
@@ -598,6 +649,7 @@ private:
         drawCaptureRegion(snapshot);
         drawGuardRegion(snapshot);
         drawDetections(snapshot);
+        drawLeadTelemetry(snapshot);
         ImGui::Render();
 
         constexpr float clear_color[4] = {0.0F, 0.0F, 0.0F, 0.0F};

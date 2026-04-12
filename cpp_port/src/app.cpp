@@ -1,5 +1,6 @@
 #include "delta/app.hpp"
 #include "delta/target_guard.hpp"
+#include "delta/target_lead.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -133,6 +134,7 @@ constexpr float kMinTrackDt = 1.0F / 240.0F;
 constexpr float kMaxTrackDt = 0.06F;
 constexpr float kMaxTrackSpeedPxS = 1800.0F;
 constexpr float kEgoMotionCompAlpha = 0.30F;
+constexpr float kCmdSendLatencyAlpha = 0.20F;
 constexpr float kEgoMotionCompMaxPxS = 3200.0F;
 constexpr float kEgoMotionCompDecay = 0.92F;
 constexpr float kTargetLockMaxJump = 260.0F;
@@ -332,6 +334,8 @@ void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, 
     shared.pid_settled = false;
     shared.pid_settle_error_metric_px = 0.0F;
     shared.pid_settle_threshold_px = 0.0F;
+    shared.lead_active = false;
+    shared.lead_time_ms = 0.0F;
     shared.aim_dx = 0;
     shared.aim_dy = 0;
     shared.last_target_full = center;
@@ -893,6 +897,7 @@ void DeltaApp::inferenceLoop() {
         AimMode last_aim_mode = runtime.aim_mode;
         auto tracker = makeTargetTracker(last_tracking_strategy, trackerVelocityAlpha(runtime));
         TargetGuardState target_guard_state{};
+        TargetLeadState target_lead_state{};
         PIDSettleState pid_settle_state{};
         int lost_frames = 0;
         int active_target_cls = -1;
@@ -938,6 +943,7 @@ void DeltaApp::inferenceLoop() {
             inference_->setModelConfidence(runtime.model_conf);
             const bool tracking_enabled = runtime.tracking_enabled;
             const TargetGuardConfig target_guard_config = buildTargetGuardConfig(runtime);
+            const TargetLeadConfig target_lead_config = buildTargetLeadConfig(runtime);
             const bool debug_preview_enabled = runtime.debug_preview_enable;
             const bool debug_overlay_enabled = runtime.debug_overlay_enable;
             const bool debug_visuals_enabled = debug_preview_enabled || debug_overlay_enabled;
@@ -975,11 +981,15 @@ void DeltaApp::inferenceLoop() {
             if (reset_token != last_reset_token) {
                 resetPidControllers();
                 target_guard_state.reset();
+                target_lead_state.reset();
                 last_reset_token = reset_token;
             }
 
             if (!target_guard_config.enable) {
                 target_guard_state.reset();
+            }
+            if (!target_lead_config.enable) {
+                target_lead_state.reset();
             }
 
             tracker->configure(trackerVelocityAlpha(runtime));
@@ -995,6 +1005,7 @@ void DeltaApp::inferenceLoop() {
                     last_pid_tick,
                     last_track_tick);
                 target_guard_state.reset();
+                target_lead_state.reset();
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1023,6 +1034,7 @@ void DeltaApp::inferenceLoop() {
                     last_pid_tick,
                     last_track_tick);
                 target_guard_state.reset();
+                target_lead_state.reset();
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1076,6 +1088,7 @@ void DeltaApp::inferenceLoop() {
                     last_pid_tick,
                     last_track_tick);
                 target_guard_state.reset();
+                target_lead_state.reset();
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1104,6 +1117,7 @@ void DeltaApp::inferenceLoop() {
                     last_pid_tick,
                     last_track_tick);
                 target_guard_state.reset();
+                target_lead_state.reset();
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1298,6 +1312,23 @@ void DeltaApp::inferenceLoop() {
             } else {
                 guard_region.reset();
             }
+            const SteadyClock::time_point lead_sample_time = frame_ready != SteadyClock::time_point{}
+                ? frame_ready
+                : frame_time;
+            const bool selected_detection = sticky.has_value() && sticky->detection.has_value();
+            const bool target_switched = selected_detection
+                && (sticky->switched
+                    || (last_target_bbox.has_value() && bboxIou(sticky->detection->bbox, *last_target_bbox) < 0.05F));
+            if (!debug_overlay_observe_active && target_lead_config.enable) {
+                if (target_switched) {
+                    target_lead_state.reset();
+                }
+                if (selected_detection) {
+                    noteTargetLeadSelection(target_lead_state, target_lead_config, *sticky->detection, lead_sample_time);
+                } else {
+                    noteTargetLeadMiss(target_lead_state, target_lead_config);
+                }
+            }
             app_timings.select_s = secondsSince(select_start, SteadyClock::now());
 
             if (debug_overlay_observe_active) {
@@ -1343,8 +1374,6 @@ void DeltaApp::inferenceLoop() {
 
             bool trigger_fire = false;
             if (sticky.has_value() && sticky->detection.has_value()) {
-                const bool target_switched = sticky->switched
-                    || (last_target_bbox.has_value() && bboxIou(sticky->detection->bbox, *last_target_bbox) < 0.05F);
                 if (target_switched) {
                     resetPidControllers(now_tick);
                 }
@@ -1371,6 +1400,7 @@ void DeltaApp::inferenceLoop() {
                 app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
             } else if (!tracking_enabled || !tracker->initialized()) {
                 app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
+                target_lead_state.reset();
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1413,6 +1443,7 @@ void DeltaApp::inferenceLoop() {
                         last_pid_tick,
                         last_track_tick);
                     target_guard_state.reset();
+                    target_lead_state.reset();
                     command_slot_.clear();
                     {
                         std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1459,13 +1490,86 @@ void DeltaApp::inferenceLoop() {
             float ff_scale = 0.0F;
             float vx = 0.0F;
             float vy = 0.0F;
+            std::optional<TargetLeadPrediction> target_lead_prediction;
+            const bool target_lead_locked = target_lead_config.enable && target_lead_state.active.active;
             if (!use_legacy_pid) {
+                ff_scale = tracker->feedforwardScale();
+            }
+            if (target_lead_locked) {
+                float extra_velocity_x = 0.0F;
+                float extra_velocity_y = 0.0F;
+                if (!use_legacy_pid) {
+                    const float ctrl_sent_vx_ema = shared_.ctrl_sent_vx_ema.load(std::memory_order_relaxed);
+                    const float ctrl_sent_vy_ema = shared_.ctrl_sent_vy_ema.load(std::memory_order_relaxed);
+                    const std::pair<float, float> gate_point = target_lead_state.active.last_detected_point.value_or(
+                        std::make_pair(tracker_state.x, tracker_state.y));
+                    float ego_gate_x = 1.0F;
+                    float ego_gate_y = 1.0F;
+                    if (runtime.ego_motion_error_gate_enable) {
+                        if (runtime.ego_motion_error_gate_normalize_by_box && runtime.ego_motion_error_gate_norm_threshold > 1e-6F) {
+                            const float norm_box_w = std::max(1.0F, last_box_w);
+                            const float norm_box_h = std::max(1.0F, last_box_h);
+                            const float normalized_error_x = std::abs(gate_point.first - static_cast<float>(center.first)) / norm_box_w;
+                            const float normalized_error_y = std::abs(gate_point.second - static_cast<float>(center.second)) / norm_box_h;
+                            ego_gate_x = clamp(
+                                1.0F - (normalized_error_x / runtime.ego_motion_error_gate_norm_threshold),
+                                0.0F,
+                                1.0F);
+                            ego_gate_y = clamp(
+                                1.0F - (normalized_error_y / runtime.ego_motion_error_gate_norm_threshold),
+                                0.0F,
+                                1.0F);
+                        } else if (runtime.ego_motion_error_gate_px > 1e-6F) {
+                            ego_gate_x = clamp(
+                                1.0F - (std::abs(gate_point.first - static_cast<float>(center.first)) / runtime.ego_motion_error_gate_px),
+                                0.0F,
+                                1.0F);
+                            ego_gate_y = clamp(
+                                1.0F - (std::abs(gate_point.second - static_cast<float>(center.second)) / runtime.ego_motion_error_gate_px),
+                                0.0F,
+                                1.0F);
+                        }
+                    }
+                    if (runtime.ego_motion_comp_enable && ff_scale > 0.0F) {
+                        extra_velocity_x = clamp(
+                            ctrl_sent_vx_ema * runtime.ego_motion_comp_gain_x * ff_scale * ego_gate_x,
+                            -kEgoMotionCompMaxPxS,
+                            kEgoMotionCompMaxPxS);
+                        extra_velocity_y = clamp(
+                            ctrl_sent_vy_ema * runtime.ego_motion_comp_gain_y * ff_scale * ego_gate_y,
+                            -kEgoMotionCompMaxPxS,
+                            kEgoMotionCompMaxPxS);
+                    }
+                }
+                target_lead_prediction = predictTargetLead(
+                    target_lead_state,
+                    target_lead_config,
+                    now_tick,
+                    target_lead_config.auto_latency_enable
+                        ? shared_.cmd_send_latency_ema_s.load(std::memory_order_relaxed)
+                        : 0.0F,
+                    std::max(0.0F, runtime.prediction_time),
+                    extra_velocity_x,
+                    extra_velocity_y,
+                    config_.screen_w,
+                    config_.screen_h);
+                if (target_lead_prediction.has_value()) {
+                    predicted_x = target_lead_prediction->predicted_point.first;
+                    aim_y = target_lead_prediction->predicted_point.second;
+                    vx = target_lead_prediction->velocity_x;
+                    vy = target_lead_prediction->velocity_y;
+                    speed = std::sqrt((vx * vx) + (vy * vy));
+                    desired_x = predicted_x - static_cast<float>(center.first);
+                    desired_y = aim_y - static_cast<float>(center.second);
+                }
+            }
+            if (!use_legacy_pid && !target_lead_prediction.has_value()) {
                 ff_scale = tracker->feedforwardScale();
                 const float ctrl_sent_vx_ema = shared_.ctrl_sent_vx_ema.load(std::memory_order_relaxed);
                 const float ctrl_sent_vy_ema = shared_.ctrl_sent_vy_ema.load(std::memory_order_relaxed);
                 vx = tracker_state.vx;
                 vy = tracker_state.vy;
-                const float prediction_time = std::max(0.0F, runtime.prediction_time);
+                const float prediction_time = target_lead_config.enable ? 0.0F : std::max(0.0F, runtime.prediction_time);
                 const float base_predicted_x = tracker_state.x + (vx * prediction_time);
                 const float base_predicted_y = tracker_state.y + (vy * prediction_time);
                 const float base_aim_y = base_predicted_y;
@@ -1615,6 +1719,8 @@ void DeltaApp::inferenceLoop() {
                 shared_.pid_settled = pid_settled;
                 shared_.pid_settle_error_metric_px = pid_error_metric_px;
                 shared_.pid_settle_threshold_px = pid_threshold_px;
+                shared_.lead_active = target_lead_prediction.has_value() && target_lead_prediction->active;
+                shared_.lead_time_ms = target_lead_prediction.has_value() ? (target_lead_prediction->lead_time_s * 1000.0F) : 0.0F;
                 shared_.aim_dx = dx;
                 shared_.aim_dy = dy;
                 shared_.last_target_full = {focus_x, focus_y};
@@ -1636,6 +1742,12 @@ void DeltaApp::inferenceLoop() {
                     preview_snapshot.locked_point = *locked_point;
                 }
                 preview_snapshot.predicted_point = std::make_pair(predicted_x, aim_y);
+                if (target_lead_prediction.has_value()) {
+                    preview_snapshot.detected_point = target_lead_prediction->detected_point;
+                    preview_snapshot.lead_time_s = target_lead_prediction->lead_time_s;
+                    preview_snapshot.lead_active = target_lead_prediction->active;
+                    preview_snapshot.detected_point_stale = target_lead_prediction->detected_point_stale;
+                }
                 preview_snapshot.target_found = true;
                 preview_snapshot.target_cls = selected_cls;
                 preview_snapshot.target_speed = speed;
@@ -2094,6 +2206,14 @@ void DeltaApp::controlLoop() {
 
         if ((dx != 0 || dy != 0) && movement_sent) {
             std::lock_guard<std::mutex> lock(shared_.mutex);
+            if (cmd->cmd_generated != SteadyClock::time_point{}) {
+                const float send_latency_s = static_cast<float>(secondsSince(cmd->cmd_generated, send_end_tick));
+                const float next_latency_ema = emaUpdateSigned(
+                    shared_.cmd_send_latency_ema_s.load(std::memory_order_relaxed),
+                    std::max(0.0F, send_latency_s),
+                    kCmdSendLatencyAlpha);
+                shared_.cmd_send_latency_ema_s.store(next_latency_ema, std::memory_order_relaxed);
+            }
             if (shared_.ctrl_last_send_tick != SteadyClock::time_point{}) {
                 const float send_dt = std::max(1e-4F, static_cast<float>(secondsSince(shared_.ctrl_last_send_tick, send_end_tick)));
                 const float sent_vx = clamp(static_cast<float>(dx) / send_dt, -kEgoMotionCompMaxPxS, kEgoMotionCompMaxPxS);

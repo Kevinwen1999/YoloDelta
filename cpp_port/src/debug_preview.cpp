@@ -413,6 +413,14 @@ private:
         LineTo(dc, pt.x, pt.y + radius + 1);
     }
 
+    void drawLeadLabel(HDC dc, const POINT pt, const COLORREF color, const float lead_time_s, const bool stale) const {
+        char label[48]{};
+        std::snprintf(label, sizeof(label), stale ? "lead %.0fms stale" : "lead %.0fms", lead_time_s * 1000.0F);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, color);
+        TextOutA(dc, pt.x + 8, pt.y - 14, label, static_cast<int>(std::strlen(label)));
+    }
+
     void drawBackground(HDC dc, const RECT& client, const PreviewLayout& layout) const {
         HBRUSH bg = CreateSolidBrush(RGB(11, 16, 20));
         ScopedDeleteObject bg_cleanup(bg);
@@ -597,9 +605,29 @@ private:
             const POINT locked = mapPoint(layout, snapshot.capture_region, snapshot.locked_point->first, snapshot.locked_point->second);
             drawMarker(dc, locked, RGB(99, 186, 255), 6);
         }
+        if (snapshot.detected_point.has_value()) {
+            const POINT detected = mapPoint(layout, snapshot.capture_region, snapshot.detected_point->first, snapshot.detected_point->second);
+            drawMarker(dc, detected, snapshot.detected_point_stale ? RGB(112, 172, 112) : RGB(111, 231, 150), 6);
+        }
         if (snapshot.predicted_point.has_value()) {
             const POINT predicted = mapPoint(layout, snapshot.capture_region, snapshot.predicted_point->first, snapshot.predicted_point->second);
-            drawMarker(dc, predicted, RGB(255, 122, 122), 6);
+            drawMarker(dc, predicted, snapshot.lead_active ? RGB(255, 146, 96) : RGB(255, 122, 122), 6);
+            if (snapshot.lead_active && snapshot.detected_point.has_value()) {
+                const POINT detected = mapPoint(layout, snapshot.capture_region, snapshot.detected_point->first, snapshot.detected_point->second);
+                HPEN pen = CreatePen(PS_SOLID, 1, snapshot.detected_point_stale ? RGB(160, 138, 108) : RGB(255, 184, 112));
+                ScopedDeleteObject pen_cleanup(pen);
+                ScopedSelectObject select_pen(dc, pen);
+                MoveToEx(dc, detected.x, detected.y, nullptr);
+                LineTo(dc, predicted.x, predicted.y);
+            }
+            if (snapshot.lead_active && snapshot.lead_time_s.has_value()) {
+                drawLeadLabel(
+                    dc,
+                    predicted,
+                    snapshot.detected_point_stale ? RGB(205, 164, 126) : RGB(255, 214, 156),
+                    *snapshot.lead_time_s,
+                    snapshot.detected_point_stale);
+            }
         }
     }
 
