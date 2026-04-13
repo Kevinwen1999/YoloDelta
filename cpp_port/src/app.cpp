@@ -1,6 +1,8 @@
 #include "delta/app.hpp"
+#include "delta/mouse_suppression.hpp"
 #include "delta/target_guard.hpp"
 #include "delta/target_lead.hpp"
+#include "delta/triggerbot.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -474,6 +476,7 @@ struct PerfLogSnapshot {
     double infer_loop_ms = 0.0;
     double infer_age_ms = 0.0;
     double infer_age_max_ms = 0.0;
+    std::uint64_t infer_found = 0;
     std::uint64_t infer_stale = 0;
     double infer_lock_rate = 0.0;
     double infer_select_ms = 0.0;
@@ -635,6 +638,7 @@ std::optional<PerfLogSnapshot> takePerfSnapshot(RuntimePerfWindow& perf, const d
     snapshot.infer_loop_ms = perf.infer_frames > 0 ? (perf.infer_loop_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
     snapshot.infer_age_ms = perf.infer_frames > 0 ? (perf.infer_frame_age_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
     snapshot.infer_age_max_ms = perf.infer_frame_age_max_s * 1000.0;
+    snapshot.infer_found = perf.infer_found;
     snapshot.infer_stale = perf.infer_stale;
     snapshot.infer_lock_rate = perf.infer_frames > 0 ? static_cast<double>(perf.infer_found) / static_cast<double>(perf.infer_frames) : 0.0;
     snapshot.infer_select_ms = perf.infer_frames > 0 ? (perf.infer_select_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
@@ -671,6 +675,7 @@ DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
       capture_(makeDefaultCaptureSource(config_)),
       inference_(makeInferenceEngine(config_)),
       input_sender_(makeInputSender()),
+      mouse_move_suppressor_(makeMouseMoveSuppressor()),
       recoil_scheduler_(std::make_unique<RecoilScheduler>(config_)),
       debug_preview_(makeDebugPreviewWindow(config_)),
       debug_overlay_(makeDebugOverlayWindow(config_)),
@@ -708,6 +713,15 @@ int DeltaApp::run() {
     std::cout << "Runtime ready. Open the frontend and press Insert to exit.\n";
 
     try {
+        if (mouse_move_suppressor_) {
+            mouse_move_suppressor_->setDebugLogging(runtime_store_.snapshot().mouse_move_suppress_on_fire_debug);
+            mouse_move_suppressor_->start();
+            const MouseMoveSuppressionStatus status = mouse_move_suppressor_->snapshot();
+            std::lock_guard<std::mutex> lock(shared_.mutex);
+            shared_.mouse_move_suppress_supported = status.supported;
+            shared_.mouse_move_suppress_active = status.active;
+            shared_.mouse_move_suppress_count = status.suppressed_count;
+        }
         if (frontend_) {
             frontend_->start();
         }
@@ -741,6 +755,9 @@ int DeltaApp::run() {
         }
     } catch (...) {
         stop();
+        if (mouse_move_suppressor_) {
+            mouse_move_suppressor_->stop();
+        }
         if (debug_preview_) {
             debug_preview_->stop();
         }
@@ -772,6 +789,9 @@ int DeltaApp::run() {
     if (perf_thread_.joinable()) {
         perf_thread_.join();
     }
+    if (mouse_move_suppressor_) {
+        mouse_move_suppressor_->stop();
+    }
     if (debug_preview_) {
         debug_preview_->stop();
     }
@@ -786,8 +806,18 @@ int DeltaApp::run() {
 }
 
 void DeltaApp::stop() {
-    std::lock_guard<std::mutex> lock(shared_.mutex);
-    shared_.running = false;
+    {
+        std::lock_guard<std::mutex> lock(shared_.mutex);
+        shared_.running = false;
+    }
+    if (mouse_move_suppressor_) {
+        mouse_move_suppressor_->setSuppressionActive(false);
+        const MouseMoveSuppressionStatus status = mouse_move_suppressor_->snapshot();
+        std::lock_guard<std::mutex> lock(shared_.mutex);
+        shared_.mouse_move_suppress_supported = status.supported;
+        shared_.mouse_move_suppress_active = status.active;
+        shared_.mouse_move_suppress_count = status.suppressed_count;
+    }
 }
 
 void DeltaApp::captureLoop() {
@@ -944,6 +974,7 @@ void DeltaApp::inferenceLoop() {
             const bool tracking_enabled = runtime.tracking_enabled;
             const TargetGuardConfig target_guard_config = buildTargetGuardConfig(runtime);
             const TargetLeadConfig target_lead_config = buildTargetLeadConfig(runtime);
+            const TriggerbotConfig triggerbot_config = buildTriggerbotConfig(runtime);
             const bool debug_preview_enabled = runtime.debug_preview_enable;
             const bool debug_overlay_enabled = runtime.debug_overlay_enable;
             const bool debug_visuals_enabled = debug_preview_enabled || debug_overlay_enabled;
@@ -1393,9 +1424,7 @@ void DeltaApp::inferenceLoop() {
                     resetEgoMotionStateLocked(shared_);
                 }
                 if (triggerbot_monitor_active) {
-                    trigger_fire =
-                        std::abs(sticky->detection->x - static_cast<float>(center.first)) <= (last_box_w * 0.5F)
-                        && std::abs(sticky->detection->y - static_cast<float>(center.second)) <= (last_box_h * 0.5F);
+                    trigger_fire = isTriggerbotArmed(*sticky->detection, center.first, center.second, triggerbot_config);
                 }
                 app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
             } else if (!tracking_enabled || !tracker->initialized()) {
@@ -1967,6 +1996,20 @@ void DeltaApp::controlLoop() {
             }
             playToggleBeep(runtime.triggerbot_enable ? 1600 : 900);
         }
+        if (mouse_move_suppressor_) {
+            mouse_move_suppressor_->setDebugLogging(runtime.mouse_move_suppress_on_fire_debug);
+            mouse_move_suppressor_->setSuppressionActive(
+                shouldSuppressMouseMoveOnFire(
+                    runtime.mouse_move_suppress_on_fire_enable,
+                    snapshot.left_pressed,
+                    snapshot.x1_pressed));
+            const MouseMoveSuppressionStatus status = mouse_move_suppressor_->snapshot();
+            std::lock_guard<std::mutex> lock(shared_.mutex);
+            shared_.mouse_move_suppress_supported = status.supported;
+            shared_.mouse_move_suppress_active = status.active;
+            shared_.mouse_move_suppress_count = status.suppressed_count;
+        }
+        const TriggerbotConfig triggerbot_config = buildTriggerbotConfig(runtime);
 
         const MouseSenderConfig sender_config{
             .gain_x = runtime.sendinput_gain_x,
@@ -2075,7 +2118,7 @@ void DeltaApp::controlLoop() {
                 toggles.left_pressed,
                 toggles.right_pressed,
                 toggles.x1_pressed));
-        const bool trigger_enabled = runtime.triggerbot_enable;
+        const bool trigger_enabled = triggerbot_config.enable;
         const bool trigger_fire = trigger_enabled && cmd->trigger_fire;
         if (!(engage_active || trigger_fire)) {
             {
@@ -2103,7 +2146,7 @@ void DeltaApp::controlLoop() {
         const bool trigger_will_click = trigger_fire
             && !recoil_trigger_pressed
             && (last_trigger_click == SystemClock::time_point{}
-                || secondsSince(last_trigger_click, system_now) >= runtime.triggerbot_click_cooldown_s);
+                || secondsSince(last_trigger_click, system_now) >= triggerbot_config.click_cooldown_s);
 
         const bool recoil_active = legacy_recoil_enabled && cmd->target_detected && (recoil_trigger_pressed || trigger_will_click);
         if (recoil_active) {
@@ -2146,7 +2189,7 @@ void DeltaApp::controlLoop() {
         }
         bool trigger_sent = false;
         if (trigger_will_click) {
-            trigger_sent = input_sender_->clickLeft(runtime.triggerbot_click_hold_s);
+            trigger_sent = input_sender_->clickLeft(triggerbot_config.click_hold_s);
             if (trigger_sent) {
                 last_trigger_click = SystemClock::now();
             }
@@ -2357,6 +2400,9 @@ void DeltaApp::perfLoop() {
                 toggles.right_pressed,
                 toggles.x1_pressed);
         if (!kPerfLogWhenModeOff && !perf_engaged) {
+            continue;
+        }
+        if (snapshot->infer_found == 0) {
             continue;
         }
 

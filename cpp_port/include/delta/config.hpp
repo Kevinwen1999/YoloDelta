@@ -222,8 +222,14 @@ struct RuntimeConfig {
     LeftHoldEngageButton left_hold_engage_button = LeftHoldEngageButton::Both;
     bool recoil_tune_fallback_ignore_mode_check = false;
     bool triggerbot_enable = false;
+    float triggerbot_arm_scale_x = 0.5F;
+    float triggerbot_arm_scale_y = 0.5F;
+    int triggerbot_arm_min_x_px = 0;
+    int triggerbot_arm_min_y_px = 0;
     float triggerbot_click_hold_s = 0.001F;
     float triggerbot_click_cooldown_s = 0.001F;
+    bool mouse_move_suppress_on_fire_enable = false;
+    bool mouse_move_suppress_on_fire_debug = false;
     bool side_button_key_sequence_use_key3 = true;
     double side_button_key_sequence_key3_press_time_ms = 0.0;
     bool side_button_key_sequence_use_key1 = true;

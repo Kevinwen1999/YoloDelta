@@ -108,6 +108,9 @@ struct SharedState {
     float pid_settle_threshold_px = 0.0F;
     bool lead_active = false;
     float lead_time_ms = 0.0F;
+    bool mouse_move_suppress_active = false;
+    bool mouse_move_suppress_supported = false;
+    std::uint64_t mouse_move_suppress_count = 0;
     std::pair<int, int> last_target_full{1280, 720};
     std::pair<int, int> capture_focus_full{1280, 720};
     SystemClock::time_point target_time{};

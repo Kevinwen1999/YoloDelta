@@ -10,6 +10,7 @@
 #include "delta/debug_preview.hpp"
 #include "delta/frontend.hpp"
 #include "delta/inference.hpp"
+#include "delta/mouse_suppression.hpp"
 #include "delta/recoil.hpp"
 #include "delta/runtime_state.hpp"
 #include "delta/tracking.hpp"
@@ -49,6 +50,7 @@ private:
     std::unique_ptr<ICaptureSource> capture_;
     std::unique_ptr<IInferenceEngine> inference_;
     std::unique_ptr<IInputSender> input_sender_;
+    std::unique_ptr<IMouseMoveSuppressor> mouse_move_suppressor_;
     std::unique_ptr<RecoilScheduler> recoil_scheduler_;
     std::unique_ptr<DebugPreviewWindow> debug_preview_;
     std::unique_ptr<DebugOverlayWindow> debug_overlay_;
