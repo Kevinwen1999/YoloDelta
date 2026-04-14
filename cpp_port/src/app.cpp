@@ -1,4 +1,5 @@
 #include "delta/app.hpp"
+#include "delta/capture_focus.hpp"
 #include "delta/mouse_suppression.hpp"
 #include "delta/target_guard.hpp"
 #include "delta/target_lead.hpp"
@@ -833,12 +834,15 @@ void DeltaApp::captureLoop() {
                 }
             }
 
+            const bool freeze_capture_to_center = runtime_store_.snapshot().capture_freeze_to_center_enable;
             std::pair<int, int> focus = center;
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
-                if (shared_.target_found) {
-                    focus = shared_.capture_focus_full;
-                }
+                focus = selectCaptureFocus(
+                    freeze_capture_to_center,
+                    shared_.target_found,
+                    center,
+                    shared_.capture_focus_full);
             }
 
             const CaptureRegion region = buildCaptureRegion(config_, focus.first, focus.second);
@@ -1163,9 +1167,11 @@ void DeltaApp::inferenceLoop() {
                 std::pair<int, int> focus = center;
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
-                    if (shared_.target_found) {
-                        focus = shared_.capture_focus_full;
-                    }
+                    focus = selectCaptureFocus(
+                        runtime.capture_freeze_to_center_enable,
+                        shared_.target_found,
+                        center,
+                        shared_.capture_focus_full);
                 }
                 const CaptureRegion region = buildCaptureRegion(config_, focus.first, focus.second);
                 const auto grab_start = SteadyClock::now();

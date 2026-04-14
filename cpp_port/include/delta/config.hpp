@@ -158,8 +158,9 @@ struct RuntimeConfig {
     bool tracking_enabled = true;
     bool debug_preview_enable = false;
     bool debug_overlay_enable = false;
-    AimMode aim_mode = AimMode::Hybrid;
+    AimMode aim_mode = AimMode::Head;
     int capture_cached_timeout_ms = 0;
+    bool capture_freeze_to_center_enable = true;
     float body_y_ratio = 0.15F;
     float head_y_ratio = 0.50F;
     TrackingStrategy tracking_strategy = TrackingStrategy::LegacyPid;
@@ -177,7 +178,7 @@ struct RuntimeConfig {
     float pid_settle_threshold_min_scale = 1.6F;
     float pid_settle_threshold_max_scale = 2.7F;
     int pid_settle_stable_frames = 2;
-    float pid_settle_error_delta_px = 3.0F;
+    float pid_settle_error_delta_px = 10.0F;
     float pid_settle_pre_output_scale = 0.5F;
     float legacy_pid_lock_error_px = 4.0F;
     float legacy_pid_speed_multiplier = 1.0F;
@@ -186,21 +187,21 @@ struct RuntimeConfig {
     float legacy_pid_transition_sharpness = 5.0F;
     float legacy_pid_transition_midpoint = 0.0F;
     int legacy_pid_stable_frames = 2;
-    float legacy_pid_error_delta_px = 3.0F;
-    float legacy_pid_prelock_scale = 0.5F;
+    float legacy_pid_error_delta_px = 10.0F;
+    float legacy_pid_prelock_scale = 0.2F;
     float sticky_bias_px = 800.0F;
     bool target_guard_enable = true;
     int target_guard_commit_frames = 5;
     int target_guard_hold_frames = 20;
     float target_guard_window_scale = 2.25F;
-    int target_guard_min_window_px = 120;
-    bool target_lead_enable = false;
+    int target_guard_min_window_px = 100;
+    bool target_lead_enable = true;
     int target_lead_commit_frames = 3;
     bool target_lead_auto_latency_enable = true;
-    float target_lead_max_time_s = 0.080F;
-    float target_lead_min_speed_px_s = 120.0F;
-    float target_lead_max_offset_box_scale = 0.75F;
-    float target_lead_smoothing_alpha = 1.0F;
+    float target_lead_max_time_s = 1.0F;
+    float target_lead_min_speed_px_s = 1.0F;
+    float target_lead_max_offset_box_scale = 1.0F;
+    float target_lead_smoothing_alpha = 0.5F;
     float prediction_time = 0.000F;
     int target_max_lost_frames = 8;
     float model_conf = 0.30F;
@@ -241,9 +242,9 @@ struct RuntimeConfig {
     double side_button_key_sequence_loop_delay_ms = 8.0;
     float sendinput_gain_x = 1.0F;
     float sendinput_gain_y = 1.0F;
-    int sendinput_max_step = 1270;
-    int raw_max_step_x = 500;
-    int raw_max_step_y = 500;
+    int sendinput_max_step = 12700;
+    int raw_max_step_x = 1000;
+    int raw_max_step_y = 1000;
 };
 
 struct ToggleState {
