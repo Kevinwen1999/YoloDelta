@@ -421,10 +421,52 @@ bool ObservedMotionTracker::initialized() const {
 }
 
 std::unique_ptr<ITargetTracker> makeTargetTracker(const TrackingStrategy strategy, const float velocity_alpha) {
-    const TrackingStrategy tracker_mode = strategy == TrackingStrategy::LegacyPid
+    const TrackingStrategy tracker_mode = (strategy == TrackingStrategy::LegacyPid || strategy == TrackingStrategy::PredictivePid)
         ? TrackingStrategy::RawDelta
         : strategy;
     return std::make_unique<ObservedMotionTracker>(tracker_mode, velocity_alpha);
+}
+
+Detection scaleDetectionBox(const Detection& detection, const float box_scale, const CaptureRegion& bounds) {
+    Detection scaled = detection;
+    const float safe_scale = std::max(0.01F, std::isfinite(box_scale) ? box_scale : 1.0F);
+    const float x1 = static_cast<float>(detection.bbox[0]);
+    const float y1 = static_cast<float>(detection.bbox[1]);
+    const float x2 = static_cast<float>(detection.bbox[2]);
+    const float y2 = static_cast<float>(detection.bbox[3]);
+    const float center_x = (x1 + x2) * 0.5F;
+    const float center_y = (y1 + y2) * 0.5F;
+    const float half_w = std::max(0.5F, (x2 - x1) * 0.5F * safe_scale);
+    const float half_h = std::max(0.5F, (y2 - y1) * 0.5F * safe_scale);
+
+    const int min_x = bounds.left;
+    const int min_y = bounds.top;
+    const int max_x = bounds.left + std::max(1, bounds.width) - 1;
+    const int max_y = bounds.top + std::max(1, bounds.height) - 1;
+    int new_x1 = clamp(static_cast<int>(std::lround(center_x - half_w)), min_x, max_x);
+    int new_y1 = clamp(static_cast<int>(std::lround(center_y - half_h)), min_y, max_y);
+    int new_x2 = clamp(static_cast<int>(std::lround(center_x + half_w)), min_x, max_x);
+    int new_y2 = clamp(static_cast<int>(std::lround(center_y + half_h)), min_y, max_y);
+
+    if (new_x2 <= new_x1) {
+        if (new_x1 < max_x) {
+            new_x2 = new_x1 + 1;
+        } else {
+            new_x1 = std::max(min_x, new_x2 - 1);
+        }
+    }
+    if (new_y2 <= new_y1) {
+        if (new_y1 < max_y) {
+            new_y2 = new_y1 + 1;
+        } else {
+            new_y1 = std::max(min_y, new_y2 - 1);
+        }
+    }
+
+    scaled.bbox = {new_x1, new_y1, new_x2, new_y2};
+    scaled.x = center_x;
+    scaled.y = center_y;
+    return scaled;
 }
 
 std::pair<float, float> detectionAimPoint(

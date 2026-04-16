@@ -15,12 +15,14 @@ enum class TrackingStrategy {
     Dema,
     RawDelta,
     LegacyPid,
+    PredictivePid,
 };
 
 inline const char* trackingStrategyName(const TrackingStrategy strategy) {
     switch (strategy) {
     case TrackingStrategy::Raw: return "raw";
     case TrackingStrategy::LegacyPid: return "legacy_pid";
+    case TrackingStrategy::PredictivePid: return "predictive_pid";
     case TrackingStrategy::Kalman:
     case TrackingStrategy::Ema:
     case TrackingStrategy::Dema:
@@ -33,6 +35,7 @@ inline const char* trackingStrategyLabel(const TrackingStrategy strategy) {
     switch (strategy) {
     case TrackingStrategy::Raw: return "Raw Detection";
     case TrackingStrategy::LegacyPid: return "Legacy PID";
+    case TrackingStrategy::PredictivePid: return "Predictive PID";
     case TrackingStrategy::Kalman:
     case TrackingStrategy::Ema:
     case TrackingStrategy::Dema:
@@ -47,6 +50,9 @@ inline TrackingStrategy parseTrackingStrategy(const std::string_view value) {
     }
     if (value == "legacy_pid") {
         return TrackingStrategy::LegacyPid;
+    }
+    if (value == "predictive_pid") {
+        return TrackingStrategy::PredictivePid;
     }
     return TrackingStrategy::RawDelta;
 }
@@ -159,11 +165,11 @@ struct RuntimeConfig {
     bool debug_preview_enable = false;
     bool debug_overlay_enable = false;
     AimMode aim_mode = AimMode::Head;
-    int capture_cached_timeout_ms = 0;
+    int capture_cached_timeout_ms = 1;
     bool capture_freeze_to_center_enable = true;
     float body_y_ratio = 0.15F;
     float head_y_ratio = 0.50F;
-    TrackingStrategy tracking_strategy = TrackingStrategy::LegacyPid;
+    TrackingStrategy tracking_strategy = TrackingStrategy::PredictivePid;
     float tracking_alpha = 0.42F;
     float tracking_velocity_alpha = 0.5F;
     float kp = 0.30F;
@@ -189,13 +195,32 @@ struct RuntimeConfig {
     int legacy_pid_stable_frames = 2;
     float legacy_pid_error_delta_px = 10.0F;
     float legacy_pid_prelock_scale = 0.2F;
+    float predictive_pid_kp = 1.0F;
+    float predictive_pid_ki = 0.0F;
+    float predictive_pid_kd = 0.001F;
+    float predictive_pid_pred_weight_x = 0.75F;
+    float predictive_pid_pred_weight_y = 0.75F;
+    float predictive_pid_init_scale = 0.5F;
+    float predictive_pid_ramp_time_s = 0.4F;
+    float predictive_pid_integral_limit = 200.0F;
+    float predictive_pid_derivative_limit = 75.0F;
+    float predictive_pid_output_limit = 2000000.0F;
+    float predictive_pid_velocity_alpha = 0.25F;
+    float predictive_pid_acceleration_alpha = 0.15F;
+    float predictive_pid_max_velocity_px_s = 3000000.0F;
+    float predictive_pid_max_acceleration_px_s = 5000000.0F;
+    float predictive_pid_reverse_gate_px = 20.0F;
+    float predictive_pid_reverse_scale = 0.01F;
+    float predictive_pid_prediction_error_scale = 2.0F;
+    float predictive_pid_prediction_min_px = 1.0F;
+    float predictive_pid_prediction_max_px = 1000000.0F;
     float sticky_bias_px = 800.0F;
     bool target_guard_enable = true;
     int target_guard_commit_frames = 5;
     int target_guard_hold_frames = 20;
     float target_guard_window_scale = 2.25F;
-    int target_guard_min_window_px = 100;
-    bool target_lead_enable = true;
+    int target_guard_min_window_px = 200;
+    bool target_lead_enable = false;
     int target_lead_commit_frames = 3;
     bool target_lead_auto_latency_enable = true;
     float target_lead_max_time_s = 1.0F;
@@ -206,6 +231,7 @@ struct RuntimeConfig {
     int target_max_lost_frames = 8;
     float model_conf = 0.30F;
     float detection_min_conf = 0.30F;
+    float detection_box_scale = 1.0F;
     float kalman_process_noise = 1.5F;
     float kalman_measurement_noise = 16.0F;
     bool ego_motion_comp_enable = true;

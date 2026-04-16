@@ -1,6 +1,7 @@
 #include "delta/app.hpp"
 #include "delta/capture_focus.hpp"
 #include "delta/mouse_suppression.hpp"
+#include "delta/predictive_pid.hpp"
 #include "delta/target_guard.hpp"
 #include "delta/target_lead.hpp"
 #include "delta/triggerbot.hpp"
@@ -267,7 +268,9 @@ LegacyPidConfig buildLegacyPidConfig(const RuntimeConfig& runtime) {
 }
 
 float trackerVelocityAlpha(const RuntimeConfig& runtime) {
-    return runtime.tracking_strategy == TrackingStrategy::LegacyPid ? 1.0F : runtime.tracking_velocity_alpha;
+    return (runtime.tracking_strategy == TrackingStrategy::LegacyPid || runtime.tracking_strategy == TrackingStrategy::PredictivePid)
+        ? 1.0F
+        : runtime.tracking_velocity_alpha;
 }
 
 bool pidRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rhs) {
@@ -294,7 +297,26 @@ bool pidRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rh
         || lhs.legacy_pid_transition_midpoint != rhs.legacy_pid_transition_midpoint
         || lhs.legacy_pid_stable_frames != rhs.legacy_pid_stable_frames
         || lhs.legacy_pid_error_delta_px != rhs.legacy_pid_error_delta_px
-        || lhs.legacy_pid_prelock_scale != rhs.legacy_pid_prelock_scale;
+        || lhs.legacy_pid_prelock_scale != rhs.legacy_pid_prelock_scale
+        || lhs.predictive_pid_kp != rhs.predictive_pid_kp
+        || lhs.predictive_pid_ki != rhs.predictive_pid_ki
+        || lhs.predictive_pid_kd != rhs.predictive_pid_kd
+        || lhs.predictive_pid_pred_weight_x != rhs.predictive_pid_pred_weight_x
+        || lhs.predictive_pid_pred_weight_y != rhs.predictive_pid_pred_weight_y
+        || lhs.predictive_pid_init_scale != rhs.predictive_pid_init_scale
+        || lhs.predictive_pid_ramp_time_s != rhs.predictive_pid_ramp_time_s
+        || lhs.predictive_pid_integral_limit != rhs.predictive_pid_integral_limit
+        || lhs.predictive_pid_derivative_limit != rhs.predictive_pid_derivative_limit
+        || lhs.predictive_pid_output_limit != rhs.predictive_pid_output_limit
+        || lhs.predictive_pid_velocity_alpha != rhs.predictive_pid_velocity_alpha
+        || lhs.predictive_pid_acceleration_alpha != rhs.predictive_pid_acceleration_alpha
+        || lhs.predictive_pid_max_velocity_px_s != rhs.predictive_pid_max_velocity_px_s
+        || lhs.predictive_pid_max_acceleration_px_s != rhs.predictive_pid_max_acceleration_px_s
+        || lhs.predictive_pid_reverse_gate_px != rhs.predictive_pid_reverse_gate_px
+        || lhs.predictive_pid_reverse_scale != rhs.predictive_pid_reverse_scale
+        || lhs.predictive_pid_prediction_error_scale != rhs.predictive_pid_prediction_error_scale
+        || lhs.predictive_pid_prediction_min_px != rhs.predictive_pid_prediction_min_px
+        || lhs.predictive_pid_prediction_max_px != rhs.predictive_pid_prediction_max_px;
 }
 
 DebugPreviewSnapshot makeInactiveDebugPreviewSnapshot(
@@ -899,6 +921,7 @@ void DeltaApp::inferenceLoop() {
         PIDController pid_y{};
         LegacyPidAxisState legacy_pid_x{};
         LegacyPidAxisState legacy_pid_y{};
+        PredictivePidController predictive_pid{};
 
         RuntimeConfig runtime = runtime_store_.snapshot();
         const auto configurePidControllers = [&](const RuntimeConfig& current) {
@@ -918,6 +941,7 @@ void DeltaApp::inferenceLoop() {
                 current.anti_windup_gain,
                 current.derivative_alpha,
                 current.output_limit);
+            predictive_pid.configure(buildPredictivePidConfig(current));
         };
         configurePidControllers(runtime);
         if (capture_) {
@@ -948,6 +972,7 @@ void DeltaApp::inferenceLoop() {
             pid_y.reset();
             legacy_pid_x.reset();
             legacy_pid_y.reset();
+            predictive_pid.reset();
             pid_settle_state.reset();
             last_pid_tick = pid_tick;
         };
@@ -1227,6 +1252,7 @@ void DeltaApp::inferenceLoop() {
                 detection.bbox[1] += capture_region.top;
                 detection.bbox[2] += capture_region.left;
                 detection.bbox[3] += capture_region.top;
+                detection = scaleDetectionBox(detection, runtime.detection_box_scale, capture_region);
                 const auto [aim_x, aim_y] = detectionAimPoint(detection, runtime.body_y_ratio, runtime.head_y_ratio);
                 detection.x = aim_x;
                 detection.y = aim_y;
@@ -1527,13 +1553,15 @@ void DeltaApp::inferenceLoop() {
             float vy = 0.0F;
             std::optional<TargetLeadPrediction> target_lead_prediction;
             const bool target_lead_locked = target_lead_config.enable && target_lead_state.active.active;
-            if (!use_legacy_pid) {
+            const bool use_predictive_pid = runtime.tracking_strategy == TrackingStrategy::PredictivePid;
+            const bool use_modern_pid = !use_legacy_pid && !use_predictive_pid;
+            if (use_modern_pid) {
                 ff_scale = tracker->feedforwardScale();
             }
             if (target_lead_locked) {
                 float extra_velocity_x = 0.0F;
                 float extra_velocity_y = 0.0F;
-                if (!use_legacy_pid) {
+                if (use_modern_pid) {
                     const float ctrl_sent_vx_ema = shared_.ctrl_sent_vx_ema.load(std::memory_order_relaxed);
                     const float ctrl_sent_vy_ema = shared_.ctrl_sent_vy_ema.load(std::memory_order_relaxed);
                     const std::pair<float, float> gate_point = target_lead_state.active.last_detected_point.value_or(
@@ -1598,7 +1626,7 @@ void DeltaApp::inferenceLoop() {
                     desired_y = aim_y - static_cast<float>(center.second);
                 }
             }
-            if (!use_legacy_pid && !target_lead_prediction.has_value()) {
+            if (use_modern_pid && !target_lead_prediction.has_value()) {
                 ff_scale = tracker->feedforwardScale();
                 const float ctrl_sent_vx_ema = shared_.ctrl_sent_vx_ema.load(std::memory_order_relaxed);
                 const float ctrl_sent_vy_ema = shared_.ctrl_sent_vy_ema.load(std::memory_order_relaxed);
@@ -1694,6 +1722,28 @@ void DeltaApp::inferenceLoop() {
                 pid_settled = legacy_status.settled;
                 pid_error_metric_px = legacy_status.error_metric_px;
                 pid_threshold_px = legacy_status.threshold_px;
+            } else if (use_predictive_pid) {
+                const float raw_error_x = predicted_x - static_cast<float>(center.first);
+                const float raw_error_y = aim_y - static_cast<float>(center.second);
+                if (runtime.pid_enable) {
+                    const PredictivePidResult predictive = predictive_pid.update(raw_error_x, raw_error_y, pid_dt);
+                    desired_x = predictive.output_x;
+                    desired_y = predictive.output_y;
+                    speed = std::sqrt(
+                        (predictive.velocity_x * predictive.velocity_x)
+                        + (predictive.velocity_y * predictive.velocity_y));
+                    pid_error_metric_px = std::max(
+                        std::abs(predictive.fused_error_x),
+                        std::abs(predictive.fused_error_y));
+                    pid_threshold_px = runtime.predictive_pid_output_limit;
+                } else {
+                    desired_x = raw_error_x;
+                    desired_y = raw_error_y;
+                    speed = 0.0F;
+                    pid_error_metric_px = std::max(std::abs(raw_error_x), std::abs(raw_error_y));
+                    pid_threshold_px = 0.0F;
+                }
+                pid_settled = true;
             } else {
                 const PIDSettleDecision pid_settle = updatePidSettleState(
                     pid_settle_state,
@@ -1735,6 +1785,9 @@ void DeltaApp::inferenceLoop() {
             dy = engage_active
                 ? static_cast<int>(std::lround(clamp(desired_y, -static_cast<float>(runtime.raw_max_step_y), static_cast<float>(runtime.raw_max_step_y))))
                 : 0;
+            if (use_predictive_pid && runtime.pid_enable) {
+                predictive_pid.commitOutput(static_cast<float>(dx), static_cast<float>(dy));
+            }
             app_timings.aim_pid_s = secondsSince(aim_pid_start, SteadyClock::now());
 
             const auto aim_sync_start = SteadyClock::now();

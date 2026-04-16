@@ -163,6 +163,7 @@ private:
 
 std::unique_ptr<ITargetTracker> makeTargetTracker(TrackingStrategy strategy, float velocity_alpha);
 
+Detection scaleDetectionBox(const Detection& detection, float box_scale, const CaptureRegion& bounds);
 std::pair<float, float> detectionAimPoint(const Detection& detection, float body_y_ratio, float head_y_ratio);
 
 struct AimCandidatePool {
