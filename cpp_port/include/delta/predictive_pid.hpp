@@ -26,6 +26,10 @@ struct PredictivePidConfig {
     float prediction_error_scale = 1.5F;
     float prediction_min_px = 30.0F;
     float prediction_max_px = 60.0F;
+    bool latency_comp_enable = true;
+    bool latency_auto_enable = true;
+    float latency_bias_s = 0.0F;
+    float latency_max_s = 0.050F;
 };
 
 struct PredictivePidResult {
@@ -49,6 +53,8 @@ struct PredictivePidResult {
     float d_y = 0.0F;
     float ramp_scale = 1.0F;
     float dt = 0.0F;
+    float latency_s = 0.0F;
+    float horizon_s = 0.0F;
     bool first_update = false;
 };
 
@@ -75,7 +81,7 @@ class PredictivePidController {
 public:
     void configure(const PredictivePidConfig& config);
     void reset();
-    PredictivePidResult update(float raw_error_x, float raw_error_y, float dt);
+    PredictivePidResult update(float raw_error_x, float raw_error_y, float dt, float measured_latency_s = 0.0F);
     void commitOutput(float output_x, float output_y);
     PredictivePidSnapshot snapshot() const;
 

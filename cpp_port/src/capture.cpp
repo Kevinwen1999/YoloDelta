@@ -230,6 +230,7 @@ struct DesktopDuplicationCapture::Impl {
         adapter.Reset();
         initialized = false;
         has_cached_desktop = false;
+        cached_desktop_frame_ready = {};
         desktop_width = 0;
         desktop_height = 0;
     }
@@ -558,7 +559,10 @@ struct DesktopDuplicationCapture::Impl {
             if (!config.capture_video_mode || !has_cached_desktop || cached_desktop == nullptr) {
                 return std::nullopt;
             }
-            FramePacket packet = copyRegionToPacket(cached_desktop.Get(), region, acquire_started, frame_ready, true);
+            const SteadyClock::time_point cached_frame_ready = cached_desktop_frame_ready == SteadyClock::time_point{}
+                ? frame_ready
+                : cached_desktop_frame_ready;
+            FramePacket packet = copyRegionToPacket(cached_desktop.Get(), region, acquire_started, cached_frame_ready, true);
             packet.timings.acquire_s = secondsSince(acquire_started, frame_ready);
             return packet;
         }
@@ -585,6 +589,7 @@ struct DesktopDuplicationCapture::Impl {
             context->CopyResource(cached_desktop.Get(), frame_texture.Get());
             source_texture = cached_desktop.Get();
             has_cached_desktop = true;
+            cached_desktop_frame_ready = frame_ready;
         }
 
         FramePacket packet = copyRegionToPacket(source_texture, region, acquire_started, frame_ready, false);
@@ -624,7 +629,10 @@ struct DesktopDuplicationCapture::Impl {
             if (!config.capture_video_mode || !has_cached_desktop || cached_desktop == nullptr) {
                 return std::nullopt;
             }
-            GpuFramePacket packet = copyRegionToGpuPacket(cached_desktop.Get(), region, acquire_started, frame_ready, true);
+            const SteadyClock::time_point cached_frame_ready = cached_desktop_frame_ready == SteadyClock::time_point{}
+                ? frame_ready
+                : cached_desktop_frame_ready;
+            GpuFramePacket packet = copyRegionToGpuPacket(cached_desktop.Get(), region, acquire_started, cached_frame_ready, true);
             packet.timings.acquire_s = secondsSince(acquire_started, frame_ready);
             return packet;
         }
@@ -647,6 +655,7 @@ struct DesktopDuplicationCapture::Impl {
             context->CopyResource(cached_desktop.Get(), frame_texture.Get());
             source_texture = cached_desktop.Get();
             has_cached_desktop = true;
+            cached_desktop_frame_ready = frame_ready;
         }
 
         GpuFramePacket packet = copyRegionToGpuPacket(source_texture, region, acquire_started, frame_ready, false);
@@ -660,6 +669,7 @@ struct DesktopDuplicationCapture::Impl {
     StaticConfig config{};
     bool initialized = false;
     bool has_cached_desktop = false;
+    SteadyClock::time_point cached_desktop_frame_ready{};
     int desktop_width = 0;
     int desktop_height = 0;
     int cached_desktop_width = 0;

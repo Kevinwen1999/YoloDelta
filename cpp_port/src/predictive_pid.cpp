@@ -104,6 +104,10 @@ PredictivePidConfig buildPredictivePidConfig(const RuntimeConfig& runtime) {
     config.prediction_error_scale = runtime.predictive_pid_prediction_error_scale;
     config.prediction_min_px = runtime.predictive_pid_prediction_min_px;
     config.prediction_max_px = runtime.predictive_pid_prediction_max_px;
+    config.latency_comp_enable = runtime.predictive_pid_latency_comp_enable;
+    config.latency_auto_enable = runtime.predictive_pid_latency_auto_enable;
+    config.latency_bias_s = runtime.predictive_pid_latency_bias_s;
+    config.latency_max_s = runtime.predictive_pid_latency_max_s;
     return config;
 }
 
@@ -125,6 +129,8 @@ void PredictivePidController::configure(const PredictivePidConfig& config) {
     config_.prediction_error_scale = sanitizeNonNegative(config_.prediction_error_scale);
     config_.prediction_min_px = sanitizeNonNegative(config_.prediction_min_px);
     config_.prediction_max_px = std::max(config_.prediction_min_px, sanitizeNonNegative(config_.prediction_max_px));
+    config_.latency_bias_s = sanitizeNonNegative(config_.latency_bias_s);
+    config_.latency_max_s = sanitizeNonNegative(config_.latency_max_s);
 }
 
 void PredictivePidController::reset() {
@@ -134,13 +140,19 @@ void PredictivePidController::reset() {
 PredictivePidResult PredictivePidController::update(
     const float raw_error_x,
     const float raw_error_y,
-    const float dt) {
+    const float dt,
+    const float measured_latency_s) {
     const float clamped_dt = clamp(sanitizeNonNegative(dt), kMinDt, kMaxDt);
     const bool first_update = !state_.initialized;
     PredictivePidResult result{};
     result.raw_error_x = sanitizeFinite(raw_error_x);
     result.raw_error_y = sanitizeFinite(raw_error_y);
     result.dt = clamped_dt;
+    if (config_.latency_comp_enable) {
+        const float auto_latency_s = config_.latency_auto_enable ? sanitizeNonNegative(measured_latency_s) : 0.0F;
+        result.latency_s = clamp(auto_latency_s + config_.latency_bias_s, 0.0F, config_.latency_max_s);
+    }
+    result.horizon_s = clamped_dt + result.latency_s;
     result.first_update = first_update;
 
     if (!first_update) {
@@ -168,10 +180,10 @@ PredictivePidResult PredictivePidController::update(
         state_.acceleration_x = ema(state_.acceleration_x, raw_ax, acceleration_alpha);
         state_.acceleration_y = ema(state_.acceleration_y, raw_ay, acceleration_alpha);
 
-        result.prediction_x = (state_.velocity_x * clamped_dt)
-            + (0.5F * state_.acceleration_x * clamped_dt * clamped_dt);
-        result.prediction_y = (state_.velocity_y * clamped_dt)
-            + (0.5F * state_.acceleration_y * clamped_dt * clamped_dt);
+        result.prediction_x = (state_.velocity_x * result.horizon_s)
+            + (0.5F * state_.acceleration_x * result.horizon_s * result.horizon_s);
+        result.prediction_y = (state_.velocity_y * result.horizon_s)
+            + (0.5F * state_.acceleration_y * result.horizon_s * result.horizon_s);
         result.prediction_x = clampMagnitude(result.prediction_x, predictionLimitForError(config_, result.raw_error_x));
         result.prediction_y = clampMagnitude(result.prediction_y, predictionLimitForError(config_, result.raw_error_y));
     }

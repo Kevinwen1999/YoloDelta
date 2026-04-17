@@ -108,6 +108,8 @@ struct SharedState {
     float pid_settle_threshold_px = 0.0F;
     bool lead_active = false;
     float lead_time_ms = 0.0F;
+    float predictive_pid_latency_ms = 0.0F;
+    float predictive_pid_horizon_ms = 0.0F;
     bool mouse_move_suppress_active = false;
     bool mouse_move_suppress_supported = false;
     std::uint64_t mouse_move_suppress_count = 0;

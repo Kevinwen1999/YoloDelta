@@ -214,6 +214,10 @@ struct RuntimeConfig {
     float predictive_pid_prediction_error_scale = 2.0F;
     float predictive_pid_prediction_min_px = 1.0F;
     float predictive_pid_prediction_max_px = 1000000.0F;
+    bool predictive_pid_latency_comp_enable = true;
+    bool predictive_pid_latency_auto_enable = true;
+    float predictive_pid_latency_bias_s = 0.0F;
+    float predictive_pid_latency_max_s = 0.050F;
     float sticky_bias_px = 800.0F;
     bool target_guard_enable = true;
     int target_guard_commit_frames = 5;

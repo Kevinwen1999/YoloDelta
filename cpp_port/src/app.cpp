@@ -316,7 +316,11 @@ bool pidRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rh
         || lhs.predictive_pid_reverse_scale != rhs.predictive_pid_reverse_scale
         || lhs.predictive_pid_prediction_error_scale != rhs.predictive_pid_prediction_error_scale
         || lhs.predictive_pid_prediction_min_px != rhs.predictive_pid_prediction_min_px
-        || lhs.predictive_pid_prediction_max_px != rhs.predictive_pid_prediction_max_px;
+        || lhs.predictive_pid_prediction_max_px != rhs.predictive_pid_prediction_max_px
+        || lhs.predictive_pid_latency_comp_enable != rhs.predictive_pid_latency_comp_enable
+        || lhs.predictive_pid_latency_auto_enable != rhs.predictive_pid_latency_auto_enable
+        || lhs.predictive_pid_latency_bias_s != rhs.predictive_pid_latency_bias_s
+        || lhs.predictive_pid_latency_max_s != rhs.predictive_pid_latency_max_s;
 }
 
 DebugPreviewSnapshot makeInactiveDebugPreviewSnapshot(
@@ -361,6 +365,8 @@ void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, 
     shared.pid_settle_threshold_px = 0.0F;
     shared.lead_active = false;
     shared.lead_time_ms = 0.0F;
+    shared.predictive_pid_latency_ms = 0.0F;
+    shared.predictive_pid_horizon_ms = 0.0F;
     shared.aim_dx = 0;
     shared.aim_dy = 0;
     shared.last_target_full = center;
@@ -486,6 +492,7 @@ std::optional<StickyTargetPick> pickAssociatedStickyTarget(
 struct PerfLogSnapshot {
     double elapsed_s = 0.0;
     double cap_fps = 0.0;
+    double fresh_capture_fps = 0.0;
     double cap_grab_ms = 0.0;
     double cap_acquire_ms = 0.0;
     double cap_d3d_copy_ms = 0.0;
@@ -656,6 +663,7 @@ std::optional<PerfLogSnapshot> takePerfSnapshot(RuntimePerfWindow& perf, const d
     snapshot.cap_cached_rate = perf.capture_frames > 0
         ? static_cast<double>(perf.capture_cached_frames) / static_cast<double>(perf.capture_frames)
         : 0.0;
+    snapshot.fresh_capture_fps = snapshot.cap_fps * std::max(0.0, 1.0 - snapshot.cap_cached_rate);
     snapshot.cap_none = perf.capture_none;
     snapshot.infer_fps = elapsed > 0.0 ? static_cast<double>(perf.infer_frames) / elapsed : 0.0;
     snapshot.infer_loop_ms = perf.infer_frames > 0 ? (perf.infer_loop_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
@@ -1545,6 +1553,8 @@ void DeltaApp::inferenceLoop() {
             float pid_error_metric_px = 0.0F;
             float pid_threshold_px = 0.0F;
             bool pid_settled = false;
+            float predictive_pid_latency_ms = 0.0F;
+            float predictive_pid_horizon_ms = 0.0F;
             float desired_x = predicted_x - static_cast<float>(center.first);
             float desired_y = aim_y - static_cast<float>(center.second);
 
@@ -1726,9 +1736,19 @@ void DeltaApp::inferenceLoop() {
                 const float raw_error_x = predicted_x - static_cast<float>(center.first);
                 const float raw_error_y = aim_y - static_cast<float>(center.second);
                 if (runtime.pid_enable) {
-                    const PredictivePidResult predictive = predictive_pid.update(raw_error_x, raw_error_y, pid_dt);
+                    float measured_latency_s = 0.0F;
+                    if (!target_lead_prediction.has_value() && frame_time != SteadyClock::time_point{}) {
+                        const float measurement_age_s = std::max(0.0F, static_cast<float>(secondsSince(frame_time, now_tick)));
+                        const float expected_send_s = std::max(
+                            0.0F,
+                            shared_.cmd_send_latency_ema_s.load(std::memory_order_relaxed));
+                        measured_latency_s = measurement_age_s + expected_send_s;
+                    }
+                    const PredictivePidResult predictive = predictive_pid.update(raw_error_x, raw_error_y, pid_dt, measured_latency_s);
                     desired_x = predictive.output_x;
                     desired_y = predictive.output_y;
+                    predictive_pid_latency_ms = predictive.latency_s * 1000.0F;
+                    predictive_pid_horizon_ms = predictive.horizon_s * 1000.0F;
                     speed = std::sqrt(
                         (predictive.velocity_x * predictive.velocity_x)
                         + (predictive.velocity_y * predictive.velocity_y));
@@ -1809,6 +1829,8 @@ void DeltaApp::inferenceLoop() {
                 shared_.pid_settle_threshold_px = pid_threshold_px;
                 shared_.lead_active = target_lead_prediction.has_value() && target_lead_prediction->active;
                 shared_.lead_time_ms = target_lead_prediction.has_value() ? (target_lead_prediction->lead_time_s * 1000.0F) : 0.0F;
+                shared_.predictive_pid_latency_ms = predictive_pid_latency_ms;
+                shared_.predictive_pid_horizon_ms = predictive_pid_horizon_ms;
                 shared_.aim_dx = dx;
                 shared_.aim_dy = dy;
                 shared_.last_target_full = {focus_x, focus_y};
@@ -2446,9 +2468,13 @@ void DeltaApp::perfLoop() {
         }
 
         ToggleState toggles{};
+        float predictive_pid_latency_ms = 0.0F;
+        float predictive_pid_horizon_ms = 0.0F;
         {
             std::lock_guard<std::mutex> lock(shared_.mutex);
             toggles = shared_.toggles;
+            predictive_pid_latency_ms = shared_.predictive_pid_latency_ms;
+            predictive_pid_horizon_ms = shared_.predictive_pid_horizon_ms;
         }
         const RuntimeConfig runtime = runtime_store_.snapshot();
         const bool perf_engaged = (toggles.mode != 0)
@@ -2465,9 +2491,13 @@ void DeltaApp::perfLoop() {
             continue;
         }
 
+        const double predictive_pid_latency_frames = (static_cast<double>(predictive_pid_latency_ms) / 1000.0)
+            * snapshot->fresh_capture_fps;
+
         std::cout << std::fixed << std::setprecision(2)
                   << "[PERF] "
-                  << "cap=" << snapshot->cap_fps << "fps grab=" << snapshot->cap_grab_ms
+                  << "cap=" << snapshot->cap_fps << "fps fresh=" << snapshot->fresh_capture_fps
+                  << "fps grab=" << snapshot->cap_grab_ms
                   << "ms acq/d3d/sync/cuda/cpu=" << snapshot->cap_acquire_ms
                   << "/" << snapshot->cap_d3d_copy_ms
                   << "/" << snapshot->cap_d3d_sync_ms
@@ -2498,7 +2528,10 @@ void DeltaApp::perfLoop() {
                   << "ms e2eFullIn=" << snapshot->control_total_apply_latency_full_ms
                   << "ms drop(stale/mode)=" << snapshot->control_stale_drop
                   << "/" << snapshot->control_mode_drop
-                  << " aimPipe=" << snapshot->infer_cmd_ms << "ms\n";
+                  << " aimPipe=" << snapshot->infer_cmd_ms
+                  << "ms predLat=" << predictive_pid_latency_ms
+                  << "ms predHorizon=" << predictive_pid_horizon_ms
+                  << "ms predFrames=" << predictive_pid_latency_frames << "\n";
         std::cout.unsetf(std::ios::floatfield);
     }
 }
