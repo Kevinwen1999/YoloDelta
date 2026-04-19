@@ -16,7 +16,7 @@ public:
     virtual std::optional<FramePacket> grab(const CaptureRegion& region) = 0;
     virtual std::optional<GpuFramePacket> grabGpu(const CaptureRegion&) { return std::nullopt; }
     virtual void setGpuConsumerStream(void*) {}
-    virtual void setCachedFrameTimeoutMs(int) {}
+    virtual void setCachedFrameTimeoutMs(double) {}
     virtual void close() = 0;
 };
 
@@ -34,7 +34,7 @@ public:
     std::optional<FramePacket> grab(const CaptureRegion& region) override;
     std::optional<GpuFramePacket> grabGpu(const CaptureRegion& region) override;
     void setGpuConsumerStream(void* stream) override;
-    void setCachedFrameTimeoutMs(int timeout_ms) override;
+    void setCachedFrameTimeoutMs(double timeout_ms) override;
     void close() override;
 
 private:

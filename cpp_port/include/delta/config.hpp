@@ -137,7 +137,7 @@ struct StaticConfig {
     int onnx_cuda_device_id = 0;
     bool onnx_output_has_nms = true;
     bool onnx_force_target_class_decode = true;
-    bool onnx_use_tensorrt = true;
+    bool onnx_use_tensorrt = false;
     bool onnx_require_gpu = true;
     bool onnx_trt_fp16 = true;
     bool onnx_skip_resize_if_match = true;
@@ -165,7 +165,7 @@ struct RuntimeConfig {
     bool debug_preview_enable = false;
     bool debug_overlay_enable = false;
     AimMode aim_mode = AimMode::Head;
-    int capture_cached_timeout_ms = 1;
+    double capture_cached_timeout_ms = 1.0;
     bool capture_freeze_to_center_enable = true;
     float body_y_ratio = 0.15F;
     float head_y_ratio = 0.50F;

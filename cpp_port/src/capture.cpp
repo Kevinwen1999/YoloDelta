@@ -11,13 +11,16 @@
 #include <cuda_runtime.h>
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <cwchar>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -102,16 +105,24 @@ double secondsSince(const SteadyClock::time_point since, const SteadyClock::time
     return std::chrono::duration<double>(now - since).count();
 }
 
-std::optional<int> envInt(const char* name) {
+std::optional<double> envDouble(const char* name) {
     const char* value = std::getenv(name);
     if (value == nullptr || value[0] == '\0') {
         return std::nullopt;
     }
     try {
-        return std::stoi(value);
+        return std::stod(value);
     } catch (...) {
         return std::nullopt;
     }
+}
+
+UINT dxgiTimeoutMs(const double timeout_ms) {
+    if (!std::isfinite(timeout_ms) || timeout_ms <= 0.0) {
+        return 0;
+    }
+    constexpr double kMaxDxgiTimeoutMs = static_cast<double>(std::numeric_limits<UINT>::max());
+    return static_cast<UINT>(std::min(std::ceil(timeout_ms), kMaxDxgiTimeoutMs));
 }
 
 #if defined(DELTA_WITH_CUDA_PIPELINE)
@@ -140,15 +151,15 @@ CaptureRegion clampRegionToDesktop(const CaptureRegion& requested, int desktop_w
 struct DesktopDuplicationCapture::Impl {
     explicit Impl(StaticConfig cfg) : config(std::move(cfg)) {}
 
-    int effectiveAcquireTimeoutMs() const {
-        int timeout_ms = std::max(0, config.capture_timeout_ms);
-        if (const auto override_ms = envInt("DELTA_CAPTURE_TIMEOUT_MS"); override_ms.has_value()) {
-            timeout_ms = std::max(0, *override_ms);
+    double effectiveAcquireTimeoutMs() const {
+        double timeout_ms = std::max(0.0, static_cast<double>(config.capture_timeout_ms));
+        if (const auto override_ms = envDouble("DELTA_CAPTURE_TIMEOUT_MS"); override_ms.has_value()) {
+            timeout_ms = std::max(0.0, *override_ms);
         }
         if (config.capture_video_mode && has_cached_desktop && cached_desktop != nullptr) {
-            timeout_ms = std::max(0, cached_frame_timeout_ms.load(std::memory_order_relaxed));
-            if (const auto override_ms = envInt("DELTA_CAPTURE_CACHED_TIMEOUT_MS"); override_ms.has_value()) {
-                timeout_ms = std::max(0, *override_ms);
+            timeout_ms = std::max(0.0, cached_frame_timeout_ms.load(std::memory_order_relaxed));
+            if (const auto override_ms = envDouble("DELTA_CAPTURE_CACHED_TIMEOUT_MS"); override_ms.has_value()) {
+                timeout_ms = std::max(0.0, *override_ms);
             }
         }
         return timeout_ms;
@@ -540,7 +551,7 @@ struct DesktopDuplicationCapture::Impl {
         DXGI_OUTDUPL_FRAME_INFO frame_info{};
         ComPtr<IDXGIResource> frame_resource;
         HRESULT hr = duplication->AcquireNextFrame(
-            static_cast<UINT>(effectiveAcquireTimeoutMs()),
+            dxgiTimeoutMs(effectiveAcquireTimeoutMs()),
             &frame_info,
             &frame_resource
         );
@@ -548,7 +559,7 @@ struct DesktopDuplicationCapture::Impl {
         if (hr == DXGI_ERROR_ACCESS_LOST) {
             recreateDuplication();
             hr = duplication->AcquireNextFrame(
-                static_cast<UINT>(effectiveAcquireTimeoutMs()),
+                dxgiTimeoutMs(effectiveAcquireTimeoutMs()),
                 &frame_info,
                 &frame_resource
             );
@@ -612,14 +623,14 @@ struct DesktopDuplicationCapture::Impl {
         DXGI_OUTDUPL_FRAME_INFO frame_info{};
         ComPtr<IDXGIResource> frame_resource;
         HRESULT hr = duplication->AcquireNextFrame(
-            static_cast<UINT>(effectiveAcquireTimeoutMs()),
+            dxgiTimeoutMs(effectiveAcquireTimeoutMs()),
             &frame_info,
             &frame_resource);
 
         if (hr == DXGI_ERROR_ACCESS_LOST) {
             recreateDuplication();
             hr = duplication->AcquireNextFrame(
-                static_cast<UINT>(effectiveAcquireTimeoutMs()),
+                dxgiTimeoutMs(effectiveAcquireTimeoutMs()),
                 &frame_info,
                 &frame_resource);
         }
@@ -684,7 +695,7 @@ struct DesktopDuplicationCapture::Impl {
     ComPtr<IDXGIOutputDuplication> duplication;
     ComPtr<ID3D11Texture2D> cached_desktop;
     ComPtr<ID3D11Texture2D> crop_staging;
-    std::atomic<int> cached_frame_timeout_ms{1};
+    std::atomic<double> cached_frame_timeout_ms{1.0};
 #if defined(DELTA_WITH_CUDA_PIPELINE)
     bool cuda_ready = false;
     int cuda_device = -1;
@@ -761,9 +772,9 @@ void DesktopDuplicationCapture::setGpuConsumerStream(void* stream) {
 #endif
 }
 
-void DesktopDuplicationCapture::setCachedFrameTimeoutMs(const int timeout_ms) {
+void DesktopDuplicationCapture::setCachedFrameTimeoutMs(const double timeout_ms) {
     if (impl_) {
-        impl_->cached_frame_timeout_ms.store(std::max(0, timeout_ms), std::memory_order_relaxed);
+        impl_->cached_frame_timeout_ms.store(std::max(0.0, timeout_ms), std::memory_order_relaxed);
     }
 }
 

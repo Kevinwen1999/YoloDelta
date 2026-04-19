@@ -122,7 +122,7 @@ struct RuntimePerfWindow {
 namespace {
 
 constexpr auto kToggleCooldown = std::chrono::milliseconds(200);
-constexpr auto kControlIdleSleep = std::chrono::milliseconds(2);
+constexpr auto kControlIdleSleep = std::chrono::milliseconds(0);
 constexpr auto kControlCommandWait = std::chrono::milliseconds(1);
 constexpr auto kSideButtonKeySequenceIdleSleep = std::chrono::milliseconds(1);
 constexpr auto kCaptureIdleSleep = std::chrono::milliseconds(1);
@@ -957,7 +957,7 @@ void DeltaApp::inferenceLoop() {
         }
 
         RuntimeConfig last_pid_runtime = runtime;
-        int last_capture_cached_timeout_ms = runtime.capture_cached_timeout_ms;
+        double last_capture_cached_timeout_ms = runtime.capture_cached_timeout_ms;
         std::uint64_t last_reset_token = runtime_store_.resetToken();
         TrackingStrategy last_tracking_strategy = runtime.tracking_strategy;
         AimMode last_aim_mode = runtime.aim_mode;
@@ -2121,6 +2121,8 @@ void DeltaApp::controlLoop() {
         const bool advanced_recoil_pending = pending_recoil.dx != 0 || pending_recoil.dy != 0;
 
         std::optional<CommandPacket> cmd = command_slot_.wait_take_for(kControlCommandWait);
+        const auto command_wake_tick = SteadyClock::now();
+        const auto command_wake_system = SystemClock::now();
         const double recoil_rate_y_px_s = std::abs(runtime.recoil_compensation_y_rate_px_s) > 1e-6F
             ? static_cast<double>(runtime.recoil_compensation_y_rate_px_s)
             : (static_cast<double>(runtime.recoil_compensation_y_px) * kLegacyRecoilReferenceHz);
@@ -2131,10 +2133,10 @@ void DeltaApp::controlLoop() {
                 cmd = CommandPacket{
                     .dx = 0,
                     .dy = 0,
-                    .cmd_generated = steady_now,
-                    .generated_at = system_now,
-                    .frame_time = system_now,
-                    .capture_time = system_now,
+                    .cmd_generated = command_wake_tick,
+                    .generated_at = command_wake_system,
+                    .frame_time = command_wake_system,
+                    .capture_time = command_wake_system,
                     .target_detected = false,
                     .synthetic_recoil = true,
                     .trigger_fire = false,
@@ -2152,10 +2154,10 @@ void DeltaApp::controlLoop() {
                     cmd = CommandPacket{
                         .dx = 0,
                         .dy = 0,
-                        .cmd_generated = steady_now,
-                        .generated_at = system_now,
-                        .frame_time = system_now,
-                        .capture_time = system_now,
+                        .cmd_generated = command_wake_tick,
+                        .generated_at = command_wake_system,
+                        .frame_time = command_wake_system,
+                        .capture_time = command_wake_system,
                         .target_detected = target_ok,
                         .synthetic_recoil = true,
                         .trigger_fire = false,
@@ -2171,7 +2173,7 @@ void DeltaApp::controlLoop() {
             }
         }
 
-        if (cmd->cmd_generated != SteadyClock::time_point{} && secondsSince(cmd->cmd_generated, steady_now) > kCommandTimeoutSeconds) {
+        if (cmd->cmd_generated != SteadyClock::time_point{} && secondsSince(cmd->cmd_generated, command_wake_tick) > kCommandTimeoutSeconds) {
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
                 decayEgoMotionStateLocked(shared_);
@@ -2179,13 +2181,13 @@ void DeltaApp::controlLoop() {
             if (perf_) {
                 recordControlPerf(
                     *perf_,
-                    secondsSince(cmd->cmd_generated, steady_now),
+                    secondsSince(cmd->cmd_generated, command_wake_tick),
                     false,
                     0.0,
                     true,
                     false,
-                    cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_ready, steady_now)),
-                    cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, steady_now)),
+                    cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_ready, command_wake_tick)),
+                    cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, command_wake_tick)),
                     std::nullopt,
                     std::nullopt);
             }
@@ -2209,13 +2211,13 @@ void DeltaApp::controlLoop() {
             if (perf_) {
                 recordControlPerf(
                     *perf_,
-                    cmd->cmd_generated == SteadyClock::time_point{} ? 0.0 : secondsSince(cmd->cmd_generated, steady_now),
+                    cmd->cmd_generated == SteadyClock::time_point{} ? 0.0 : secondsSince(cmd->cmd_generated, command_wake_tick),
                     false,
                     0.0,
                     false,
                     true,
-                    cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_ready, steady_now)),
-                    cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, steady_now)),
+                    cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_ready, command_wake_tick)),
+                    cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, command_wake_tick)),
                     std::nullopt,
                     std::nullopt);
             }
@@ -2315,13 +2317,13 @@ void DeltaApp::controlLoop() {
             if (perf_) {
                 recordControlPerf(
                     *perf_,
-                    cmd->cmd_generated == SteadyClock::time_point{} ? 0.0 : secondsSince(cmd->cmd_generated, steady_now),
+                    cmd->cmd_generated == SteadyClock::time_point{} ? 0.0 : secondsSince(cmd->cmd_generated, command_wake_tick),
                     false,
                     0.0,
                     false,
                     false,
-                    cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_ready, steady_now)),
-                    cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, steady_now)),
+                    cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_ready, command_wake_tick)),
+                    cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, command_wake_tick)),
                     std::nullopt,
                     std::nullopt);
             }
@@ -2368,13 +2370,13 @@ void DeltaApp::controlLoop() {
             const bool sent_ok = movement_sent || trigger_sent;
             recordControlPerf(
                 *perf_,
-                cmd->cmd_generated == SteadyClock::time_point{} ? 0.0 : secondsSince(cmd->cmd_generated, steady_now),
+                cmd->cmd_generated == SteadyClock::time_point{} ? 0.0 : secondsSince(cmd->cmd_generated, command_wake_tick),
                 sent_ok,
                 sent_ok ? send_elapsed : 0.0,
                 false,
                 false,
-                cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_ready, steady_now)),
-                cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, steady_now)),
+                cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->frame_ready, command_wake_tick)),
+                cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(cmd->acquire_started, command_wake_tick)),
                 sent_ok && cmd->frame_ready != SteadyClock::time_point{} ? std::optional<double>(secondsSince(cmd->frame_ready, send_end_tick)) : std::nullopt,
                 sent_ok && cmd->acquire_started != SteadyClock::time_point{} ? std::optional<double>(secondsSince(cmd->acquire_started, send_end_tick)) : std::nullopt);
         }

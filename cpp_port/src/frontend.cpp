@@ -457,7 +457,7 @@ std::string buildPageHtml() {
       {key:"tracking_enabled",label:"Tracking Enabled",type:"bool"},
       {key:"debug_preview_enable",label:"Debug Preview",type:"bool"},
       {key:"debug_overlay_enable",label:"Debug Overlay",type:"bool"},
-      {key:"capture_cached_timeout_ms",label:"Cached Capture Timeout (ms)",type:"number",step:1,min:0},
+      {key:"capture_cached_timeout_ms",label:"Cached Capture Timeout (ms)",type:"number",step:0.1,min:0},
       {key:"body_y_ratio",label:"Body Aim Y Ratio",type:"number",step:0.01,min:0,max:1},
       {key:"head_y_ratio",label:"Head Aim Y Ratio",type:"number",step:0.01,min:0,max:1},
       {key:"tracking_strategy",label:"Tracking Strategy",type:"select",options:[{value:"raw",label:"Raw Detection"},{value:"raw_delta",label:"Raw + Velocity"},{value:"legacy_pid",label:"Legacy PID"},{value:"predictive_pid",label:"Predictive PID"}]},
@@ -604,7 +604,7 @@ body{margin:0;padding:18px;background:#0f1518;color:#eef6fa;font:14px "Segoe UI"
 <section><h2>Runtime Tuning</h2><form id="form"><div class="tuning-groups" id="groups"></div><div class="actions"><button class="primary" type="submit">Apply Runtime Changes</button><button class="secondary" type="button" id="reload">Reload</button><button class="secondary" type="button" id="reset">Reset PID</button></div></form></section>
 <script>
 const F=[
-{g:"General",k:"pid_enable",l:"PID Enabled",t:"b"},{g:"General",k:"tracking_enabled",l:"Tracking Enabled",t:"b"},{g:"General",k:"debug_preview_enable",l:"Debug Preview",t:"b"},{g:"General",k:"debug_overlay_enable",l:"Debug Overlay",t:"b"},{g:"General",k:"capture_cached_timeout_ms",l:"Cached Capture Timeout (ms)",t:"n",s:1,n:0},{g:"General",k:"model_conf",l:"Model Conf",t:"n",s:0.001,n:0,x:1},{g:"General",k:"detection_min_conf",l:"Detection Min Conf",t:"n",s:0.001,n:0,x:1},{g:"General",k:"detection_box_scale",l:"Detection Box Scale",t:"n",s:0.01,n:0.05,x:2},
+{g:"General",k:"pid_enable",l:"PID Enabled",t:"b"},{g:"General",k:"tracking_enabled",l:"Tracking Enabled",t:"b"},{g:"General",k:"debug_preview_enable",l:"Debug Preview",t:"b"},{g:"General",k:"debug_overlay_enable",l:"Debug Overlay",t:"b"},{g:"General",k:"capture_cached_timeout_ms",l:"Cached Capture Timeout (ms)",t:"n",s:0.1,n:0},{g:"General",k:"model_conf",l:"Model Conf",t:"n",s:0.001,n:0,x:1},{g:"General",k:"detection_min_conf",l:"Detection Min Conf",t:"n",s:0.001,n:0,x:1},{g:"General",k:"detection_box_scale",l:"Detection Box Scale",t:"n",s:0.01,n:0.05,x:2},
 {g:"Aim & Selection",k:"body_y_ratio",l:"Body Aim Y Ratio",t:"n",s:0.01,n:0,x:1},{g:"Aim & Selection",k:"head_y_ratio",l:"Head Aim Y Ratio",t:"n",s:0.01,n:0,x:1},{g:"Aim & Selection",k:"tracking_strategy",l:"Tracking Strategy",t:"s",o:[["raw","Raw Detection"],["raw_delta","Raw + Velocity"],["legacy_pid","Legacy PID"],["predictive_pid","Predictive PID"]]},{g:"Aim & Selection",k:"sticky_bias_px",l:"Sticky Bias (px)",t:"n",s:1},{g:"Aim & Selection",k:"target_max_lost_frames",l:"Max Lost Frames",t:"n",s:1,n:1},
 {g:"Tracking & PID",k:"tracking_velocity_alpha",l:"Velocity Beta",t:"n",s:0.001},{g:"Tracking & PID",k:"kp",l:"Kp (X/Y)",t:"n",s:0.001},{g:"Tracking & PID",k:"ki",l:"Ki (X/Y)",t:"n",s:0.001},{g:"Tracking & PID",k:"kd",l:"Kd (X/Y)",t:"n",s:0.001},{g:"Tracking & PID",k:"integral_limit",l:"Integral Limit",t:"n",s:1},{g:"Tracking & PID",k:"anti_windup_gain",l:"Anti-Windup Gain",t:"n",s:0.001},{g:"Tracking & PID",k:"derivative_alpha",l:"Derivative Alpha",t:"n",s:0.001},{g:"Tracking & PID",k:"output_limit",l:"PID Output Limit",t:"n",s:1},{g:"Tracking & PID",k:"raw_max_step_x",l:"Raw Max Step X",t:"n",s:1,n:1},{g:"Tracking & PID",k:"raw_max_step_y",l:"Raw Max Step Y",t:"n",s:1,n:1},
 {g:"PID Settle",k:"pid_settle_enable",l:"PID Settle Gate",t:"b"},{g:"PID Settle",k:"pid_settle_error_px",l:"PID Settle Error (px)",t:"n",s:0.1,n:0},{g:"PID Settle",k:"pid_settle_threshold_min_scale",l:"PID Settle Min Scale",t:"n",s:0.001,n:0},{g:"PID Settle",k:"pid_settle_threshold_max_scale",l:"PID Settle Max Scale",t:"n",s:0.001,n:0},{g:"PID Settle",k:"pid_settle_stable_frames",l:"PID Settle Stable Frames",t:"n",s:1,n:1},{g:"PID Settle",k:"pid_settle_error_delta_px",l:"PID Settle Error Delta (px)",t:"n",s:0.1,n:0},{g:"PID Settle",k:"pid_settle_pre_output_scale",l:"PID Pre-Settle Scale",t:"n",s:0.001,n:0,x:1},
@@ -658,7 +658,7 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     if (const auto value = extractJsonBool(body, "debug_overlay_enable"); value.has_value()) cfg.debug_overlay_enable = *value;
     if (const auto value = extractJsonString(body, "aim_mode"); value.has_value()) cfg.aim_mode = parseAimMode(*value);
     if (const auto value = extractJsonNumber(body, "capture_cached_timeout_ms"); value.has_value()) {
-        cfg.capture_cached_timeout_ms = std::max(0, static_cast<int>(std::lround(*value)));
+        cfg.capture_cached_timeout_ms = std::max(0.0, *value);
     }
     if (const auto value = extractJsonBool(body, "capture_freeze_to_center_enable"); value.has_value()) {
         cfg.capture_freeze_to_center_enable = *value;
