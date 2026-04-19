@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -84,6 +85,8 @@ struct GpuFramePacket {
     SystemClock::time_point capture_time{};
     CaptureTimings timings{};
     void* cuda_stream = nullptr;
+    void* ready_event = nullptr;
+    std::shared_ptr<void> lifetime;
 };
 
 struct CommandPacket {

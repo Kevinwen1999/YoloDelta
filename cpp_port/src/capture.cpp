@@ -12,8 +12,9 @@
 #endif
 
 #include <algorithm>
-#include <chrono>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
@@ -22,6 +23,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -129,6 +131,14 @@ UINT dxgiTimeoutMs(const double timeout_ms) {
 void checkCuda(cudaError_t status, std::string_view what) {
     if (status != cudaSuccess) {
         throw std::runtime_error(std::string(what) + " failed: " + cudaGetErrorString(status));
+    }
+}
+
+void CUDART_CB markGpuSlotCopyComplete(void* user_data) {
+    auto* copy_pending = static_cast<std::shared_ptr<std::atomic_bool>*>(user_data);
+    if (copy_pending != nullptr) {
+        (*copy_pending)->store(false, std::memory_order_release);
+        delete copy_pending;
     }
 }
 #endif
@@ -302,6 +312,19 @@ struct DesktopDuplicationCapture::Impl {
     }
 
 #if defined(DELTA_WITH_CUDA_PIPELINE)
+    static constexpr std::size_t kGpuFrameBufferCount = 3;
+
+    struct GpuFrameBufferSlot {
+        ComPtr<ID3D11Texture2D> interop_texture;
+        cudaGraphicsResource_t resource = nullptr;
+        void* bgra_device = nullptr;
+        std::size_t bgra_pitch = 0;
+        cudaEvent_t ready_event = nullptr;
+        CaptureRegion region{};
+        std::shared_ptr<std::atomic_bool> copy_pending = std::make_shared<std::atomic_bool>(false);
+        std::shared_ptr<std::atomic_bool> in_use = std::make_shared<std::atomic_bool>(false);
+    };
+
     void initializeCudaInterop() {
         if (cuda_ready) {
             return;
@@ -310,7 +333,7 @@ struct DesktopDuplicationCapture::Impl {
         checkCuda(cudaD3D11GetDevice(&cuda_device, adapter.Get()), "cudaD3D11GetDevice");
         checkCuda(cudaSetDevice(cuda_device), "cudaSetDevice");
         if (consumer_cuda_stream == nullptr) {
-            checkCuda(cudaStreamCreate(&cuda_stream), "cudaStreamCreate");
+            checkCuda(cudaStreamCreateWithFlags(&cuda_stream, cudaStreamNonBlocking), "cudaStreamCreate");
         }
         cuda_ready = true;
     }
@@ -319,48 +342,72 @@ struct DesktopDuplicationCapture::Impl {
         return consumer_cuda_stream != nullptr ? static_cast<cudaStream_t>(consumer_cuda_stream) : cuda_stream;
     }
 
-    void releaseCudaResources() {
-        if (cuda_resource != nullptr) {
-            cudaGraphicsUnregisterResource(cuda_resource);
-            cuda_resource = nullptr;
-        }
-        if (cuda_bgra_device != nullptr) {
-            cudaFree(cuda_bgra_device);
-            cuda_bgra_device = nullptr;
-        }
-        if (cuda_stream != nullptr) {
-            cudaStreamDestroy(cuda_stream);
-            cuda_stream = nullptr;
-        }
-        cuda_interop_texture.Reset();
-        cuda_region = {};
-        cuda_bgra_pitch = 0;
-        cuda_device = -1;
-        cuda_ready = false;
+    bool gpuSlotDimensionsMatch(const CaptureRegion& region) const {
+        return gpu_slots_initialized
+            && gpu_slots_region.width == region.width
+            && gpu_slots_region.height == region.height;
     }
 
-    void ensureGpuResources(const CaptureRegion& region) {
-        initializeCudaInterop();
-        if (
-            cuda_interop_texture != nullptr
-            && cuda_resource != nullptr
-            && cuda_bgra_device != nullptr
-            && cuda_region.width == region.width
-            && cuda_region.height == region.height
-        ) {
-            return;
-        }
+    bool gpuSlotCopyPendingLocked(GpuFrameBufferSlot& slot) {
+        return slot.copy_pending && slot.copy_pending->load(std::memory_order_acquire);
+    }
 
-        if (cuda_resource != nullptr) {
-            cudaGraphicsUnregisterResource(cuda_resource);
-            cuda_resource = nullptr;
+    bool gpuSlotBusyLocked(GpuFrameBufferSlot& slot) {
+        if (slot.in_use && slot.in_use->load(std::memory_order_acquire)) {
+            return true;
         }
-        if (cuda_bgra_device != nullptr) {
-            cudaFree(cuda_bgra_device);
-            cuda_bgra_device = nullptr;
-            cuda_bgra_pitch = 0;
+        return gpuSlotCopyPendingLocked(slot);
+    }
+
+    bool anyGpuSlotInUseLocked() {
+        for (const auto& slot : gpu_slots) {
+            if (slot.in_use && slot.in_use->load(std::memory_order_acquire)) {
+                return true;
+            }
         }
-        cuda_interop_texture.Reset();
+        for (auto& slot : gpu_slots) {
+            if (gpuSlotCopyPendingLocked(slot)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void destroyGpuSlot(GpuFrameBufferSlot& slot) {
+        if (slot.resource != nullptr) {
+            cudaGraphicsUnregisterResource(slot.resource);
+            slot.resource = nullptr;
+        }
+        if (slot.bgra_device != nullptr) {
+            cudaFree(slot.bgra_device);
+            slot.bgra_device = nullptr;
+        }
+        if (slot.ready_event != nullptr) {
+            cudaEventDestroy(slot.ready_event);
+            slot.ready_event = nullptr;
+        }
+        slot.interop_texture.Reset();
+        slot.bgra_pitch = 0;
+        slot.region = {};
+        if (slot.copy_pending) {
+            slot.copy_pending->store(false, std::memory_order_release);
+        }
+        if (slot.in_use) {
+            slot.in_use->store(false, std::memory_order_release);
+        }
+    }
+
+    void destroyGpuSlotsLocked() {
+        for (auto& slot : gpu_slots) {
+            destroyGpuSlot(slot);
+        }
+        gpu_slots_initialized = false;
+        gpu_slots_region = {};
+        next_gpu_slot = 0;
+    }
+
+    void createGpuSlot(GpuFrameBufferSlot& slot, const CaptureRegion& region) {
+        destroyGpuSlot(slot);
 
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = static_cast<UINT>(region.width);
@@ -373,27 +420,94 @@ struct DesktopDuplicationCapture::Impl {
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         desc.CPUAccessFlags = 0;
         desc.MiscFlags = 0;
-        checkHr(device->CreateTexture2D(&desc, nullptr, &cuda_interop_texture), "CreateTexture2D(cuda interop)");
+        checkHr(device->CreateTexture2D(&desc, nullptr, &slot.interop_texture), "CreateTexture2D(cuda interop)");
         checkCuda(
-            cudaGraphicsD3D11RegisterResource(&cuda_resource, cuda_interop_texture.Get(), cudaGraphicsRegisterFlagsNone),
+            cudaGraphicsD3D11RegisterResource(&slot.resource, slot.interop_texture.Get(), cudaGraphicsRegisterFlagsNone),
             "cudaGraphicsD3D11RegisterResource");
         checkCuda(
             cudaMallocPitch(
-                &cuda_bgra_device,
-                &cuda_bgra_pitch,
+                &slot.bgra_device,
+                &slot.bgra_pitch,
                 static_cast<std::size_t>(region.width) * sizeof(std::uint32_t),
                 static_cast<std::size_t>(region.height)),
             "cudaMallocPitch(cuda bgra)");
-        cuda_region = region;
+        checkCuda(cudaEventCreateWithFlags(&slot.ready_event, cudaEventDisableTiming), "cudaEventCreate(capture ready)");
+        slot.region = region;
+        slot.in_use->store(false, std::memory_order_release);
     }
 
-    GpuFramePacket copyRegionToGpuPacket(
+    GpuFrameBufferSlot* acquireGpuSlot(const CaptureRegion& region) {
+        initializeCudaInterop();
+
+        std::lock_guard<std::mutex> lock(gpu_slots_mutex);
+        if (!gpuSlotDimensionsMatch(region)) {
+            if (anyGpuSlotInUseLocked()) {
+                return nullptr;
+            }
+            destroyGpuSlotsLocked();
+            for (auto& slot : gpu_slots) {
+                createGpuSlot(slot, region);
+            }
+            gpu_slots_region = region;
+            gpu_slots_initialized = true;
+        }
+
+        for (std::size_t offset = 0; offset < gpu_slots.size(); ++offset) {
+            const std::size_t index = (next_gpu_slot + offset) % gpu_slots.size();
+            auto& slot = gpu_slots[index];
+            if (gpuSlotBusyLocked(slot)) {
+                continue;
+            }
+            bool expected = false;
+            if (slot.in_use->compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+                next_gpu_slot = (index + 1U) % gpu_slots.size();
+                return &slot;
+            }
+        }
+        return nullptr;
+    }
+
+    std::shared_ptr<void> makeGpuSlotLease(GpuFrameBufferSlot& slot) {
+        auto in_use = slot.in_use;
+        return std::shared_ptr<void>(nullptr, [in_use](void*) {
+            in_use->store(false, std::memory_order_release);
+        });
+    }
+
+    void releaseCudaResources() {
+        const cudaStream_t stream_to_sync = cuda_ready ? activeCudaStream() : nullptr;
+        if (stream_to_sync != nullptr) {
+            cudaStreamSynchronize(stream_to_sync);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(gpu_slots_mutex);
+            if (anyGpuSlotInUseLocked()) {
+                return;
+            }
+            destroyGpuSlotsLocked();
+        }
+
+        if (cuda_stream != nullptr) {
+            cudaStreamDestroy(cuda_stream);
+            cuda_stream = nullptr;
+        }
+        cuda_device = -1;
+        cuda_ready = false;
+    }
+
+    std::optional<GpuFramePacket> copyRegionToGpuPacket(
         ID3D11Texture2D* source_texture,
         const CaptureRegion& region,
         const SteadyClock::time_point acquire_started,
         const SteadyClock::time_point frame_ready,
         const bool used_cached_frame) {
-        ensureGpuResources(region);
+        GpuFrameBufferSlot* slot = acquireGpuSlot(region);
+        if (slot == nullptr) {
+            return std::nullopt;
+        }
+        std::shared_ptr<void> slot_lease = makeGpuSlotLease(*slot);
+
         CaptureTimings timings{};
         timings.used_cached_frame = used_cached_frame;
 
@@ -407,7 +521,7 @@ struct DesktopDuplicationCapture::Impl {
 
         const auto d3d_copy_start = SteadyClock::now();
         context->CopySubresourceRegion(
-            cuda_interop_texture.Get(),
+            slot->interop_texture.Get(),
             0,
             0,
             0,
@@ -427,23 +541,23 @@ struct DesktopDuplicationCapture::Impl {
 
         bool mapped = false;
         ScopeExit unmap_cuda([&]() {
-            if (mapped && cuda_resource != nullptr) {
-                cudaGraphicsUnmapResources(1, &cuda_resource, stream);
+            if (mapped && slot->resource != nullptr) {
+                cudaGraphicsUnmapResources(1, &slot->resource, stream);
             }
         });
 
         const auto cuda_copy_start = SteadyClock::now();
-        checkCuda(cudaGraphicsMapResources(1, &cuda_resource, stream), "cudaGraphicsMapResources");
+        checkCuda(cudaGraphicsMapResources(1, &slot->resource, stream), "cudaGraphicsMapResources");
         mapped = true;
 
         cudaArray_t mapped_array = nullptr;
         checkCuda(
-            cudaGraphicsSubResourceGetMappedArray(&mapped_array, cuda_resource, 0, 0),
+            cudaGraphicsSubResourceGetMappedArray(&mapped_array, slot->resource, 0, 0),
             "cudaGraphicsSubResourceGetMappedArray");
         checkCuda(
             cudaMemcpy2DFromArrayAsync(
-                cuda_bgra_device,
-                cuda_bgra_pitch,
+                slot->bgra_device,
+                slot->bgra_pitch,
                 mapped_array,
                 0,
                 0,
@@ -452,11 +566,23 @@ struct DesktopDuplicationCapture::Impl {
                 cudaMemcpyDeviceToDevice,
                 stream),
             "cudaMemcpy2DFromArrayAsync(cuda bgra)");
+        checkCuda(cudaGraphicsUnmapResources(1, &slot->resource, stream), "cudaGraphicsUnmapResources");
+        mapped = false;
+        checkCuda(cudaEventRecord(slot->ready_event, stream), "cudaEventRecord(capture ready)");
+        slot->copy_pending->store(true, std::memory_order_release);
+        std::unique_ptr<std::shared_ptr<std::atomic_bool>> copy_pending_holder =
+            std::make_unique<std::shared_ptr<std::atomic_bool>>(slot->copy_pending);
+        const cudaError_t host_status = cudaLaunchHostFunc(stream, markGpuSlotCopyComplete, copy_pending_holder.get());
+        if (host_status != cudaSuccess) {
+            slot->copy_pending->store(false, std::memory_order_release);
+            checkCuda(host_status, "cudaLaunchHostFunc(capture ready)");
+        }
+        copy_pending_holder.release();
         timings.cuda_copy_s = secondsSince(cuda_copy_start, SteadyClock::now());
 
         GpuFramePacket packet{};
-        packet.device_ptr = cuda_bgra_device;
-        packet.pitch_bytes = cuda_bgra_pitch;
+        packet.device_ptr = slot->bgra_device;
+        packet.pitch_bytes = slot->bgra_pitch;
         packet.width = region.width;
         packet.height = region.height;
         packet.pixel_format = PixelFormat::Bgra8;
@@ -471,6 +597,8 @@ struct DesktopDuplicationCapture::Impl {
         }
         packet.timings = timings;
         packet.cuda_stream = stream;
+        packet.ready_event = slot->ready_event;
+        packet.lifetime = std::move(slot_lease);
         return packet;
     }
 #endif
@@ -643,8 +771,12 @@ struct DesktopDuplicationCapture::Impl {
             const SteadyClock::time_point cached_frame_ready = cached_desktop_frame_ready == SteadyClock::time_point{}
                 ? frame_ready
                 : cached_desktop_frame_ready;
-            GpuFramePacket packet = copyRegionToGpuPacket(cached_desktop.Get(), region, acquire_started, cached_frame_ready, true);
-            packet.timings.acquire_s = secondsSince(acquire_started, frame_ready);
+            std::optional<GpuFramePacket> packet =
+                copyRegionToGpuPacket(cached_desktop.Get(), region, acquire_started, cached_frame_ready, true);
+            if (!packet.has_value()) {
+                return std::nullopt;
+            }
+            packet->timings.acquire_s = secondsSince(acquire_started, frame_ready);
             return packet;
         }
 
@@ -669,8 +801,11 @@ struct DesktopDuplicationCapture::Impl {
             cached_desktop_frame_ready = frame_ready;
         }
 
-        GpuFramePacket packet = copyRegionToGpuPacket(source_texture, region, acquire_started, frame_ready, false);
-        packet.timings.acquire_s = secondsSince(acquire_started, frame_ready);
+        std::optional<GpuFramePacket> packet = copyRegionToGpuPacket(source_texture, region, acquire_started, frame_ready, false);
+        if (!packet.has_value()) {
+            return std::nullopt;
+        }
+        packet->timings.acquire_s = secondsSince(acquire_started, frame_ready);
         checkHr(duplication->ReleaseFrame(), "ReleaseFrame");
         frame_acquired = false;
         return packet;
@@ -699,13 +834,13 @@ struct DesktopDuplicationCapture::Impl {
 #if defined(DELTA_WITH_CUDA_PIPELINE)
     bool cuda_ready = false;
     int cuda_device = -1;
-    CaptureRegion cuda_region{};
-    ComPtr<ID3D11Texture2D> cuda_interop_texture;
-    cudaGraphicsResource_t cuda_resource = nullptr;
     cudaStream_t cuda_stream = nullptr;
     void* consumer_cuda_stream = nullptr;
-    void* cuda_bgra_device = nullptr;
-    std::size_t cuda_bgra_pitch = 0;
+    std::array<GpuFrameBufferSlot, kGpuFrameBufferCount> gpu_slots{};
+    CaptureRegion gpu_slots_region{};
+    bool gpu_slots_initialized = false;
+    std::size_t next_gpu_slot = 0;
+    std::mutex gpu_slots_mutex;
     bool gpu_capture_disabled = false;
     bool gpu_capture_failure_logged = false;
 #endif
@@ -751,7 +886,7 @@ std::optional<GpuFramePacket> DesktopDuplicationCapture::grabGpu(const CaptureRe
         impl_->gpu_capture_disabled = true;
         if (impl_->config.debug_log && !impl_->gpu_capture_failure_logged) {
             std::cerr << "[capture] " << ex.what() << "\n";
-            std::cerr << "[capture] GPU interop disabled for this run; falling back to CPU capture.\n";
+            std::cerr << "[capture] GPU interop disabled for this run.\n";
             impl_->gpu_capture_failure_logged = true;
         }
         return std::nullopt;

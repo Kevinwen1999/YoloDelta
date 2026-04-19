@@ -20,6 +20,13 @@ struct InferenceResult {
     InferenceTimings timings{};
 };
 
+enum class GpuCaptureSchedule {
+    None,
+    Inline,
+    InlineTensorRt,
+    AsyncLatest,
+};
+
 class IInferenceEngine {
 public:
     virtual ~IInferenceEngine() = default;
@@ -27,6 +34,7 @@ public:
     virtual void warmup() = 0;
     virtual void setModelConfidence(float) {}
     virtual void* gpuInputStream() const { return nullptr; }
+    virtual GpuCaptureSchedule gpuCaptureSchedule() const { return GpuCaptureSchedule::None; }
     virtual InferenceResult predict(const FramePacket& frame, int target_class) = 0;
     virtual bool supportsGpuInput() const { return false; }
     virtual InferenceResult predictGpu(const GpuFramePacket&, int) { return InferenceResult{}; }
@@ -41,6 +49,7 @@ public:
     void warmup() override;
     void setModelConfidence(float conf) override;
     void* gpuInputStream() const override;
+    GpuCaptureSchedule gpuCaptureSchedule() const override;
     InferenceResult predict(const FramePacket& frame, int target_class) override;
     bool supportsGpuInput() const override;
     InferenceResult predictGpu(const GpuFramePacket& frame, int target_class) override;

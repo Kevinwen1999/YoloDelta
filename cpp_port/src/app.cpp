@@ -33,6 +33,7 @@ struct RuntimePerfWindow {
     double capture_cpu_copy_s = 0.0;
     double capture_cached_reuse_s = 0.0;
     std::uint64_t capture_cached_frames = 0;
+    std::uint64_t capture_cached_skipped = 0;
 
     std::uint64_t infer_frames = 0;
     std::uint64_t infer_stale = 0;
@@ -81,6 +82,7 @@ struct RuntimePerfWindow {
         capture_cpu_copy_s = 0.0;
         capture_cached_reuse_s = 0.0;
         capture_cached_frames = 0;
+        capture_cached_skipped = 0;
 
         infer_frames = 0;
         infer_stale = 0;
@@ -501,6 +503,7 @@ struct PerfLogSnapshot {
     double cap_cpu_copy_ms = 0.0;
     double cap_cached_reuse_ms = 0.0;
     double cap_cached_rate = 0.0;
+    std::uint64_t cap_cached_skipped = 0;
     std::uint64_t cap_none = 0;
     double infer_fps = 0.0;
     double infer_loop_ms = 0.0;
@@ -555,6 +558,11 @@ void recordCapturePerf(
             ++perf.capture_cached_frames;
         }
     }
+}
+
+void recordCaptureCachedSkip(RuntimePerfWindow& perf) {
+    std::lock_guard<std::mutex> lock(perf.mutex);
+    ++perf.capture_cached_skipped;
 }
 
 void recordInferencePerf(
@@ -663,6 +671,7 @@ std::optional<PerfLogSnapshot> takePerfSnapshot(RuntimePerfWindow& perf, const d
     snapshot.cap_cached_rate = perf.capture_frames > 0
         ? static_cast<double>(perf.capture_cached_frames) / static_cast<double>(perf.capture_frames)
         : 0.0;
+    snapshot.cap_cached_skipped = perf.capture_cached_skipped;
     snapshot.fresh_capture_fps = snapshot.cap_fps * std::max(0.0, 1.0 - snapshot.cap_cached_rate);
     snapshot.cap_none = perf.capture_none;
     snapshot.infer_fps = elapsed > 0.0 ? static_cast<double>(perf.infer_frames) / elapsed : 0.0;
@@ -698,6 +707,10 @@ std::optional<PerfLogSnapshot> takePerfSnapshot(RuntimePerfWindow& perf, const d
     return snapshot;
 }
 
+bool isInlineGpuCaptureSchedule(const GpuCaptureSchedule schedule) {
+    return schedule == GpuCaptureSchedule::Inline || schedule == GpuCaptureSchedule::InlineTensorRt;
+}
+
 }  // namespace
 
 DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
@@ -712,7 +725,8 @@ DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
       debug_overlay_(makeDebugOverlayWindow(config_)),
       frontend_(makeRuntimeFrontend(config_, runtime_store_, shared_)),
       perf_(std::make_unique<RuntimePerfWindow>()) {
-    if (capture_ && inference_) {
+    const GpuCaptureSchedule capture_schedule = inference_ ? inference_->gpuCaptureSchedule() : GpuCaptureSchedule::None;
+    if (capture_ && inference_ && isInlineGpuCaptureSchedule(capture_schedule)) {
         capture_->setGpuConsumerStream(inference_->gpuInputStream());
     }
     if (capture_) {
@@ -767,7 +781,8 @@ int DeltaApp::run() {
         if (config_.perf_log_enable && perf_) {
             perf_thread_ = AppThread([this]() { perfLoop(); });
         }
-        if (!(inference_ && inference_->supportsGpuInput())) {
+        const GpuCaptureSchedule capture_schedule = inference_ ? inference_->gpuCaptureSchedule() : GpuCaptureSchedule::None;
+        if (!isInlineGpuCaptureSchedule(capture_schedule)) {
             capture_thread_ = AppThread([this]() { captureLoop(); });
         }
         inference_thread_ = AppThread([this]() { inferenceLoop(); });
@@ -802,11 +817,16 @@ int DeltaApp::run() {
     }
 
     stop();
+    if (inference_thread_.joinable()) {
+        inference_thread_.join();
+    }
     if (capture_thread_.joinable()) {
         capture_thread_.join();
     }
-    if (inference_thread_.joinable()) {
-        inference_thread_.join();
+    gpu_frame_slot_.clear();
+    frame_slot_.clear();
+    if (capture_) {
+        capture_->close();
     }
     if (control_thread_.joinable()) {
         control_thread_.join();
@@ -854,7 +874,8 @@ void DeltaApp::stop() {
 void DeltaApp::captureLoop() {
     try {
         const auto center = screenCenter(config_);
-        const bool prefer_gpu = inference_ && inference_->supportsGpuInput();
+        const GpuCaptureSchedule capture_schedule = inference_ ? inference_->gpuCaptureSchedule() : GpuCaptureSchedule::None;
+        const bool prefer_gpu = capture_schedule == GpuCaptureSchedule::AsyncLatest;
 
         for (;;) {
             {
@@ -864,7 +885,10 @@ void DeltaApp::captureLoop() {
                 }
             }
 
-            const bool freeze_capture_to_center = runtime_store_.snapshot().capture_freeze_to_center_enable;
+            const RuntimeConfig runtime = runtime_store_.snapshot();
+            const bool freeze_capture_to_center = runtime.capture_freeze_to_center_enable;
+            const bool skip_cached_async_gpu =
+                prefer_gpu && runtime.async_gpu_capture_fresh_only_enable;
             std::pair<int, int> focus = center;
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -882,6 +906,12 @@ void DeltaApp::captureLoop() {
                 const auto grab_start = SteadyClock::now();
                 if (std::optional<GpuFramePacket> packet = capture_->grabGpu(region); packet.has_value()) {
                     const CaptureTimings timings = packet->timings;
+                    if (skip_cached_async_gpu && timings.used_cached_frame) {
+                        if (perf_) {
+                            recordCaptureCachedSkip(*perf_);
+                        }
+                        continue;
+                    }
                     frame_slot_.clear();
                     gpu_frame_slot_.put(std::move(*packet));
                     if (perf_) {
@@ -893,7 +923,7 @@ void DeltaApp::captureLoop() {
                 }
             }
 
-            if (!captured) {
+            if (!captured && !prefer_gpu) {
                 const auto grab_start = SteadyClock::now();
                 if (std::optional<FramePacket> packet = capture_->grab(region); packet.has_value()) {
                     gpu_frame_slot_.clear();
@@ -917,9 +947,6 @@ void DeltaApp::captureLoop() {
         stop();
     }
 
-    if (capture_) {
-        capture_->close();
-    }
 }
 
 void DeltaApp::inferenceLoop() {
@@ -1196,7 +1223,10 @@ void DeltaApp::inferenceLoop() {
             InferenceAppTimings app_timings{};
             std::optional<FramePacket> cpu_packet;
             std::optional<GpuFramePacket> gpu_packet;
-            if (inference_->supportsGpuInput()) {
+            const GpuCaptureSchedule capture_schedule = inference_->gpuCaptureSchedule();
+            if (capture_schedule == GpuCaptureSchedule::AsyncLatest) {
+                gpu_packet = gpu_frame_slot_.wait_take_for(kInferenceIdleSleep);
+            } else if (isInlineGpuCaptureSchedule(capture_schedule)) {
                 std::pair<int, int> focus = center;
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1209,6 +1239,17 @@ void DeltaApp::inferenceLoop() {
                 const CaptureRegion region = buildCaptureRegion(config_, focus.first, focus.second);
                 const auto grab_start = SteadyClock::now();
                 gpu_packet = capture_->grabGpu(region);
+                if (
+                    capture_schedule == GpuCaptureSchedule::InlineTensorRt
+                    && runtime.tensorrt_inline_fresh_only_enable
+                    && gpu_packet.has_value()
+                    && gpu_packet->timings.used_cached_frame
+                ) {
+                    if (perf_) {
+                        recordCaptureCachedSkip(*perf_);
+                    }
+                    continue;
+                }
                 if (!gpu_packet.has_value()) {
                     cpu_packet = capture_->grab(region);
                 }
@@ -1226,7 +1267,9 @@ void DeltaApp::inferenceLoop() {
                 cpu_packet = frame_slot_.try_take();
             }
             if (!gpu_packet.has_value() && !cpu_packet.has_value()) {
-                std::this_thread::sleep_for(kInferenceIdleSleep);
+                if (capture_schedule != GpuCaptureSchedule::AsyncLatest) {
+                    std::this_thread::sleep_for(kInferenceIdleSleep);
+                }
                 continue;
             }
 
@@ -1902,9 +1945,6 @@ void DeltaApp::inferenceLoop() {
         stop();
     }
 
-    if (capture_ && inference_ && inference_->supportsGpuInput()) {
-        capture_->close();
-    }
 }
 
 void DeltaApp::recoilLoop() {
@@ -2507,6 +2547,7 @@ void DeltaApp::perfLoop() {
                   << "/" << snapshot->cap_cpu_copy_ms
                   << "ms cached=" << (snapshot->cap_cached_rate * 100.0)
                   << "%@" << snapshot->cap_cached_reuse_ms << "ms none=" << snapshot->cap_none
+                  << " skipCached=" << snapshot->cap_cached_skipped
                   << " | inf=" << snapshot->infer_fps << "fps loop=" << snapshot->infer_loop_ms << "ms age="
                   << snapshot->infer_age_ms << "/" << snapshot->infer_age_max_ms << "ms stale=" << snapshot->infer_stale
                   << " lock=" << (snapshot->infer_lock_rate * 100.0) << "% | app(sel/trk/pred/pid/sync/prev/q)="

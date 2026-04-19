@@ -126,9 +126,9 @@ struct StaticConfig {
     int screen_w = 2560;
     int screen_h = 1440;
     int imgsz = 416;
-    int capture_crop_size = 832;
+    int capture_crop_size = 624;
     float conf = 0.30F;
-    int max_detections = 10;
+    int max_detections = 6;
     std::string inference_device = "cuda";
     std::string onnx_provider = "auto";
     std::string onnx_resize_interpolation = "nearest";
@@ -137,12 +137,13 @@ struct StaticConfig {
     int onnx_cuda_device_id = 0;
     bool onnx_output_has_nms = true;
     bool onnx_force_target_class_decode = true;
-    bool onnx_use_tensorrt = false;
+    bool onnx_use_tensorrt = true;
     bool onnx_require_gpu = true;
     bool onnx_trt_fp16 = true;
     bool onnx_skip_resize_if_match = true;
     bool onnx_enable_cuda_graph = true;
     bool onnx_trt_cuda_graph_enable = true;
+    bool async_gpu_capture_enable = true;
     int capture_device_idx = 0;
     int capture_output_idx = 0;
     int capture_timeout_ms = 1;
@@ -165,7 +166,9 @@ struct RuntimeConfig {
     bool debug_preview_enable = false;
     bool debug_overlay_enable = false;
     AimMode aim_mode = AimMode::Head;
-    double capture_cached_timeout_ms = 1.0;
+    double capture_cached_timeout_ms = 0.0;
+    bool async_gpu_capture_fresh_only_enable = true;
+    bool tensorrt_inline_fresh_only_enable = true;
     bool capture_freeze_to_center_enable = true;
     float body_y_ratio = 0.15F;
     float head_y_ratio = 0.50F;
@@ -195,7 +198,7 @@ struct RuntimeConfig {
     int legacy_pid_stable_frames = 2;
     float legacy_pid_error_delta_px = 10.0F;
     float legacy_pid_prelock_scale = 0.2F;
-    float predictive_pid_kp = 1.0F;
+    float predictive_pid_kp = 0.8F;
     float predictive_pid_ki = 0.0F;
     float predictive_pid_kd = 0.001F;
     float predictive_pid_pred_weight_x = 0.75F;
@@ -233,8 +236,8 @@ struct RuntimeConfig {
     float target_lead_smoothing_alpha = 0.5F;
     float prediction_time = 0.000F;
     int target_max_lost_frames = 8;
-    float model_conf = 0.30F;
-    float detection_min_conf = 0.30F;
+    float model_conf = 0.50F;
+    float detection_min_conf = 0.50F;
     float detection_box_scale = 1.0F;
     float kalman_process_noise = 1.5F;
     float kalman_measurement_noise = 16.0F;

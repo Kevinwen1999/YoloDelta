@@ -260,17 +260,7 @@ Detection makeDetection(const Candidate& c) {
 struct OnnxRuntimeEngine::Impl {
     explicit Impl(StaticConfig cfg) : config(std::move(cfg)) { init(); }
     ~Impl() {
-#if defined(DELTA_WITH_CUDA_PIPELINE)
-        gpu_binding.reset();
-        gpu_output_values.clear();
-        gpu_input_value = Ort::Value(nullptr);
-        for (void*& buffer : gpu_output_buffers) {
-            if (buffer != nullptr) {
-                cudaFree(buffer);
-                buffer = nullptr;
-            }
-        }
-#endif
+        resetGpuBindings();
         session.reset();
         device_memory_info.reset();
         memory_info.reset();
@@ -328,6 +318,7 @@ struct OnnxRuntimeEngine::Impl {
     bool cuda_graph_enabled = false;
     bool ort_cuda_graph_requested = false;
     bool trt_cuda_graph_requested = false;
+    bool trt_cuda_graph_force_disabled = false;
     bool trt_fp16_requested = false;
     bool trt_outputs_bound_on_device = false;
     bool output_has_nms = true;
@@ -350,6 +341,40 @@ struct OnnxRuntimeEngine::Impl {
     std::vector<DLL_DIRECTORY_COOKIE> dll_dir_cookies;
 #endif
 
+    void resetGpuBindings() {
+#if defined(DELTA_WITH_CUDA_PIPELINE)
+        gpu_binding_ready = false;
+        cuda_graph_enabled = false;
+        trt_outputs_bound_on_device = false;
+        gpu_binding.reset();
+        gpu_output_values.clear();
+        gpu_output_host_f32.clear();
+        gpu_output_host_f16.clear();
+        gpu_input_value = Ort::Value(nullptr);
+        for (void*& buffer : gpu_output_buffers) {
+            if (buffer != nullptr) {
+                cudaFree(buffer);
+                buffer = nullptr;
+            }
+        }
+        gpu_output_buffers.clear();
+#endif
+    }
+
+    void rebuildTensorRtWithoutCudaGraph(const std::string& reason) {
+        if (config.debug_log) {
+            std::cout << "[inference] TensorRT CUDA graph failed; rebuilding TensorRT with trt_cuda_graph_enable=0. reason: "
+                      << reason << "\n";
+        }
+        trt_cuda_graph_force_disabled = true;
+        resetGpuBindings();
+        session.reset();
+        createSession(true);
+        cacheMetadata();
+        initializeGpuInput();
+        initializeGpuBindings();
+    }
+
     void warmup() {
         if (!session) return;
 #if defined(DELTA_WITH_CUDA_PIPELINE)
@@ -365,6 +390,20 @@ struct OnnxRuntimeEngine::Impl {
                 if (config.debug_log) {
                     std::cout << "[inference] TensorRT CUDA graph warmup failed; continuing without explicit warmup. reason: "
                               << e.what() << "\n";
+                }
+                rebuildTensorRtWithoutCudaGraph(e.what());
+                if (gpu_input_ready) {
+                    try {
+                        warmupGpu();
+                        if (config.debug_log) {
+                            std::cout << "[inference] TensorRT warmup completed without CUDA graph.\n";
+                        }
+                    } catch (const std::exception& retry_error) {
+                        if (config.debug_log) {
+                            std::cout << "[inference] TensorRT non-graph warmup failed; continuing. reason: "
+                                      << retry_error.what() << "\n";
+                        }
+                    }
                 }
             }
             return;
@@ -707,8 +746,15 @@ void OnnxRuntimeEngine::Impl::createSession(const bool use_tensorrt) {
     so.EnableCpuMemArena();
     std::vector<std::string> providers;
     ort_cuda_graph_requested = envFlagOptional("DELTA_ORT_CUDA_GRAPH_ENABLE").value_or(config.onnx_enable_cuda_graph);
-    trt_cuda_graph_requested = envFlagOptional("DELTA_TRT_CUDA_GRAPH_ENABLE").value_or(config.onnx_trt_cuda_graph_enable);
+    trt_cuda_graph_requested =
+        envFlagOptional("DELTA_TRT_CUDA_GRAPH_ENABLE").value_or(config.onnx_trt_cuda_graph_enable)
+        && !trt_cuda_graph_force_disabled;
     trt_fp16_requested = envFlagOptional("DELTA_TRT_FP16_ENABLE").value_or(config.onnx_trt_fp16);
+#if defined(DELTA_WITH_CUDA_PIPELINE)
+    if (wantsCuda() && !use_tensorrt && config.async_gpu_capture_enable && ort_cuda_graph_requested && config.debug_log) {
+        std::cout << "[inference] ORT CUDA graph requested; async GPU capture will use inline capture unless DELTA_ORT_CUDA_GRAPH_ENABLE=0.\n";
+    }
+#endif
     session_uses_gpu = false;
     session_uses_tensorrt = false;
     if (wantsCuda()) {
@@ -736,6 +782,7 @@ void OnnxRuntimeEngine::Impl::createSession(const bool use_tensorrt) {
             session_uses_gpu = true;
             session_uses_tensorrt = true;
         }
+        const bool cuda_ep_graph_enabled = !use_tensorrt && ort_cuda_graph_requested;
         Ort::CUDAProviderOptions cuda;
         cuda.Update({
             {"device_id", std::to_string(config.onnx_cuda_device_id)},
@@ -743,7 +790,7 @@ void OnnxRuntimeEngine::Impl::createSession(const bool use_tensorrt) {
             {"cudnn_conv_algo_search", "EXHAUSTIVE"},
             {"do_copy_in_default_stream", "1"},
             {"cudnn_conv_use_max_workspace", "1"},
-            {"enable_cuda_graph", ort_cuda_graph_requested ? "1" : "0"},
+            {"enable_cuda_graph", cuda_ep_graph_enabled ? "1" : "0"},
         });
 #if defined(DELTA_WITH_CUDA_PIPELINE)
         if (ort_stream != nullptr) {
@@ -767,6 +814,9 @@ void OnnxRuntimeEngine::Impl::createSession(const bool use_tensorrt) {
                          "Set DELTA_ONNX_PROVIDER=cuda to skip TensorRT.\n";
             if (trt_cuda_graph_requested && ort_stream != nullptr) {
                 std::cout << "[inference] TensorRT CUDA graph requested; leaving user_compute_stream unset so capture stays inside TensorRT.\n";
+            }
+            if (ort_cuda_graph_requested) {
+                std::cout << "[inference] ORT CUDA graph disabled on CUDA fallback provider while TensorRT EP is active.\n";
             }
         }
     }
@@ -901,6 +951,14 @@ void OnnxRuntimeEngine::Impl::initializeGpuBindings() {
         input_type);
 
     if (session_uses_tensorrt) {
+        if (trt_cuda_graph_requested) {
+            if (config.debug_log) {
+                std::cout << "[inference] TensorRT CUDA graph path will use per-run GPU input; "
+                             "persistent IoBinding is reserved for CUDA EP graph replay.\n";
+            }
+            return;
+        }
+
         if (!outputs_are_static) {
             if (config.debug_log) {
                 std::cout << "[inference] TensorRT path has dynamic outputs; falling back to per-run output allocation.\n";
@@ -1058,7 +1116,11 @@ void OnnxRuntimeEngine::Impl::updateGpuInput(const GpuFramePacket& frame) {
         throw std::runtime_error("GPU input path is not initialized.");
     }
 
-    if (frame.cuda_stream != nullptr && frame.cuda_stream != ort_stream) {
+    if (frame.ready_event != nullptr && ort_stream != nullptr) {
+        checkCuda(
+            cudaStreamWaitEvent(static_cast<cudaStream_t>(ort_stream), static_cast<cudaEvent_t>(frame.ready_event), 0),
+            "cudaStreamWaitEvent(capture)");
+    } else if (frame.cuda_stream != nullptr && frame.cuda_stream != ort_stream) {
         checkCuda(cudaStreamSynchronize(static_cast<cudaStream_t>(frame.cuda_stream)), "cudaStreamSynchronize(capture)");
     }
     std::string error;
@@ -1504,6 +1566,19 @@ void* OnnxRuntimeEngine::gpuInputStream() const {
 #else
     return nullptr;
 #endif
+}
+
+GpuCaptureSchedule OnnxRuntimeEngine::gpuCaptureSchedule() const {
+    if (!impl_ || !impl_->gpu_input_ready) {
+        return GpuCaptureSchedule::None;
+    }
+    if (impl_->session_uses_tensorrt) {
+        return GpuCaptureSchedule::InlineTensorRt;
+    }
+    if (!impl_->config.async_gpu_capture_enable || impl_->ort_cuda_graph_requested) {
+        return GpuCaptureSchedule::Inline;
+    }
+    return GpuCaptureSchedule::AsyncLatest;
 }
 
 InferenceResult OnnxRuntimeEngine::predict(const FramePacket& frame, const int target_class) {
