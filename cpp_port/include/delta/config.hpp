@@ -200,7 +200,7 @@ struct RuntimeConfig {
     float legacy_pid_prelock_scale = 0.2F;
     float predictive_pid_kp = 0.8F;
     float predictive_pid_ki = 0.0F;
-    float predictive_pid_kd = 0.001F;
+    float predictive_pid_kd = 0.005F;
     float predictive_pid_pred_weight_x = 0.75F;
     float predictive_pid_pred_weight_y = 0.75F;
     float predictive_pid_init_scale = 0.5F;

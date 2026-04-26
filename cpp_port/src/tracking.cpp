@@ -14,11 +14,6 @@ constexpr float kMaxSpeed = 1800.0F;
 constexpr float kPidSettleThresholdSharpness = 5.0F;
 constexpr int kBodyClass = 0;
 constexpr int kHeadClass = 1;
-constexpr float kHybridHeadBottomMaxBodyRatio = 0.45F;
-constexpr float kHybridHeadCenterXMaxBodyRatio = 0.30F;
-constexpr float kHybridHeadClampHalfWidthRatio = 0.18F;
-constexpr float kHybridHeadClampTopRatio = 0.03F;
-constexpr float kHybridHeadClampBottomRatio = 0.32F;
 
 float hypot2(const float x, const float y) {
     return std::sqrt((x * x) + (y * y));
@@ -34,69 +29,12 @@ float pointToBoxDistance(const Detection& det, const float x, const float y) {
     return hypot2(dx, dy);
 }
 
-bool pointInsideBox(const std::array<int, 4>& box, const float x, const float y) {
-    return x >= static_cast<float>(box[0])
-        && x <= static_cast<float>(box[2])
-        && y >= static_cast<float>(box[1])
-        && y <= static_cast<float>(box[3]);
-}
-
 Detection aimedDetection(const Detection& detection, const float body_y_ratio, const float head_y_ratio) {
     Detection aimed = detection;
     const auto [aim_x, aim_y] = detectionAimPoint(detection, body_y_ratio, head_y_ratio);
     aimed.x = aim_x;
     aimed.y = aim_y;
     return aimed;
-}
-
-std::optional<Detection> matchedBodyForHead(const Detection& head, const std::vector<Detection>& bodies) {
-    const float head_center_x = static_cast<float>(head.bbox[0] + head.bbox[2]) * 0.5F;
-    const float head_center_y = static_cast<float>(head.bbox[1] + head.bbox[3]) * 0.5F;
-    const float head_bottom = static_cast<float>(head.bbox[3]);
-
-    std::optional<Detection> best_match;
-    float best_score = std::numeric_limits<float>::max();
-    for (const auto& body : bodies) {
-        const float body_x1 = static_cast<float>(body.bbox[0]);
-        const float body_y1 = static_cast<float>(body.bbox[1]);
-        const float body_x2 = static_cast<float>(body.bbox[2]);
-        const float body_y2 = static_cast<float>(body.bbox[3]);
-        const float body_w = std::max(1.0F, body_x2 - body_x1);
-        const float body_h = std::max(1.0F, body_y2 - body_y1);
-        const float body_center_x = body_x1 + (body_w * 0.5F);
-        if (!pointInsideBox(body.bbox, head_center_x, head_center_y)) {
-            continue;
-        }
-        if (head_bottom > body_y1 + (body_h * kHybridHeadBottomMaxBodyRatio)) {
-            continue;
-        }
-        if (std::abs(head_center_x - body_center_x) > (body_w * kHybridHeadCenterXMaxBodyRatio)) {
-            continue;
-        }
-
-        const float score = std::abs(head_center_x - body_center_x) + std::abs(head_center_y - body_y1);
-        if (!best_match.has_value() || score < best_score || (std::abs(score - best_score) <= 1e-6F && body.conf > best_match->conf)) {
-            best_match = body;
-            best_score = score;
-        }
-    }
-    return best_match;
-}
-
-void clampHeadAimByBody(Detection& head, const Detection& body) {
-    const float body_x1 = static_cast<float>(body.bbox[0]);
-    const float body_y1 = static_cast<float>(body.bbox[1]);
-    const float body_x2 = static_cast<float>(body.bbox[2]);
-    const float body_y2 = static_cast<float>(body.bbox[3]);
-    const float body_w = std::max(1.0F, body_x2 - body_x1);
-    const float body_h = std::max(1.0F, body_y2 - body_y1);
-    const float body_center_x = body_x1 + (body_w * 0.5F);
-    const float min_x = body_center_x - (body_w * kHybridHeadClampHalfWidthRatio);
-    const float max_x = body_center_x + (body_w * kHybridHeadClampHalfWidthRatio);
-    const float min_y = body_y1 + (body_h * kHybridHeadClampTopRatio);
-    const float max_y = body_y1 + (body_h * kHybridHeadClampBottomRatio);
-    head.x = clamp(head.x, min_x, max_x);
-    head.y = clamp(head.y, min_y, max_y);
 }
 
 }  // namespace
@@ -519,11 +457,6 @@ AimCandidatePool buildAimCandidatePool(
     case AimMode::Hybrid:
     default:
         if (!heads.empty()) {
-            for (auto& head : heads) {
-                if (const auto body = matchedBodyForHead(head, bodies); body.has_value()) {
-                    clampHeadAimByBody(head, *body);
-                }
-            }
             pool.candidates = std::move(heads);
             pool.using_head_candidates = true;
             return pool;
