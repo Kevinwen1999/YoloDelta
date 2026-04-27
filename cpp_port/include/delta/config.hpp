@@ -221,6 +221,9 @@ struct RuntimeConfig {
     bool predictive_pid_latency_auto_enable = true;
     float predictive_pid_latency_bias_s = 0.0F;
     float predictive_pid_latency_max_s = 0.050F;
+    bool predictive_pid_deadzone_enable = true;
+    float predictive_pid_deadzone_enter_px = 3.0F;
+    float predictive_pid_deadzone_exit_px = 3.5F;
     float sticky_bias_px = 800.0F;
     bool target_guard_enable = true;
     int target_guard_commit_frames = 5;

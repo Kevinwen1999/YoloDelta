@@ -81,6 +81,26 @@ float clampIfLimited(const float value, const float limit) {
     return safe_limit > 0.0F ? clampMagnitude(value, safe_limit) : value;
 }
 
+bool updateDeadzoneActive(
+    const bool enable,
+    const float error,
+    const bool was_active,
+    const float enter_px,
+    const float exit_px) {
+    if (!enable) {
+        return false;
+    }
+
+    const float absolute_error = std::abs(error);
+    if (!was_active) {
+        return absolute_error <= enter_px;
+    }
+    if (absolute_error >= exit_px) {
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 PredictivePidConfig buildPredictivePidConfig(const RuntimeConfig& runtime) {
@@ -108,6 +128,9 @@ PredictivePidConfig buildPredictivePidConfig(const RuntimeConfig& runtime) {
     config.latency_auto_enable = runtime.predictive_pid_latency_auto_enable;
     config.latency_bias_s = runtime.predictive_pid_latency_bias_s;
     config.latency_max_s = runtime.predictive_pid_latency_max_s;
+    config.deadzone_enable = runtime.predictive_pid_deadzone_enable;
+    config.deadzone_enter_px = runtime.predictive_pid_deadzone_enter_px;
+    config.deadzone_exit_px = runtime.predictive_pid_deadzone_exit_px;
     return config;
 }
 
@@ -131,6 +154,8 @@ void PredictivePidController::configure(const PredictivePidConfig& config) {
     config_.prediction_max_px = std::max(config_.prediction_min_px, sanitizeNonNegative(config_.prediction_max_px));
     config_.latency_bias_s = sanitizeNonNegative(config_.latency_bias_s);
     config_.latency_max_s = sanitizeNonNegative(config_.latency_max_s);
+    config_.deadzone_enter_px = sanitizeNonNegative(config_.deadzone_enter_px);
+    config_.deadzone_exit_px = std::max(config_.deadzone_enter_px, sanitizeNonNegative(config_.deadzone_exit_px));
 }
 
 void PredictivePidController::reset() {
@@ -194,6 +219,20 @@ PredictivePidResult PredictivePidController::update(
     result.acceleration_y = state_.acceleration_y;
     result.fused_error_x = result.raw_error_x + (result.prediction_x * config_.pred_weight_x);
     result.fused_error_y = result.raw_error_y + (result.prediction_y * config_.pred_weight_y);
+    result.deadzone_active_x = updateDeadzoneActive(
+        config_.deadzone_enable,
+        result.fused_error_x,
+        state_.deadzone_active_x,
+        config_.deadzone_enter_px,
+        config_.deadzone_exit_px);
+    result.deadzone_active_y = updateDeadzoneActive(
+        config_.deadzone_enable,
+        result.fused_error_y,
+        state_.deadzone_active_y,
+        config_.deadzone_enter_px,
+        config_.deadzone_exit_px);
+    result.control_error_x = result.deadzone_active_x ? 0.0F : result.fused_error_x;
+    result.control_error_y = result.deadzone_active_y ? 0.0F : result.fused_error_y;
 
     result.ramp_scale = 1.0F;
     if (config_.ramp_time_s > 0.0F && state_.ramp_elapsed_s < config_.ramp_time_s) {
@@ -202,22 +241,32 @@ PredictivePidResult PredictivePidController::update(
     }
 
     const float real_kp = config_.kp * result.ramp_scale;
-    result.p_x = result.fused_error_x * real_kp;
-    result.p_y = result.fused_error_y * real_kp;
+    result.p_x = result.control_error_x * real_kp;
+    result.p_y = result.control_error_y * real_kp;
 
-    state_.integral_x = clampIfLimited(
-        state_.integral_x + (result.fused_error_x * clamped_dt * config_.ki),
-        config_.integral_limit);
-    state_.integral_y = clampIfLimited(
-        state_.integral_y + (result.fused_error_y * clamped_dt * config_.ki),
-        config_.integral_limit);
+    if (result.deadzone_active_x) {
+        state_.integral_x = 0.0F;
+    } else {
+        state_.integral_x = clampIfLimited(
+            state_.integral_x + (result.control_error_x * clamped_dt * config_.ki),
+            config_.integral_limit);
+    }
+    if (result.deadzone_active_y) {
+        state_.integral_y = 0.0F;
+    } else {
+        state_.integral_y = clampIfLimited(
+            state_.integral_y + (result.control_error_y * clamped_dt * config_.ki),
+            config_.integral_limit);
+    }
     result.i_x = state_.integral_x;
     result.i_y = state_.integral_y;
 
-    if (!first_update) {
-        result.d_x = ((result.fused_error_x - state_.previous_fused_error_x) / clamped_dt) * config_.kd;
-        result.d_y = ((result.fused_error_y - state_.previous_fused_error_y) / clamped_dt) * config_.kd;
+    if (!first_update && !result.deadzone_active_x) {
+        result.d_x = ((result.control_error_x - state_.previous_control_error_x) / clamped_dt) * config_.kd;
         result.d_x = clampIfLimited(result.d_x, config_.derivative_limit);
+    }
+    if (!first_update && !result.deadzone_active_y) {
+        result.d_y = ((result.control_error_y - state_.previous_control_error_y) / clamped_dt) * config_.kd;
         result.d_y = clampIfLimited(result.d_y, config_.derivative_limit);
     }
 
@@ -225,10 +274,14 @@ PredictivePidResult PredictivePidController::update(
     result.output_y = clampIfLimited(result.p_y + result.i_y + result.d_y, config_.output_limit);
 
     state_.initialized = true;
+    state_.deadzone_active_x = result.deadzone_active_x;
+    state_.deadzone_active_y = result.deadzone_active_y;
     state_.previous_raw_error_x = result.raw_error_x;
     state_.previous_raw_error_y = result.raw_error_y;
     state_.previous_fused_error_x = result.fused_error_x;
     state_.previous_fused_error_y = result.fused_error_y;
+    state_.previous_control_error_x = result.control_error_x;
+    state_.previous_control_error_y = result.control_error_y;
     state_.ramp_elapsed_s += clamped_dt;
     return result;
 }

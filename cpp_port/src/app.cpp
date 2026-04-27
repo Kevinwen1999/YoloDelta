@@ -322,7 +322,10 @@ bool pidRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rh
         || lhs.predictive_pid_latency_comp_enable != rhs.predictive_pid_latency_comp_enable
         || lhs.predictive_pid_latency_auto_enable != rhs.predictive_pid_latency_auto_enable
         || lhs.predictive_pid_latency_bias_s != rhs.predictive_pid_latency_bias_s
-        || lhs.predictive_pid_latency_max_s != rhs.predictive_pid_latency_max_s;
+        || lhs.predictive_pid_latency_max_s != rhs.predictive_pid_latency_max_s
+        || lhs.predictive_pid_deadzone_enable != rhs.predictive_pid_deadzone_enable
+        || lhs.predictive_pid_deadzone_enter_px != rhs.predictive_pid_deadzone_enter_px
+        || lhs.predictive_pid_deadzone_exit_px != rhs.predictive_pid_deadzone_exit_px;
 }
 
 DebugPreviewSnapshot makeInactiveDebugPreviewSnapshot(
@@ -369,6 +372,7 @@ void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, 
     shared.lead_time_ms = 0.0F;
     shared.predictive_pid_latency_ms = 0.0F;
     shared.predictive_pid_horizon_ms = 0.0F;
+    shared.predictive_pid_deadzone_active = false;
     shared.aim_dx = 0;
     shared.aim_dy = 0;
     shared.last_target_full = center;
@@ -1598,6 +1602,7 @@ void DeltaApp::inferenceLoop() {
             bool pid_settled = false;
             float predictive_pid_latency_ms = 0.0F;
             float predictive_pid_horizon_ms = 0.0F;
+            bool predictive_pid_deadzone_active = false;
             float desired_x = predicted_x - static_cast<float>(center.first);
             float desired_y = aim_y - static_cast<float>(center.second);
 
@@ -1792,6 +1797,7 @@ void DeltaApp::inferenceLoop() {
                     desired_y = predictive.output_y;
                     predictive_pid_latency_ms = predictive.latency_s * 1000.0F;
                     predictive_pid_horizon_ms = predictive.horizon_s * 1000.0F;
+                    predictive_pid_deadzone_active = predictive.deadzone_active_x || predictive.deadzone_active_y;
                     speed = std::sqrt(
                         (predictive.velocity_x * predictive.velocity_x)
                         + (predictive.velocity_y * predictive.velocity_y));
@@ -1874,6 +1880,7 @@ void DeltaApp::inferenceLoop() {
                 shared_.lead_time_ms = target_lead_prediction.has_value() ? (target_lead_prediction->lead_time_s * 1000.0F) : 0.0F;
                 shared_.predictive_pid_latency_ms = predictive_pid_latency_ms;
                 shared_.predictive_pid_horizon_ms = predictive_pid_horizon_ms;
+                shared_.predictive_pid_deadzone_active = predictive_pid_deadzone_active;
                 shared_.aim_dx = dx;
                 shared_.aim_dy = dy;
                 shared_.last_target_full = {focus_x, focus_y};

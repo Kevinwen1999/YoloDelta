@@ -30,6 +30,9 @@ struct PredictivePidConfig {
     bool latency_auto_enable = true;
     float latency_bias_s = 0.0F;
     float latency_max_s = 0.050F;
+    bool deadzone_enable = false;
+    float deadzone_enter_px = 1.0F;
+    float deadzone_exit_px = 1.5F;
 };
 
 struct PredictivePidResult {
@@ -41,6 +44,8 @@ struct PredictivePidResult {
     float prediction_y = 0.0F;
     float fused_error_x = 0.0F;
     float fused_error_y = 0.0F;
+    float control_error_x = 0.0F;
+    float control_error_y = 0.0F;
     float velocity_x = 0.0F;
     float velocity_y = 0.0F;
     float acceleration_x = 0.0F;
@@ -55,6 +60,8 @@ struct PredictivePidResult {
     float dt = 0.0F;
     float latency_s = 0.0F;
     float horizon_s = 0.0F;
+    bool deadzone_active_x = false;
+    bool deadzone_active_y = false;
     bool first_update = false;
 };
 
@@ -64,6 +71,8 @@ struct PredictivePidSnapshot {
     float previous_raw_error_y = 0.0F;
     float previous_fused_error_x = 0.0F;
     float previous_fused_error_y = 0.0F;
+    float previous_control_error_x = 0.0F;
+    float previous_control_error_y = 0.0F;
     float previous_output_x = 0.0F;
     float previous_output_y = 0.0F;
     float velocity_x = 0.0F;
@@ -73,6 +82,8 @@ struct PredictivePidSnapshot {
     float integral_x = 0.0F;
     float integral_y = 0.0F;
     float ramp_elapsed_s = 0.0F;
+    bool deadzone_active_x = false;
+    bool deadzone_active_y = false;
 };
 
 PredictivePidConfig buildPredictivePidConfig(const RuntimeConfig& runtime);
