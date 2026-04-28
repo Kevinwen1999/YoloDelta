@@ -331,9 +331,20 @@ struct DesktopDuplicationCapture::Impl {
         }
 
         checkCuda(cudaD3D11GetDevice(&cuda_device, adapter.Get()), "cudaD3D11GetDevice");
+        if (config.onnx_cuda_device_id >= 0 && cuda_device != config.onnx_cuda_device_id) {
+            std::ostringstream oss;
+            oss << "capture adapter " << adapter_name << " " << output_name
+                << " maps to CUDA device " << cuda_device
+                << ", but inference is configured for CUDA device " << config.onnx_cuda_device_id
+                << ". GPU interop capture requires the desktop adapter and inference CUDA device to match.";
+            throw std::runtime_error(oss.str());
+        }
         checkCuda(cudaSetDevice(cuda_device), "cudaSetDevice");
         if (consumer_cuda_stream == nullptr) {
             checkCuda(cudaStreamCreateWithFlags(&cuda_stream, cudaStreamNonBlocking), "cudaStreamCreate");
+        }
+        if (config.debug_log) {
+            std::cout << "[capture] CUDA interop ready on CUDA device " << cuda_device << ".\n";
         }
         cuda_ready = true;
     }

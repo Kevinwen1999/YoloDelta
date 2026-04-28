@@ -419,11 +419,11 @@ std::pair<float, float> detectionAimPoint(
     const float height = std::max(1.0F, y2 - y1);
     const float aim_x = x1 + (width * 0.5F);
     const float aim_y = detection.cls == kBodyClass
-        ? (y1 + (height * clamp(body_y_ratio, 0.0F, 1.0F)))
+        ? (y1 + (height * std::max(0.0F, body_y_ratio)))
         : (detection.cls == kHeadClass
-            ? (y1 + (height * clamp(head_y_ratio, 0.0F, 1.0F)))
+            ? (y1 + (height * std::max(0.0F, head_y_ratio)))
             : (y1 + (height * 0.5F)));
-    return {aim_x, clamp(aim_y, y1, y2)};
+    return {aim_x, aim_y};
 }
 
 AimCandidatePool buildAimCandidatePool(

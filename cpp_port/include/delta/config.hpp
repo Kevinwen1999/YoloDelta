@@ -198,13 +198,13 @@ struct RuntimeConfig {
     int legacy_pid_stable_frames = 2;
     float legacy_pid_error_delta_px = 10.0F;
     float legacy_pid_prelock_scale = 0.2F;
-    float predictive_pid_kp = 0.8F;
+    float predictive_pid_kp = 0.6F;
     float predictive_pid_ki = 0.0F;
     float predictive_pid_kd = 0.005F;
     float predictive_pid_pred_weight_x = 0.75F;
     float predictive_pid_pred_weight_y = 0.75F;
     float predictive_pid_init_scale = 0.5F;
-    float predictive_pid_ramp_time_s = 0.4F;
+    float predictive_pid_ramp_time_s = 0.25F;
     float predictive_pid_integral_limit = 200.0F;
     float predictive_pid_derivative_limit = 75.0F;
     float predictive_pid_output_limit = 2000000.0F;

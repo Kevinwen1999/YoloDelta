@@ -715,6 +715,19 @@ bool isInlineGpuCaptureSchedule(const GpuCaptureSchedule schedule) {
     return schedule == GpuCaptureSchedule::Inline || schedule == GpuCaptureSchedule::InlineTensorRt;
 }
 
+bool isFreshOnlyCaptureEnabled(const GpuCaptureSchedule schedule, const RuntimeConfig& runtime) {
+    switch (schedule) {
+    case GpuCaptureSchedule::AsyncLatest:
+    case GpuCaptureSchedule::Inline:
+        return runtime.async_gpu_capture_fresh_only_enable;
+    case GpuCaptureSchedule::InlineTensorRt:
+        return runtime.tensorrt_inline_fresh_only_enable;
+    case GpuCaptureSchedule::None:
+    default:
+        return false;
+    }
+}
+
 }  // namespace
 
 DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
@@ -892,7 +905,7 @@ void DeltaApp::captureLoop() {
             const RuntimeConfig runtime = runtime_store_.snapshot();
             const bool freeze_capture_to_center = runtime.capture_freeze_to_center_enable;
             const bool skip_cached_async_gpu =
-                prefer_gpu && runtime.async_gpu_capture_fresh_only_enable;
+                prefer_gpu && isFreshOnlyCaptureEnabled(capture_schedule, runtime);
             std::pair<int, int> focus = center;
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1243,19 +1256,19 @@ void DeltaApp::inferenceLoop() {
                 const CaptureRegion region = buildCaptureRegion(config_, focus.first, focus.second);
                 const auto grab_start = SteadyClock::now();
                 gpu_packet = capture_->grabGpu(region);
-                if (
-                    capture_schedule == GpuCaptureSchedule::InlineTensorRt
-                    && runtime.tensorrt_inline_fresh_only_enable
-                    && gpu_packet.has_value()
-                    && gpu_packet->timings.used_cached_frame
-                ) {
+                if (!gpu_packet.has_value()) {
+                    cpu_packet = capture_->grab(region);
+                }
+                const bool skip_cached_inline = isFreshOnlyCaptureEnabled(capture_schedule, runtime)
+                    && (
+                        (gpu_packet.has_value() && gpu_packet->timings.used_cached_frame)
+                        || (cpu_packet.has_value() && cpu_packet->timings.used_cached_frame)
+                    );
+                if (skip_cached_inline) {
                     if (perf_) {
                         recordCaptureCachedSkip(*perf_);
                     }
                     continue;
-                }
-                if (!gpu_packet.has_value()) {
-                    cpu_packet = capture_->grab(region);
                 }
                 if (perf_) {
                     const std::optional<CaptureTimings> capture_timings = gpu_packet.has_value()
