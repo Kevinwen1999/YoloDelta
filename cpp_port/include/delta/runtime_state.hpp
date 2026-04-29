@@ -114,6 +114,10 @@ struct SharedState {
     bool mouse_move_suppress_active = false;
     bool mouse_move_suppress_supported = false;
     std::uint64_t mouse_move_suppress_count = 0;
+    bool recoil_virtual_active = false;
+    int recoil_virtual_dx = 0;
+    int recoil_virtual_dy = 0;
+    std::uint64_t recoil_virtual_apply_count = 0;
     std::pair<int, int> last_target_full{1280, 720};
     std::pair<int, int> capture_focus_full{1280, 720};
     SystemClock::time_point target_time{};

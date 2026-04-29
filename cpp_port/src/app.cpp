@@ -2,6 +2,7 @@
 #include "delta/capture_focus.hpp"
 #include "delta/mouse_suppression.hpp"
 #include "delta/predictive_pid.hpp"
+#include "delta/recoil_aim_offset.hpp"
 #include "delta/target_guard.hpp"
 #include "delta/target_lead.hpp"
 #include "delta/triggerbot.hpp"
@@ -373,6 +374,9 @@ void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, 
     shared.predictive_pid_latency_ms = 0.0F;
     shared.predictive_pid_horizon_ms = 0.0F;
     shared.predictive_pid_deadzone_active = false;
+    shared.recoil_virtual_active = false;
+    shared.recoil_virtual_dx = 0;
+    shared.recoil_virtual_dy = 0;
     shared.aim_dx = 0;
     shared.aim_dy = 0;
     shared.last_target_full = center;
@@ -974,6 +978,7 @@ void DeltaApp::inferenceLoop() {
         LegacyPidAxisState legacy_pid_x{};
         LegacyPidAxisState legacy_pid_y{};
         PredictivePidController predictive_pid{};
+        RecoilAimOffsetIntegrator recoil_aim_offset{};
 
         RuntimeConfig runtime = runtime_store_.snapshot();
         const auto configurePidControllers = [&](const RuntimeConfig& current) {
@@ -1025,6 +1030,7 @@ void DeltaApp::inferenceLoop() {
             legacy_pid_x.reset();
             legacy_pid_y.reset();
             predictive_pid.reset();
+            recoil_aim_offset.reset();
             pid_settle_state.reset();
             last_pid_tick = pid_tick;
         };
@@ -1321,7 +1327,11 @@ void DeltaApp::inferenceLoop() {
                 detection.bbox[2] += capture_region.left;
                 detection.bbox[3] += capture_region.top;
                 detection = scaleDetectionBox(detection, runtime.detection_box_scale, capture_region);
-                const auto [aim_x, aim_y] = detectionAimPoint(detection, runtime.body_y_ratio, runtime.head_y_ratio);
+                const auto [aim_x, aim_y] = detectionAimPoint(
+                    detection,
+                    runtime.body_y_ratio,
+                    runtime.head_x_ratio,
+                    runtime.head_y_ratio);
                 detection.x = aim_x;
                 detection.y = aim_y;
             }
@@ -1337,6 +1347,7 @@ void DeltaApp::inferenceLoop() {
                 detections,
                 runtime.aim_mode,
                 runtime.body_y_ratio,
+                runtime.head_x_ratio,
                 runtime.head_y_ratio);
 
             const auto select_start = SteadyClock::now();
@@ -1408,6 +1419,7 @@ void DeltaApp::inferenceLoop() {
                     guarded_detections,
                     runtime.aim_mode,
                     runtime.body_y_ratio,
+                    runtime.head_x_ratio,
                     runtime.head_y_ratio);
                 sticky = pickFromPool(guarded_pool);
                 if (!sticky.has_value() || !sticky->detection.has_value()) {
@@ -1530,6 +1542,7 @@ void DeltaApp::inferenceLoop() {
             } else if (!tracking_enabled || !tracker->initialized()) {
                 app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
                 target_lead_state.reset();
+                recoil_aim_offset.reset();
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1760,6 +1773,35 @@ void DeltaApp::inferenceLoop() {
             }
             app_timings.aim_predict_s = secondsSince(aim_predict_start, SteadyClock::now());
 
+            const bool virtual_recoil_command_active = engage_active;
+            PendingRecoilDelta virtual_advanced_delta{};
+            if (runtime.recoil_virtual_aim_offset_enable
+                && virtual_recoil_command_active
+                && runtime.recoil_mode == RecoilMode::AdvancedProfile) {
+                std::lock_guard<std::mutex> lock(shared_.mutex);
+                virtual_advanced_delta = shared_.pending_recoil;
+                shared_.pending_recoil = {};
+            }
+            const double virtual_recoil_rate_y_px_s = std::abs(runtime.recoil_compensation_y_rate_px_s) > 1e-6F
+                ? static_cast<double>(runtime.recoil_compensation_y_rate_px_s)
+                : (static_cast<double>(runtime.recoil_compensation_y_px) * kLegacyRecoilReferenceHz);
+            const RecoilAimOffsetResult virtual_recoil = recoil_aim_offset.update(RecoilAimOffsetContext{
+                .enabled = runtime.recoil_virtual_aim_offset_enable,
+                .has_target = virtual_recoil_command_active,
+                .recoil_mode = runtime.recoil_mode,
+                .recoil_trigger_active = toggles.left_pressed || toggles.x1_pressed,
+                .legacy_rate_y_px_s = virtual_recoil_rate_y_px_s,
+                .advanced_delta = virtual_advanced_delta,
+                .now = now_tick,
+                .max_integrate_dt_s = kMaxRecoilIntegrateDtSeconds,
+            });
+            if (virtual_recoil.active) {
+                predicted_x += static_cast<float>(virtual_recoil.dx);
+                aim_y += static_cast<float>(virtual_recoil.dy);
+                desired_x = predicted_x - static_cast<float>(center.first);
+                desired_y = aim_y - static_cast<float>(center.second);
+            }
+
             const auto aim_pid_start = SteadyClock::now();
             const float pid_dt = clamp(
                 last_pid_tick == SteadyClock::time_point{}
@@ -1894,6 +1936,12 @@ void DeltaApp::inferenceLoop() {
                 shared_.predictive_pid_latency_ms = predictive_pid_latency_ms;
                 shared_.predictive_pid_horizon_ms = predictive_pid_horizon_ms;
                 shared_.predictive_pid_deadzone_active = predictive_pid_deadzone_active;
+                shared_.recoil_virtual_active = virtual_recoil.active;
+                shared_.recoil_virtual_dx = virtual_recoil.dx;
+                shared_.recoil_virtual_dy = virtual_recoil.dy;
+                if (virtual_recoil.active) {
+                    ++shared_.recoil_virtual_apply_count;
+                }
                 shared_.aim_dx = dx;
                 shared_.aim_dy = dy;
                 shared_.last_target_full = {focus_x, focus_y};
@@ -2168,17 +2216,21 @@ void DeltaApp::controlLoop() {
 
         ToggleState toggles{};
         bool target_detected = false;
+        bool virtual_recoil_target_active = false;
         PendingRecoilDelta pending_recoil{};
         RecoilRuntimeState recoil_state{};
         {
             std::lock_guard<std::mutex> lock(shared_.mutex);
             toggles = shared_.toggles;
             target_detected = shared_.target_found;
+            virtual_recoil_target_active = runtime.recoil_virtual_aim_offset_enable && target_detected;
             pending_recoil = shared_.pending_recoil;
             recoil_state = shared_.recoil;
-            shared_.pending_recoil = {};
+            if (!virtual_recoil_target_active) {
+                shared_.pending_recoil = {};
+            }
         }
-        const bool advanced_recoil_pending = pending_recoil.dx != 0 || pending_recoil.dy != 0;
+        const bool advanced_recoil_pending = !virtual_recoil_target_active && (pending_recoil.dx != 0 || pending_recoil.dy != 0);
 
         std::optional<CommandPacket> cmd = command_slot_.wait_take_for(kControlCommandWait);
         const auto command_wake_tick = SteadyClock::now();
@@ -2291,7 +2343,10 @@ void DeltaApp::controlLoop() {
             && (last_trigger_click == SystemClock::time_point{}
                 || secondsSince(last_trigger_click, system_now) >= triggerbot_config.click_cooldown_s);
 
-        const bool recoil_active = legacy_recoil_enabled && cmd->target_detected && (recoil_trigger_pressed || trigger_will_click);
+        const bool recoil_active = !virtual_recoil_target_active
+            && legacy_recoil_enabled
+            && cmd->target_detected
+            && (recoil_trigger_pressed || trigger_will_click);
         if (recoil_active) {
             const auto recoil_tick = SteadyClock::now();
             if (last_recoil_integrate_tick != SteadyClock::time_point{}) {
@@ -2357,6 +2412,7 @@ void DeltaApp::controlLoop() {
                           << " shot=" << recoil_state.shot_index << "/" << recoil_state.shot_count
                           << " scheduled=(" << pending_recoil.dx << ", " << pending_recoil.dy << ")"
                           << " applied=(" << (recoil_applied ? applied_advanced_dx : 0) << ", " << (recoil_applied ? applied_advanced_dy : 0) << ")"
+                          << " path=direct_fallback"
                           << " send=" << (movement_sent ? "OK" : "SKIP")
                           << " F7=" << (toggles.recoil_tune_fallback ? "ON" : "OFF")
                           << " ignore_mode=" << (runtime.recoil_tune_fallback_ignore_mode_check ? "ON" : "OFF")

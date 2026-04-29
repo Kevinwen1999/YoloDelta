@@ -171,6 +171,7 @@ struct RuntimeConfig {
     bool tensorrt_inline_fresh_only_enable = true;
     bool capture_freeze_to_center_enable = true;
     float body_y_ratio = 0.15F;
+    float head_x_ratio = 0.50F;
     float head_y_ratio = 0.50F;
     TrackingStrategy tracking_strategy = TrackingStrategy::PredictivePid;
     float tracking_alpha = 0.42F;
@@ -254,6 +255,7 @@ struct RuntimeConfig {
     bool ego_motion_reset_on_switch = true;
     RecoilMode recoil_mode = RecoilMode::Legacy;
     std::string selected_recoil_profile_id;
+    bool recoil_virtual_aim_offset_enable = true;
     float recoil_compensation_y_rate_px_s = 0.0F;
     float recoil_compensation_y_px = 4.0F;
     LeftHoldEngageButton left_hold_engage_button = LeftHoldEngageButton::Both;

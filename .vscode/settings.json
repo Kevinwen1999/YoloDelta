@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "C:/YOLO/Delta/cpp_port"
+    "cmake.sourceDirectory": "C:/YOLO/Delta/cpp_port",
+    "python-envs.defaultEnvManager": "ms-python.python:system"
 }

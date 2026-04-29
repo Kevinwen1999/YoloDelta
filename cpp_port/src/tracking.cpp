@@ -29,9 +29,13 @@ float pointToBoxDistance(const Detection& det, const float x, const float y) {
     return hypot2(dx, dy);
 }
 
-Detection aimedDetection(const Detection& detection, const float body_y_ratio, const float head_y_ratio) {
+Detection aimedDetection(
+    const Detection& detection,
+    const float body_y_ratio,
+    const float head_x_ratio,
+    const float head_y_ratio) {
     Detection aimed = detection;
-    const auto [aim_x, aim_y] = detectionAimPoint(detection, body_y_ratio, head_y_ratio);
+    const auto [aim_x, aim_y] = detectionAimPoint(detection, body_y_ratio, head_x_ratio, head_y_ratio);
     aimed.x = aim_x;
     aimed.y = aim_y;
     return aimed;
@@ -410,6 +414,7 @@ Detection scaleDetectionBox(const Detection& detection, const float box_scale, c
 std::pair<float, float> detectionAimPoint(
     const Detection& detection,
     const float body_y_ratio,
+    const float head_x_ratio,
     const float head_y_ratio) {
     const float x1 = static_cast<float>(detection.bbox[0]);
     const float y1 = static_cast<float>(detection.bbox[1]);
@@ -417,7 +422,9 @@ std::pair<float, float> detectionAimPoint(
     const float y2 = static_cast<float>(detection.bbox[3]);
     const float width = std::max(1.0F, x2 - x1);
     const float height = std::max(1.0F, y2 - y1);
-    const float aim_x = x1 + (width * 0.5F);
+    const float aim_x = detection.cls == kHeadClass
+        ? (x1 + (width * head_x_ratio))
+        : (x1 + (width * 0.5F));
     const float aim_y = detection.cls == kBodyClass
         ? (y1 + (height * std::max(0.0F, body_y_ratio)))
         : (detection.cls == kHeadClass
@@ -430,6 +437,7 @@ AimCandidatePool buildAimCandidatePool(
     const std::vector<Detection>& detections,
     const AimMode aim_mode,
     const float body_y_ratio,
+    const float head_x_ratio,
     const float head_y_ratio) {
     AimCandidatePool pool{};
     std::vector<Detection> heads;
@@ -438,7 +446,7 @@ AimCandidatePool buildAimCandidatePool(
     bodies.reserve(detections.size());
 
     for (const auto& detection : detections) {
-        Detection aimed = aimedDetection(detection, body_y_ratio, head_y_ratio);
+        Detection aimed = aimedDetection(detection, body_y_ratio, head_x_ratio, head_y_ratio);
         if (aimed.cls == kHeadClass) {
             heads.push_back(aimed);
         } else if (aimed.cls == kBodyClass) {
