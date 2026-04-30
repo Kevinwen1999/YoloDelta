@@ -55,6 +55,13 @@ struct CaptureTimings {
     double cuda_copy_s = 0.0;
     double cpu_copy_s = 0.0;
     double cached_reuse_s = 0.0;
+    double present_interval_s = 0.0;
+    double output_refresh_hz = 0.0;
+    std::uint32_t accumulated_frames = 0;
+    bool desktop_updated = false;
+    bool pointer_updated = false;
+    bool pointer_only = false;
+    bool rects_coalesced = false;
     bool used_cached_frame = false;
 };
 
@@ -101,6 +108,7 @@ struct CommandPacket {
     SystemClock::time_point capture_time{};
     bool target_detected = false;
     bool synthetic_recoil = false;
+    bool synthetic_servo = false;
     bool trigger_fire = false;
 };
 

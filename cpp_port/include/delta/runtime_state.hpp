@@ -46,6 +46,17 @@ public:
         return out;
     }
 
+    template <typename Clock, typename Duration>
+    std::optional<T> wait_take_until(const std::chrono::time_point<Clock, Duration>& deadline) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!cv_.wait_until(lock, deadline, [this]() { return value_.has_value(); })) {
+            return std::nullopt;
+        }
+        auto out = std::move(value_);
+        value_.reset();
+        return out;
+    }
+
     void clear() {
         std::lock_guard<std::mutex> lock(mutex_);
         value_.reset();
@@ -94,6 +105,23 @@ private:
     std::uint64_t reset_token_ = 0;
 };
 
+struct DisplayRateServoState {
+    bool valid = false;
+    float target_x = 0.0F;
+    float target_y = 0.0F;
+    float velocity_x = 0.0F;
+    float velocity_y = 0.0F;
+    float acceleration_x = 0.0F;
+    float acceleration_y = 0.0F;
+    int target_cls = -1;
+    SteadyClock::time_point updated_at{};
+    SteadyClock::time_point acquire_started{};
+    SteadyClock::time_point frame_ready{};
+    SteadyClock::time_point capture_done{};
+    SystemClock::time_point frame_time{};
+    SystemClock::time_point capture_time{};
+};
+
 struct SharedState {
     mutable std::mutex mutex;
     bool running = true;
@@ -125,6 +153,8 @@ struct SharedState {
     std::atomic<float> ctrl_sent_vy_ema{0.0F};
     std::atomic<float> cmd_send_latency_ema_s{0.0F};
     SteadyClock::time_point ctrl_last_send_tick{};
+    double display_refresh_hz = 0.0;
+    DisplayRateServoState display_rate_servo{};
     std::string tracking_strategy = "raw_delta";
     bool side_button_key_sequence_enabled = false;
     RecoilRuntimeState recoil{};

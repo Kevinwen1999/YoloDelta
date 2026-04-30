@@ -1,6 +1,7 @@
 #include "delta/control.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <memory>
@@ -14,6 +15,8 @@ namespace delta {
 
 #if defined(_WIN32)
 namespace {
+
+constexpr UINT kMouseInputBatchLimit = 64U;
 
 bool sendMouseClickTap(const DWORD down_flag, const DWORD up_flag, const double hold_s) {
     INPUT down{};
@@ -75,23 +78,39 @@ bool SendInputMouseSender::sendRelative(int dx, int dy) {
     frac_x_ = move_x - static_cast<float>(send_x);
     frac_y_ = move_y - static_cast<float>(send_y);
 
+    std::array<INPUT, kMouseInputBatchLimit> inputs{};
+    UINT input_count = 0;
     bool sent_any = false;
+    auto flush_inputs = [&inputs, &input_count]() -> bool {
+        if (input_count == 0) {
+            return true;
+        }
+        const UINT count = input_count;
+        input_count = 0;
+        return SendInput(count, inputs.data(), sizeof(INPUT)) == count;
+    };
+
     while (send_x != 0 || send_y != 0) {
         const int step_x = std::clamp(send_x, -config_.max_step, config_.max_step);
         const int step_y = std::clamp(send_y, -config_.max_step, config_.max_step);
-        INPUT input{};
+        INPUT& input = inputs[input_count++];
+        input = {};
         input.type = INPUT_MOUSE;
         input.mi.dx = step_x;
         input.mi.dy = step_y;
         input.mi.dwFlags = MOUSEEVENTF_MOVE;
-        if (SendInput(1, &input, sizeof(INPUT)) != 1) {
-            return false;
-        }
         sent_any = true;
         send_x -= step_x;
         send_y -= step_y;
+
+        if (input_count == kMouseInputBatchLimit && !flush_inputs()) {
+            return false;
+        }
     }
-    return sent_any;
+    if (!sent_any) {
+        return false;
+    }
+    return flush_inputs();
 #else
     (void)dx;
     (void)dy;

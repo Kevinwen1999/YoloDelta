@@ -127,6 +127,21 @@ UINT dxgiTimeoutMs(const double timeout_ms) {
     return static_cast<UINT>(std::min(std::ceil(timeout_ms), kMaxDxgiTimeoutMs));
 }
 
+double currentOutputRefreshHz(const wchar_t* device_name) {
+    if (device_name == nullptr || device_name[0] == L'\0') {
+        return 0.0;
+    }
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (!EnumDisplaySettingsW(device_name, ENUM_CURRENT_SETTINGS, &mode)) {
+        return 0.0;
+    }
+    if (mode.dmDisplayFrequency <= 1 || mode.dmDisplayFrequency > 1000) {
+        return 0.0;
+    }
+    return static_cast<double>(mode.dmDisplayFrequency);
+}
+
 #if defined(DELTA_WITH_CUDA_PIPELINE)
 void checkCuda(cudaError_t status, std::string_view what) {
     if (status != cudaSuccess) {
@@ -191,8 +206,10 @@ struct DesktopDuplicationCapture::Impl {
         checkHr(adapter->EnumOutputs(config.capture_output_idx, &output), "EnumOutputs");
         checkHr(output.As(&output1), "QueryInterface(IDXGIOutput1)");
         checkHr(output->GetDesc(&output_desc), "IDXGIOutput::GetDesc");
+        QueryPerformanceFrequency(&qpc_frequency);
 
         output_name = wideToUtf8(output_desc.DeviceName);
+        output_refresh_hz = currentOutputRefreshHz(output_desc.DeviceName);
         desktop_width = output_desc.DesktopCoordinates.right - output_desc.DesktopCoordinates.left;
         desktop_height = output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates.top;
         if (desktop_width <= 0 || desktop_height <= 0) {
@@ -228,7 +245,11 @@ struct DesktopDuplicationCapture::Impl {
             std::cout
                 << "[capture] desktop duplication ready on "
                 << adapter_name << " " << output_name
-                << " (" << desktop_width << "x" << desktop_height << ")\n";
+                << " (" << desktop_width << "x" << desktop_height;
+            if (output_refresh_hz > 0.0) {
+                std::cout << " @" << output_refresh_hz << "Hz";
+            }
+            std::cout << ")\n";
         }
     }
 
@@ -254,6 +275,28 @@ struct DesktopDuplicationCapture::Impl {
         cached_desktop_frame_ready = {};
         desktop_width = 0;
         desktop_height = 0;
+        output_refresh_hz = 0.0;
+        last_present_qpc = 0;
+    }
+
+    CaptureTimings dxgiFrameTimings(const DXGI_OUTDUPL_FRAME_INFO& frame_info) {
+        CaptureTimings timings{};
+        timings.output_refresh_hz = output_refresh_hz;
+        timings.accumulated_frames = frame_info.AccumulatedFrames;
+        timings.rects_coalesced = frame_info.RectsCoalesced != FALSE;
+        timings.desktop_updated = frame_info.LastPresentTime.QuadPart != 0;
+        timings.pointer_updated = frame_info.LastMouseUpdateTime.QuadPart != 0;
+        timings.pointer_only = !timings.desktop_updated && timings.pointer_updated;
+        if (timings.desktop_updated && qpc_frequency.QuadPart > 0) {
+            const LONGLONG present_qpc = frame_info.LastPresentTime.QuadPart;
+            if (last_present_qpc > 0 && present_qpc > last_present_qpc) {
+                timings.present_interval_s =
+                    static_cast<double>(present_qpc - last_present_qpc)
+                    / static_cast<double>(qpc_frequency.QuadPart);
+            }
+            last_present_qpc = present_qpc;
+        }
+        return timings;
     }
 
     void ensureCropStaging(const CaptureRegion& region) {
@@ -512,14 +555,14 @@ struct DesktopDuplicationCapture::Impl {
         const CaptureRegion& region,
         const SteadyClock::time_point acquire_started,
         const SteadyClock::time_point frame_ready,
-        const bool used_cached_frame) {
+        const bool used_cached_frame,
+        CaptureTimings timings = {}) {
         GpuFrameBufferSlot* slot = acquireGpuSlot(region);
         if (slot == nullptr) {
             return std::nullopt;
         }
         std::shared_ptr<void> slot_lease = makeGpuSlotLease(*slot);
 
-        CaptureTimings timings{};
         timings.used_cached_frame = used_cached_frame;
 
         D3D11_BOX source_box{};
@@ -619,9 +662,9 @@ struct DesktopDuplicationCapture::Impl {
         const CaptureRegion& region,
         const SteadyClock::time_point acquire_started,
         const SteadyClock::time_point frame_ready,
-        const bool used_cached_frame) {
+        const bool used_cached_frame,
+        CaptureTimings timings = {}) {
         ensureCropStaging(region);
-        CaptureTimings timings{};
         timings.used_cached_frame = used_cached_frame;
 
         D3D11_BOX source_box{};
@@ -706,7 +749,10 @@ struct DesktopDuplicationCapture::Impl {
         const auto frame_ready = SteadyClock::now();
 
         if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-            if (!config.capture_video_mode || !has_cached_desktop || cached_desktop == nullptr) {
+            if (fresh_only.load(std::memory_order_relaxed)
+                || !config.capture_video_mode
+                || !has_cached_desktop
+                || cached_desktop == nullptr) {
                 return std::nullopt;
             }
             const SteadyClock::time_point cached_frame_ready = cached_desktop_frame_ready == SteadyClock::time_point{}
@@ -718,6 +764,7 @@ struct DesktopDuplicationCapture::Impl {
         }
 
         checkHr(hr, "AcquireNextFrame");
+        CaptureTimings timings = dxgiFrameTimings(frame_info);
 
         bool frame_acquired = true;
         ScopeExit release_frame([&]() {
@@ -742,7 +789,7 @@ struct DesktopDuplicationCapture::Impl {
             cached_desktop_frame_ready = frame_ready;
         }
 
-        FramePacket packet = copyRegionToPacket(source_texture, region, acquire_started, frame_ready, false);
+        FramePacket packet = copyRegionToPacket(source_texture, region, acquire_started, frame_ready, false, timings);
         packet.timings.acquire_s = secondsSince(acquire_started, frame_ready);
         checkHr(duplication->ReleaseFrame(), "ReleaseFrame");
         frame_acquired = false;
@@ -776,7 +823,10 @@ struct DesktopDuplicationCapture::Impl {
         const auto frame_ready = SteadyClock::now();
 
         if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-            if (!config.capture_video_mode || !has_cached_desktop || cached_desktop == nullptr) {
+            if (fresh_only.load(std::memory_order_relaxed)
+                || !config.capture_video_mode
+                || !has_cached_desktop
+                || cached_desktop == nullptr) {
                 return std::nullopt;
             }
             const SteadyClock::time_point cached_frame_ready = cached_desktop_frame_ready == SteadyClock::time_point{}
@@ -792,6 +842,7 @@ struct DesktopDuplicationCapture::Impl {
         }
 
         checkHr(hr, "AcquireNextFrame");
+        CaptureTimings timings = dxgiFrameTimings(frame_info);
 
         bool frame_acquired = true;
         ScopeExit release_frame([&]() {
@@ -812,7 +863,7 @@ struct DesktopDuplicationCapture::Impl {
             cached_desktop_frame_ready = frame_ready;
         }
 
-        std::optional<GpuFramePacket> packet = copyRegionToGpuPacket(source_texture, region, acquire_started, frame_ready, false);
+        std::optional<GpuFramePacket> packet = copyRegionToGpuPacket(source_texture, region, acquire_started, frame_ready, false, timings);
         if (!packet.has_value()) {
             return std::nullopt;
         }
@@ -842,6 +893,7 @@ struct DesktopDuplicationCapture::Impl {
     ComPtr<ID3D11Texture2D> cached_desktop;
     ComPtr<ID3D11Texture2D> crop_staging;
     std::atomic<double> cached_frame_timeout_ms{1.0};
+    std::atomic_bool fresh_only{false};
 #if defined(DELTA_WITH_CUDA_PIPELINE)
     bool cuda_ready = false;
     int cuda_device = -1;
@@ -858,6 +910,9 @@ struct DesktopDuplicationCapture::Impl {
     DXGI_OUTPUT_DESC output_desc{};
     std::string adapter_name;
     std::string output_name;
+    double output_refresh_hz = 0.0;
+    LARGE_INTEGER qpc_frequency{};
+    LONGLONG last_present_qpc = 0;
 };
 
 DesktopDuplicationCapture::DesktopDuplicationCapture(const StaticConfig& config)
@@ -921,6 +976,12 @@ void DesktopDuplicationCapture::setGpuConsumerStream(void* stream) {
 void DesktopDuplicationCapture::setCachedFrameTimeoutMs(const double timeout_ms) {
     if (impl_) {
         impl_->cached_frame_timeout_ms.store(std::max(0.0, timeout_ms), std::memory_order_relaxed);
+    }
+}
+
+void DesktopDuplicationCapture::setFreshOnly(const bool fresh_only) {
+    if (impl_) {
+        impl_->fresh_only.store(fresh_only, std::memory_order_relaxed);
     }
 }
 

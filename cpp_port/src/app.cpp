@@ -19,6 +19,11 @@
 #include <thread>
 #include <utility>
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <timeapi.h>
+#endif
+
 namespace delta {
 
 struct RuntimePerfWindow {
@@ -35,6 +40,14 @@ struct RuntimePerfWindow {
     double capture_cached_reuse_s = 0.0;
     std::uint64_t capture_cached_frames = 0;
     std::uint64_t capture_cached_skipped = 0;
+    std::uint64_t capture_desktop_updates = 0;
+    std::uint64_t capture_pointer_only = 0;
+    std::uint64_t capture_rects_coalesced = 0;
+    std::uint64_t capture_accumulated_frames_sum = 0;
+    std::uint32_t capture_accumulated_frames_max = 0;
+    double capture_present_interval_s = 0.0;
+    std::uint64_t capture_present_interval_samples = 0;
+    double capture_output_refresh_hz = 0.0;
 
     std::uint64_t infer_frames = 0;
     std::uint64_t infer_stale = 0;
@@ -58,6 +71,14 @@ struct RuntimePerfWindow {
 
     std::uint64_t control_cmds = 0;
     std::uint64_t control_sent = 0;
+    std::uint64_t control_fresh_sent = 0;
+    std::uint64_t control_servo_sent = 0;
+    std::uint64_t control_aim_due = 0;
+    std::uint64_t control_aim_fresh_budget = 0;
+    std::uint64_t control_aim_servo_budget = 0;
+    std::uint64_t control_aim_fresh_deferred = 0;
+    std::uint64_t control_aim_zero = 0;
+    std::uint64_t control_servo_zero = 0;
     std::uint64_t control_stale_drop = 0;
     std::uint64_t control_mode_drop = 0;
     double control_send_s = 0.0;
@@ -70,6 +91,22 @@ struct RuntimePerfWindow {
     std::uint64_t control_apply_latency_samples = 0;
     double control_total_apply_latency_full_s = 0.0;
     std::uint64_t control_apply_latency_full_samples = 0;
+    double control_fresh_latency_s = 0.0;
+    std::uint64_t control_fresh_latency_samples = 0;
+    double control_fresh_latency_full_s = 0.0;
+    std::uint64_t control_fresh_latency_full_samples = 0;
+    double control_fresh_apply_latency_s = 0.0;
+    std::uint64_t control_fresh_apply_latency_samples = 0;
+    double control_fresh_apply_latency_full_s = 0.0;
+    std::uint64_t control_fresh_apply_latency_full_samples = 0;
+    double control_servo_latency_s = 0.0;
+    std::uint64_t control_servo_latency_samples = 0;
+    double control_servo_latency_full_s = 0.0;
+    std::uint64_t control_servo_latency_full_samples = 0;
+    double control_servo_apply_latency_s = 0.0;
+    std::uint64_t control_servo_apply_latency_samples = 0;
+    double control_servo_apply_latency_full_s = 0.0;
+    std::uint64_t control_servo_apply_latency_full_samples = 0;
 
     void reset(const SteadyClock::time_point now) {
         window_start = now;
@@ -84,6 +121,14 @@ struct RuntimePerfWindow {
         capture_cached_reuse_s = 0.0;
         capture_cached_frames = 0;
         capture_cached_skipped = 0;
+        capture_desktop_updates = 0;
+        capture_pointer_only = 0;
+        capture_rects_coalesced = 0;
+        capture_accumulated_frames_sum = 0;
+        capture_accumulated_frames_max = 0;
+        capture_present_interval_s = 0.0;
+        capture_present_interval_samples = 0;
+        capture_output_refresh_hz = 0.0;
 
         infer_frames = 0;
         infer_stale = 0;
@@ -107,6 +152,14 @@ struct RuntimePerfWindow {
 
         control_cmds = 0;
         control_sent = 0;
+        control_fresh_sent = 0;
+        control_servo_sent = 0;
+        control_aim_due = 0;
+        control_aim_fresh_budget = 0;
+        control_aim_servo_budget = 0;
+        control_aim_fresh_deferred = 0;
+        control_aim_zero = 0;
+        control_servo_zero = 0;
         control_stale_drop = 0;
         control_mode_drop = 0;
         control_send_s = 0.0;
@@ -119,6 +172,22 @@ struct RuntimePerfWindow {
         control_apply_latency_samples = 0;
         control_total_apply_latency_full_s = 0.0;
         control_apply_latency_full_samples = 0;
+        control_fresh_latency_s = 0.0;
+        control_fresh_latency_samples = 0;
+        control_fresh_latency_full_s = 0.0;
+        control_fresh_latency_full_samples = 0;
+        control_fresh_apply_latency_s = 0.0;
+        control_fresh_apply_latency_samples = 0;
+        control_fresh_apply_latency_full_s = 0.0;
+        control_fresh_apply_latency_full_samples = 0;
+        control_servo_latency_s = 0.0;
+        control_servo_latency_samples = 0;
+        control_servo_latency_full_s = 0.0;
+        control_servo_latency_full_samples = 0;
+        control_servo_apply_latency_s = 0.0;
+        control_servo_apply_latency_samples = 0;
+        control_servo_apply_latency_full_s = 0.0;
+        control_servo_apply_latency_full_samples = 0;
     }
 };
 
@@ -151,8 +220,53 @@ constexpr float kAssocSpeedJumpGain = 0.05F;
 constexpr float kAssocMaxJumpPad = 220.0F;
 constexpr bool kPerfLogWhenModeOff = true;
 
+enum class ControlPerfKind {
+    Other,
+    Fresh,
+    Servo,
+};
+
+class ScopedTimerResolution {
+public:
+    explicit ScopedTimerResolution(const unsigned int period_ms) : period_ms_(period_ms) {
+#if defined(_WIN32)
+        active_ = timeBeginPeriod(period_ms_) == 0;
+#else
+        (void)period_ms_;
+#endif
+    }
+
+    ScopedTimerResolution(const ScopedTimerResolution&) = delete;
+    ScopedTimerResolution& operator=(const ScopedTimerResolution&) = delete;
+
+    ~ScopedTimerResolution() {
+#if defined(_WIN32)
+        if (active_) {
+            timeEndPeriod(period_ms_);
+        }
+#endif
+    }
+
+private:
+    unsigned int period_ms_ = 0;
+    bool active_ = false;
+};
+
 bool risingEdge(const bool current, const bool previous) {
     return current && !previous;
+}
+
+double detectPrimaryDisplayRefreshHz() {
+#if defined(_WIN32)
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode)
+        && mode.dmDisplayFrequency > 1
+        && mode.dmDisplayFrequency <= 1000) {
+        return static_cast<double>(mode.dmDisplayFrequency);
+    }
+#endif
+    return 0.0;
 }
 
 double secondsSince(const SystemClock::time_point since, const SystemClock::time_point now) {
@@ -192,6 +306,20 @@ float emaUpdateSigned(const float prev, const float sample, const float alpha) {
 
 std::pair<int, int> screenCenter(const StaticConfig& config) {
     return {config.screen_w / 2, config.screen_h / 2};
+}
+
+bool isTargetAimCommand(const CommandPacket& cmd) {
+    return cmd.target_detected && !cmd.synthetic_recoil;
+}
+
+ControlPerfKind controlPerfKind(const CommandPacket& cmd) {
+    if (cmd.synthetic_servo) {
+        return ControlPerfKind::Servo;
+    }
+    if (isTargetAimCommand(cmd)) {
+        return ControlPerfKind::Fresh;
+    }
+    return ControlPerfKind::Other;
 }
 
 float bboxIou(const std::array<int, 4>& a, const std::array<int, 4>& b) {
@@ -382,6 +510,7 @@ void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, 
     shared.last_target_full = center;
     shared.capture_focus_full = center;
     shared.target_time = {};
+    shared.display_rate_servo = {};
     shared.tracking_strategy = trackingStrategyName(strategy);
 }
 
@@ -513,6 +642,13 @@ struct PerfLogSnapshot {
     double cap_cached_rate = 0.0;
     std::uint64_t cap_cached_skipped = 0;
     std::uint64_t cap_none = 0;
+    double cap_timeout_hz = 0.0;
+    double cap_present_hz = 0.0;
+    double cap_output_refresh_hz = 0.0;
+    double cap_pointer_only_hz = 0.0;
+    double cap_accum_frames_avg = 0.0;
+    std::uint32_t cap_accum_frames_max = 0;
+    double cap_rects_coalesced_rate = 0.0;
     double infer_fps = 0.0;
     double infer_loop_ms = 0.0;
     double infer_age_ms = 0.0;
@@ -533,12 +669,28 @@ struct PerfLogSnapshot {
     double infer_backend_post_ms = 0.0;
     double infer_cmd_ms = 0.0;
     double control_send_hz = 0.0;
+    double control_fresh_hz = 0.0;
+    double control_servo_hz = 0.0;
     double control_send_ms = 0.0;
     double control_cmd_age_ms = 0.0;
     double control_total_latency_ms = 0.0;
     double control_total_latency_full_ms = 0.0;
     double control_total_apply_latency_ms = 0.0;
     double control_total_apply_latency_full_ms = 0.0;
+    double control_fresh_latency_ms = 0.0;
+    double control_fresh_latency_full_ms = 0.0;
+    double control_fresh_apply_latency_ms = 0.0;
+    double control_fresh_apply_latency_full_ms = 0.0;
+    double control_servo_latency_ms = 0.0;
+    double control_servo_latency_full_ms = 0.0;
+    double control_servo_apply_latency_ms = 0.0;
+    double control_servo_apply_latency_full_ms = 0.0;
+    double control_aim_due_hz = 0.0;
+    double control_aim_fresh_budget_hz = 0.0;
+    double control_aim_servo_budget_hz = 0.0;
+    double control_aim_fresh_deferred_hz = 0.0;
+    double control_aim_zero_hz = 0.0;
+    double control_servo_zero_hz = 0.0;
     std::uint64_t control_stale_drop = 0;
     std::uint64_t control_mode_drop = 0;
 };
@@ -564,6 +716,26 @@ void recordCapturePerf(
         perf.capture_cached_reuse_s += std::max(0.0, timings->cached_reuse_s);
         if (timings->used_cached_frame) {
             ++perf.capture_cached_frames;
+        }
+        if (timings->desktop_updated) {
+            ++perf.capture_desktop_updates;
+        }
+        if (timings->pointer_only) {
+            ++perf.capture_pointer_only;
+        }
+        if (timings->rects_coalesced) {
+            ++perf.capture_rects_coalesced;
+        }
+        perf.capture_accumulated_frames_sum += timings->accumulated_frames;
+        perf.capture_accumulated_frames_max = std::max(
+            perf.capture_accumulated_frames_max,
+            timings->accumulated_frames);
+        if (timings->present_interval_s > 0.0) {
+            perf.capture_present_interval_s += timings->present_interval_s;
+            ++perf.capture_present_interval_samples;
+        }
+        if (timings->output_refresh_hz > 0.0) {
+            perf.capture_output_refresh_hz = timings->output_refresh_hz;
         }
     }
 }
@@ -614,6 +786,7 @@ void recordInferencePerf(
 
 void recordControlPerf(
     RuntimePerfWindow& perf,
+    const ControlPerfKind kind,
     const double cmd_age_s,
     const bool sent,
     const double send_s,
@@ -636,23 +809,85 @@ void recordControlPerf(
     }
 
     ++perf.control_sent;
+    if (kind == ControlPerfKind::Fresh) {
+        ++perf.control_fresh_sent;
+    } else if (kind == ControlPerfKind::Servo) {
+        ++perf.control_servo_sent;
+    }
     perf.control_send_s += std::max(0.0, send_s);
     perf.control_cmd_age_s += std::max(0.0, cmd_age_s);
     if (total_latency_s.has_value()) {
         ++perf.control_latency_samples;
         perf.control_total_latency_s += std::max(0.0, *total_latency_s);
+        if (kind == ControlPerfKind::Fresh) {
+            ++perf.control_fresh_latency_samples;
+            perf.control_fresh_latency_s += std::max(0.0, *total_latency_s);
+        } else if (kind == ControlPerfKind::Servo) {
+            ++perf.control_servo_latency_samples;
+            perf.control_servo_latency_s += std::max(0.0, *total_latency_s);
+        }
     }
     if (total_latency_full_s.has_value()) {
         ++perf.control_latency_full_samples;
         perf.control_total_latency_full_s += std::max(0.0, *total_latency_full_s);
+        if (kind == ControlPerfKind::Fresh) {
+            ++perf.control_fresh_latency_full_samples;
+            perf.control_fresh_latency_full_s += std::max(0.0, *total_latency_full_s);
+        } else if (kind == ControlPerfKind::Servo) {
+            ++perf.control_servo_latency_full_samples;
+            perf.control_servo_latency_full_s += std::max(0.0, *total_latency_full_s);
+        }
     }
     if (total_apply_latency_s.has_value()) {
         ++perf.control_apply_latency_samples;
         perf.control_total_apply_latency_s += std::max(0.0, *total_apply_latency_s);
+        if (kind == ControlPerfKind::Fresh) {
+            ++perf.control_fresh_apply_latency_samples;
+            perf.control_fresh_apply_latency_s += std::max(0.0, *total_apply_latency_s);
+        } else if (kind == ControlPerfKind::Servo) {
+            ++perf.control_servo_apply_latency_samples;
+            perf.control_servo_apply_latency_s += std::max(0.0, *total_apply_latency_s);
+        }
     }
     if (total_apply_latency_full_s.has_value()) {
         ++perf.control_apply_latency_full_samples;
         perf.control_total_apply_latency_full_s += std::max(0.0, *total_apply_latency_full_s);
+        if (kind == ControlPerfKind::Fresh) {
+            ++perf.control_fresh_apply_latency_full_samples;
+            perf.control_fresh_apply_latency_full_s += std::max(0.0, *total_apply_latency_full_s);
+        } else if (kind == ControlPerfKind::Servo) {
+            ++perf.control_servo_apply_latency_full_samples;
+            perf.control_servo_apply_latency_full_s += std::max(0.0, *total_apply_latency_full_s);
+        }
+    }
+}
+
+void recordAimSchedulerPerf(
+    RuntimePerfWindow& perf,
+    const bool due,
+    const bool fresh_budget,
+    const bool servo_budget,
+    const bool fresh_deferred,
+    const bool aim_zero,
+    const bool servo_zero) {
+    std::lock_guard<std::mutex> lock(perf.mutex);
+    if (due) {
+        ++perf.control_aim_due;
+    }
+    if (fresh_budget) {
+        ++perf.control_aim_fresh_budget;
+    }
+    if (servo_budget) {
+        ++perf.control_aim_servo_budget;
+    }
+    if (fresh_deferred) {
+        ++perf.control_aim_fresh_deferred;
+    }
+    if (aim_zero) {
+        ++perf.control_aim_zero;
+    }
+    if (servo_zero) {
+        ++perf.control_servo_zero;
     }
 }
 
@@ -682,6 +917,19 @@ std::optional<PerfLogSnapshot> takePerfSnapshot(RuntimePerfWindow& perf, const d
     snapshot.cap_cached_skipped = perf.capture_cached_skipped;
     snapshot.fresh_capture_fps = snapshot.cap_fps * std::max(0.0, 1.0 - snapshot.cap_cached_rate);
     snapshot.cap_none = perf.capture_none;
+    snapshot.cap_timeout_hz = elapsed > 0.0 ? static_cast<double>(perf.capture_none) / elapsed : 0.0;
+    snapshot.cap_present_hz = perf.capture_present_interval_samples > 0
+        ? 1.0 / (perf.capture_present_interval_s / static_cast<double>(perf.capture_present_interval_samples))
+        : 0.0;
+    snapshot.cap_output_refresh_hz = perf.capture_output_refresh_hz;
+    snapshot.cap_pointer_only_hz = elapsed > 0.0 ? static_cast<double>(perf.capture_pointer_only) / elapsed : 0.0;
+    snapshot.cap_accum_frames_avg = perf.capture_frames > 0
+        ? static_cast<double>(perf.capture_accumulated_frames_sum) / static_cast<double>(perf.capture_frames)
+        : 0.0;
+    snapshot.cap_accum_frames_max = perf.capture_accumulated_frames_max;
+    snapshot.cap_rects_coalesced_rate = perf.capture_frames > 0
+        ? static_cast<double>(perf.capture_rects_coalesced) / static_cast<double>(perf.capture_frames)
+        : 0.0;
     snapshot.infer_fps = elapsed > 0.0 ? static_cast<double>(perf.infer_frames) / elapsed : 0.0;
     snapshot.infer_loop_ms = perf.infer_frames > 0 ? (perf.infer_loop_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
     snapshot.infer_age_ms = perf.infer_frames > 0 ? (perf.infer_frame_age_s * 1000.0 / static_cast<double>(perf.infer_frames)) : 0.0;
@@ -702,12 +950,28 @@ std::optional<PerfLogSnapshot> takePerfSnapshot(RuntimePerfWindow& perf, const d
     snapshot.infer_backend_post_ms = perf.infer_backend_samples > 0 ? (perf.infer_backend_post_s * 1000.0 / static_cast<double>(perf.infer_backend_samples)) : 0.0;
     snapshot.infer_cmd_ms = perf.infer_cmd_samples > 0 ? (perf.infer_cmd_latency_s * 1000.0 / static_cast<double>(perf.infer_cmd_samples)) : 0.0;
     snapshot.control_send_hz = elapsed > 0.0 ? static_cast<double>(perf.control_sent) / elapsed : 0.0;
+    snapshot.control_fresh_hz = elapsed > 0.0 ? static_cast<double>(perf.control_fresh_sent) / elapsed : 0.0;
+    snapshot.control_servo_hz = elapsed > 0.0 ? static_cast<double>(perf.control_servo_sent) / elapsed : 0.0;
     snapshot.control_send_ms = perf.control_sent > 0 ? (perf.control_send_s * 1000.0 / static_cast<double>(perf.control_sent)) : 0.0;
     snapshot.control_cmd_age_ms = perf.control_sent > 0 ? (perf.control_cmd_age_s * 1000.0 / static_cast<double>(perf.control_sent)) : 0.0;
     snapshot.control_total_latency_ms = perf.control_latency_samples > 0 ? (perf.control_total_latency_s * 1000.0 / static_cast<double>(perf.control_latency_samples)) : 0.0;
     snapshot.control_total_latency_full_ms = perf.control_latency_full_samples > 0 ? (perf.control_total_latency_full_s * 1000.0 / static_cast<double>(perf.control_latency_full_samples)) : 0.0;
     snapshot.control_total_apply_latency_ms = perf.control_apply_latency_samples > 0 ? (perf.control_total_apply_latency_s * 1000.0 / static_cast<double>(perf.control_apply_latency_samples)) : 0.0;
     snapshot.control_total_apply_latency_full_ms = perf.control_apply_latency_full_samples > 0 ? (perf.control_total_apply_latency_full_s * 1000.0 / static_cast<double>(perf.control_apply_latency_full_samples)) : 0.0;
+    snapshot.control_fresh_latency_ms = perf.control_fresh_latency_samples > 0 ? (perf.control_fresh_latency_s * 1000.0 / static_cast<double>(perf.control_fresh_latency_samples)) : 0.0;
+    snapshot.control_fresh_latency_full_ms = perf.control_fresh_latency_full_samples > 0 ? (perf.control_fresh_latency_full_s * 1000.0 / static_cast<double>(perf.control_fresh_latency_full_samples)) : 0.0;
+    snapshot.control_fresh_apply_latency_ms = perf.control_fresh_apply_latency_samples > 0 ? (perf.control_fresh_apply_latency_s * 1000.0 / static_cast<double>(perf.control_fresh_apply_latency_samples)) : 0.0;
+    snapshot.control_fresh_apply_latency_full_ms = perf.control_fresh_apply_latency_full_samples > 0 ? (perf.control_fresh_apply_latency_full_s * 1000.0 / static_cast<double>(perf.control_fresh_apply_latency_full_samples)) : 0.0;
+    snapshot.control_servo_latency_ms = perf.control_servo_latency_samples > 0 ? (perf.control_servo_latency_s * 1000.0 / static_cast<double>(perf.control_servo_latency_samples)) : 0.0;
+    snapshot.control_servo_latency_full_ms = perf.control_servo_latency_full_samples > 0 ? (perf.control_servo_latency_full_s * 1000.0 / static_cast<double>(perf.control_servo_latency_full_samples)) : 0.0;
+    snapshot.control_servo_apply_latency_ms = perf.control_servo_apply_latency_samples > 0 ? (perf.control_servo_apply_latency_s * 1000.0 / static_cast<double>(perf.control_servo_apply_latency_samples)) : 0.0;
+    snapshot.control_servo_apply_latency_full_ms = perf.control_servo_apply_latency_full_samples > 0 ? (perf.control_servo_apply_latency_full_s * 1000.0 / static_cast<double>(perf.control_servo_apply_latency_full_samples)) : 0.0;
+    snapshot.control_aim_due_hz = elapsed > 0.0 ? static_cast<double>(perf.control_aim_due) / elapsed : 0.0;
+    snapshot.control_aim_fresh_budget_hz = elapsed > 0.0 ? static_cast<double>(perf.control_aim_fresh_budget) / elapsed : 0.0;
+    snapshot.control_aim_servo_budget_hz = elapsed > 0.0 ? static_cast<double>(perf.control_aim_servo_budget) / elapsed : 0.0;
+    snapshot.control_aim_fresh_deferred_hz = elapsed > 0.0 ? static_cast<double>(perf.control_aim_fresh_deferred) / elapsed : 0.0;
+    snapshot.control_aim_zero_hz = elapsed > 0.0 ? static_cast<double>(perf.control_aim_zero) / elapsed : 0.0;
+    snapshot.control_servo_zero_hz = elapsed > 0.0 ? static_cast<double>(perf.control_servo_zero) / elapsed : 0.0;
     snapshot.control_stale_drop = perf.control_stale_drop;
     snapshot.control_mode_drop = perf.control_mode_drop;
 
@@ -730,6 +994,16 @@ bool isFreshOnlyCaptureEnabled(const GpuCaptureSchedule schedule, const RuntimeC
     default:
         return false;
     }
+}
+
+double effectiveDisplayRateServoHz(const RuntimeConfig& runtime, const double detected_refresh_hz) {
+    double requested_hz = runtime.display_rate_servo_hz > 0.0
+        ? runtime.display_rate_servo_hz
+        : detected_refresh_hz;
+    if (requested_hz <= 0.0) {
+        requested_hz = 240.0;
+    }
+    return clamp(requested_hz, 1.0, 1000.0);
 }
 
 }  // namespace
@@ -910,6 +1184,9 @@ void DeltaApp::captureLoop() {
             const bool freeze_capture_to_center = runtime.capture_freeze_to_center_enable;
             const bool skip_cached_async_gpu =
                 prefer_gpu && isFreshOnlyCaptureEnabled(capture_schedule, runtime);
+            if (capture_) {
+                capture_->setFreshOnly(skip_cached_async_gpu);
+            }
             std::pair<int, int> focus = center;
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -927,6 +1204,10 @@ void DeltaApp::captureLoop() {
                 const auto grab_start = SteadyClock::now();
                 if (std::optional<GpuFramePacket> packet = capture_->grabGpu(region); packet.has_value()) {
                     const CaptureTimings timings = packet->timings;
+                    if (timings.output_refresh_hz > 0.0) {
+                        std::lock_guard<std::mutex> lock(shared_.mutex);
+                        shared_.display_refresh_hz = timings.output_refresh_hz;
+                    }
                     if (skip_cached_async_gpu && timings.used_cached_frame) {
                         if (perf_) {
                             recordCaptureCachedSkip(*perf_);
@@ -949,6 +1230,10 @@ void DeltaApp::captureLoop() {
                 if (std::optional<FramePacket> packet = capture_->grab(region); packet.has_value()) {
                     gpu_frame_slot_.clear();
                     const CaptureTimings timings = packet->timings;
+                    if (timings.output_refresh_hz > 0.0) {
+                        std::lock_guard<std::mutex> lock(shared_.mutex);
+                        shared_.display_refresh_hz = timings.output_refresh_hz;
+                    }
                     frame_slot_.put(std::move(*packet));
                     if (perf_) {
                         recordCapturePerf(*perf_, secondsSince(grab_start, SteadyClock::now()), false, timings);
@@ -1261,9 +1546,19 @@ void DeltaApp::inferenceLoop() {
                 }
                 const CaptureRegion region = buildCaptureRegion(config_, focus.first, focus.second);
                 const auto grab_start = SteadyClock::now();
+                if (capture_) {
+                    capture_->setFreshOnly(isFreshOnlyCaptureEnabled(capture_schedule, runtime));
+                }
                 gpu_packet = capture_->grabGpu(region);
                 if (!gpu_packet.has_value()) {
                     cpu_packet = capture_->grab(region);
+                }
+                const CaptureTimings packet_capture_timings = gpu_packet.has_value()
+                    ? gpu_packet->timings
+                    : (cpu_packet.has_value() ? cpu_packet->timings : CaptureTimings{});
+                if (packet_capture_timings.output_refresh_hz > 0.0) {
+                    std::lock_guard<std::mutex> lock(shared_.mutex);
+                    shared_.display_refresh_hz = packet_capture_timings.output_refresh_hz;
                 }
                 const bool skip_cached_inline = isFreshOnlyCaptureEnabled(capture_schedule, runtime)
                     && (
@@ -1635,6 +1930,10 @@ void DeltaApp::inferenceLoop() {
             float ff_scale = 0.0F;
             float vx = 0.0F;
             float vy = 0.0F;
+            float servo_velocity_x = tracker_state.vx;
+            float servo_velocity_y = tracker_state.vy;
+            float servo_acceleration_x = tracker_state.ax;
+            float servo_acceleration_y = tracker_state.ay;
             std::optional<TargetLeadPrediction> target_lead_prediction;
             const bool target_lead_locked = target_lead_config.enable && target_lead_state.active.active;
             const bool use_predictive_pid = runtime.tracking_strategy == TrackingStrategy::PredictivePid;
@@ -1705,6 +2004,10 @@ void DeltaApp::inferenceLoop() {
                     aim_y = target_lead_prediction->predicted_point.second;
                     vx = target_lead_prediction->velocity_x;
                     vy = target_lead_prediction->velocity_y;
+                    servo_velocity_x = vx;
+                    servo_velocity_y = vy;
+                    servo_acceleration_x = 0.0F;
+                    servo_acceleration_y = 0.0F;
                     speed = std::sqrt((vx * vx) + (vy * vy));
                     desired_x = predicted_x - static_cast<float>(center.first);
                     desired_y = aim_y - static_cast<float>(center.second);
@@ -1768,6 +2071,10 @@ void DeltaApp::inferenceLoop() {
                 }
                 predicted_x = tracker_state.x + (vx * prediction_time);
                 aim_y = tracker_state.y + (vy * prediction_time);
+                servo_velocity_x = vx;
+                servo_velocity_y = vy;
+                servo_acceleration_x = tracker_state.ax;
+                servo_acceleration_y = tracker_state.ay;
                 desired_x = predicted_x - static_cast<float>(center.first);
                 desired_y = aim_y - static_cast<float>(center.second);
             }
@@ -1856,6 +2163,10 @@ void DeltaApp::inferenceLoop() {
                     speed = std::sqrt(
                         (predictive.velocity_x * predictive.velocity_x)
                         + (predictive.velocity_y * predictive.velocity_y));
+                    servo_velocity_x = predictive.velocity_x;
+                    servo_velocity_y = predictive.velocity_y;
+                    servo_acceleration_x = predictive.acceleration_x;
+                    servo_acceleration_y = predictive.acceleration_y;
                     pid_error_metric_px = std::max(
                         std::abs(predictive.fused_error_x),
                         std::abs(predictive.fused_error_y));
@@ -1947,6 +2258,22 @@ void DeltaApp::inferenceLoop() {
                 shared_.last_target_full = {focus_x, focus_y};
                 shared_.capture_focus_full = {focus_x, focus_y};
                 shared_.target_time = now_system;
+                shared_.display_rate_servo = DisplayRateServoState{
+                    .valid = true,
+                    .target_x = predicted_x,
+                    .target_y = aim_y,
+                    .velocity_x = servo_velocity_x,
+                    .velocity_y = servo_velocity_y,
+                    .acceleration_x = servo_acceleration_x,
+                    .acceleration_y = servo_acceleration_y,
+                    .target_cls = selected_cls,
+                    .updated_at = now_tick,
+                    .acquire_started = acquire_started,
+                    .frame_ready = frame_ready,
+                    .capture_done = capture_done,
+                    .frame_time = gpu_packet.has_value() ? gpu_packet->capture_time : cpu_packet->capture_time,
+                    .capture_time = gpu_packet.has_value() ? gpu_packet->capture_time : cpu_packet->capture_time,
+                };
                 shared_.tracking_strategy = trackingStrategyName(runtime.tracking_strategy);
             }
             app_timings.aim_sync_s = secondsSince(aim_sync_start, SteadyClock::now());
@@ -2074,6 +2401,7 @@ void DeltaApp::controlLoop() {
         return;
     }
 
+    ScopedTimerResolution control_timer_resolution(1);
     Win32HotkeySource hotkeys;
     InputSnapshot previous{};
     SteadyClock::time_point last_mode_toggle{};
@@ -2083,7 +2411,13 @@ void DeltaApp::controlLoop() {
     SteadyClock::time_point last_triggerbot_toggle{};
     SystemClock::time_point last_trigger_click{};
     SteadyClock::time_point last_recoil_integrate_tick{};
+    SteadyClock::time_point last_target_send_tick{};
+    SteadyClock::time_point next_aim_budget_tick{};
+    std::optional<CommandPacket> pending_aim_cmd;
     double recoil_carry_y = 0.0;
+    double servo_carry_x = 0.0;
+    double servo_carry_y = 0.0;
+    const double primary_refresh_hz = detectPrimaryDisplayRefreshHz();
     MouseSenderConfig last_sender_config{};
     bool sender_config_initialized = false;
     const auto center = screenCenter(config_);
@@ -2121,6 +2455,8 @@ void DeltaApp::controlLoop() {
                 const int mode = shared_.toggles.mode;
                 if (mode == 0) {
                     command_slot_.clear();
+                    pending_aim_cmd.reset();
+                    next_aim_budget_tick = {};
                     clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                 }
                 if (config_.debug_log) {
@@ -2133,6 +2469,8 @@ void DeltaApp::controlLoop() {
                 last_aim_mode_toggle = steady_now;
                 aim_mode_changed = true;
                 command_slot_.clear();
+                pending_aim_cmd.reset();
+                next_aim_budget_tick = {};
                 clearAimStateLocked(shared_, center, runtime.tracking_strategy);
             }
             if (risingEdge(snapshot.f6_pressed, previous.f6_pressed) && (steady_now - last_hold_toggle) >= kToggleCooldown) {
@@ -2145,6 +2483,8 @@ void DeltaApp::controlLoop() {
                         shared_.toggles.right_pressed,
                         shared_.toggles.x1_pressed)) {
                     command_slot_.clear();
+                    pending_aim_cmd.reset();
+                    next_aim_budget_tick = {};
                     clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                 }
                 if (config_.debug_log) {
@@ -2231,10 +2571,177 @@ void DeltaApp::controlLoop() {
             }
         }
         const bool advanced_recoil_pending = !virtual_recoil_target_active && (pending_recoil.dx != 0 || pending_recoil.dy != 0);
+        if (runtime.display_rate_servo_enable && !target_detected) {
+            pending_aim_cmd.reset();
+            next_aim_budget_tick = {};
+            servo_carry_x = 0.0;
+            servo_carry_y = 0.0;
+        }
+        if (!runtime.display_rate_servo_enable) {
+            pending_aim_cmd.reset();
+            next_aim_budget_tick = {};
+            servo_carry_x = 0.0;
+            servo_carry_y = 0.0;
+        }
 
-        std::optional<CommandPacket> cmd = command_slot_.wait_take_for(kControlCommandWait);
+        double detected_refresh_hz = primary_refresh_hz;
+        {
+            std::lock_guard<std::mutex> lock(shared_.mutex);
+            if (shared_.display_refresh_hz > 0.0) {
+                detected_refresh_hz = shared_.display_refresh_hz;
+            }
+        }
+        const double target_send_hz = effectiveDisplayRateServoHz(runtime, detected_refresh_hz);
+        const double target_interval_s = 1.0 / target_send_hz;
+        const auto target_interval_duration = std::max(
+            SteadyClock::duration{1},
+            std::chrono::duration_cast<SteadyClock::duration>(std::chrono::duration<double>(target_interval_s)));
+        const bool target_engage_active = (toggles.mode != 0)
+            && isLeftHoldEngageSatisfied(
+                toggles.left_hold_engage,
+                runtime.left_hold_engage_button,
+                toggles.left_pressed,
+                toggles.right_pressed,
+                toggles.x1_pressed);
+        const bool target_scheduler_active = runtime.display_rate_servo_enable
+            && target_detected
+            && target_engage_active;
+        const auto command_wait_start = SteadyClock::now();
+        if (target_scheduler_active) {
+            if (next_aim_budget_tick == SteadyClock::time_point{}) {
+                next_aim_budget_tick = command_wait_start;
+            }
+        } else {
+            next_aim_budget_tick = {};
+        }
+        const auto command_wait_deadline = target_scheduler_active
+            ? next_aim_budget_tick
+            : command_wait_start + kControlCommandWait;
+        std::optional<CommandPacket> incoming_cmd = command_slot_.wait_take_until(command_wait_deadline);
         const auto command_wake_tick = SteadyClock::now();
         const auto command_wake_system = SystemClock::now();
+        std::optional<CommandPacket> cmd;
+        bool target_budget_due = false;
+        const double target_dt_s = target_interval_s;
+        if (target_scheduler_active
+            && next_aim_budget_tick != SteadyClock::time_point{}
+            && command_wake_tick >= next_aim_budget_tick) {
+            target_budget_due = true;
+            if (perf_) {
+                recordAimSchedulerPerf(*perf_, true, false, false, false, false, false);
+            }
+            next_aim_budget_tick += target_interval_duration;
+            if (next_aim_budget_tick <= command_wake_tick) {
+                const auto late_duration = command_wake_tick - next_aim_budget_tick;
+                const auto missed_slots = (late_duration.count() / target_interval_duration.count()) + 1;
+                next_aim_budget_tick += target_interval_duration * missed_slots;
+            }
+        }
+
+        if (runtime.display_rate_servo_enable && incoming_cmd.has_value() && isTargetAimCommand(*incoming_cmd)) {
+            pending_aim_cmd = *incoming_cmd;
+            if (!target_budget_due && perf_) {
+                recordAimSchedulerPerf(*perf_, false, false, false, true, false, false);
+            }
+        } else {
+            cmd = std::move(incoming_cmd);
+        }
+
+        if (pending_aim_cmd.has_value()
+            && pending_aim_cmd->cmd_generated != SteadyClock::time_point{}
+            && secondsSince(pending_aim_cmd->cmd_generated, command_wake_tick) > kCommandTimeoutSeconds) {
+            if (perf_) {
+                recordControlPerf(
+                    *perf_,
+                    controlPerfKind(*pending_aim_cmd),
+                    secondsSince(pending_aim_cmd->cmd_generated, command_wake_tick),
+                    false,
+                    0.0,
+                    true,
+                    false,
+                    pending_aim_cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(pending_aim_cmd->frame_ready, command_wake_tick)),
+                    pending_aim_cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(pending_aim_cmd->acquire_started, command_wake_tick)),
+                    std::nullopt,
+                    std::nullopt);
+            }
+            pending_aim_cmd.reset();
+        }
+
+        if (!cmd.has_value() && pending_aim_cmd.has_value() && target_budget_due) {
+            cmd = *pending_aim_cmd;
+            pending_aim_cmd.reset();
+            if (perf_) {
+                recordAimSchedulerPerf(*perf_, false, true, false, false, false, false);
+            }
+        }
+        const bool deferred_target_command = !cmd.has_value() && pending_aim_cmd.has_value();
+
+        if (!cmd.has_value() && !deferred_target_command && runtime.display_rate_servo_enable) {
+            DisplayRateServoState servo{};
+            {
+                std::lock_guard<std::mutex> lock(shared_.mutex);
+                servo = shared_.display_rate_servo;
+            }
+            const bool servo_engage_active = (toggles.mode != 0)
+                && isLeftHoldEngageSatisfied(
+                    toggles.left_hold_engage,
+                    runtime.left_hold_engage_button,
+                    toggles.left_pressed,
+                    toggles.right_pressed,
+                    toggles.x1_pressed);
+            const double max_servo_age_s =
+                std::max(0.0, runtime.display_rate_servo_max_target_age_ms) / 1000.0;
+            const double servo_age_s = servo.updated_at == SteadyClock::time_point{}
+                ? std::numeric_limits<double>::infinity()
+                : secondsSince(servo.updated_at, command_wake_tick);
+            const bool servo_eligible = servo.valid
+                && target_detected
+                && servo_engage_active
+                && target_budget_due
+                && servo_age_s <= max_servo_age_s
+                && servo_age_s <= kCommandTimeoutSeconds;
+            if (servo_eligible) {
+                if (perf_) {
+                    recordAimSchedulerPerf(*perf_, false, false, true, false, false, false);
+                }
+                const double clamped_dt_s = clamp(target_dt_s, target_interval_s, kMaxFrameAgeSeconds);
+                double move_x = (static_cast<double>(servo.velocity_x) * clamped_dt_s)
+                    + (0.5 * static_cast<double>(servo.acceleration_x) * clamped_dt_s * clamped_dt_s)
+                    + servo_carry_x;
+                double move_y = (static_cast<double>(servo.velocity_y) * clamped_dt_s)
+                    + (0.5 * static_cast<double>(servo.acceleration_y) * clamped_dt_s * clamped_dt_s)
+                    + servo_carry_y;
+                const int rounded_dx = static_cast<int>(std::lround(move_x));
+                const int rounded_dy = static_cast<int>(std::lround(move_y));
+                int servo_dx = clamp(rounded_dx, -runtime.raw_max_step_x, runtime.raw_max_step_x);
+                int servo_dy = clamp(rounded_dy, -runtime.raw_max_step_y, runtime.raw_max_step_y);
+                servo_carry_x = servo_dx == rounded_dx ? (move_x - static_cast<double>(servo_dx)) : 0.0;
+                servo_carry_y = servo_dy == rounded_dy ? (move_y - static_cast<double>(servo_dy)) : 0.0;
+                if (servo_dx != 0 || servo_dy != 0) {
+                    cmd = CommandPacket{
+                        .dx = servo_dx,
+                        .dy = servo_dy,
+                        .acquire_started = servo.acquire_started,
+                        .frame_ready = servo.frame_ready,
+                        .capture_done = servo.capture_done,
+                        .cmd_generated = command_wake_tick,
+                        .generated_at = command_wake_system,
+                        .frame_time = servo.frame_time,
+                        .capture_time = servo.capture_time,
+                        .target_detected = true,
+                        .synthetic_recoil = false,
+                        .synthetic_servo = true,
+                        .trigger_fire = false,
+                    };
+                }
+                if (servo_dx == 0 && servo_dy == 0 && perf_) {
+                    recordAimSchedulerPerf(*perf_, false, false, false, false, false, true);
+                }
+            } else if (!servo.valid || !target_detected || !servo_engage_active || servo_age_s > max_servo_age_s) {
+                servo_carry_x = 0.0;
+                servo_carry_y = 0.0;
+            }
+        }
         const double recoil_rate_y_px_s = std::abs(runtime.recoil_compensation_y_rate_px_s) > 1e-6F
             ? static_cast<double>(runtime.recoil_compensation_y_rate_px_s)
             : (static_cast<double>(runtime.recoil_compensation_y_px) * kLegacyRecoilReferenceHz);
@@ -2274,6 +2781,9 @@ void DeltaApp::controlLoop() {
                         .synthetic_recoil = true,
                         .trigger_fire = false,
                     };
+                } else if (deferred_target_command) {
+                    std::this_thread::sleep_for(kControlIdleSleep);
+                    continue;
                 } else {
                     {
                         std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -2293,6 +2803,7 @@ void DeltaApp::controlLoop() {
             if (perf_) {
                 recordControlPerf(
                     *perf_,
+                    controlPerfKind(*cmd),
                     secondsSince(cmd->cmd_generated, command_wake_tick),
                     false,
                     0.0,
@@ -2323,6 +2834,7 @@ void DeltaApp::controlLoop() {
             if (perf_) {
                 recordControlPerf(
                     *perf_,
+                    controlPerfKind(*cmd),
                     cmd->cmd_generated == SteadyClock::time_point{} ? 0.0 : secondsSince(cmd->cmd_generated, command_wake_tick),
                     false,
                     0.0,
@@ -2430,9 +2942,13 @@ void DeltaApp::controlLoop() {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
                 decayEgoMotionStateLocked(shared_);
             }
+            if (perf_ && isTargetAimCommand(*cmd)) {
+                recordAimSchedulerPerf(*perf_, false, false, false, false, true, false);
+            }
             if (perf_) {
                 recordControlPerf(
                     *perf_,
+                    controlPerfKind(*cmd),
                     cmd->cmd_generated == SteadyClock::time_point{} ? 0.0 : secondsSince(cmd->cmd_generated, command_wake_tick),
                     false,
                     0.0,
@@ -2448,7 +2964,7 @@ void DeltaApp::controlLoop() {
 
         if ((dx != 0 || dy != 0) && movement_sent) {
             std::lock_guard<std::mutex> lock(shared_.mutex);
-            if (cmd->cmd_generated != SteadyClock::time_point{}) {
+            if (cmd->cmd_generated != SteadyClock::time_point{} && !cmd->synthetic_servo) {
                 const float send_latency_s = static_cast<float>(secondsSince(cmd->cmd_generated, send_end_tick));
                 const float next_latency_ema = emaUpdateSigned(
                     shared_.cmd_send_latency_ema_s.load(std::memory_order_relaxed),
@@ -2472,6 +2988,9 @@ void DeltaApp::controlLoop() {
                 shared_.ctrl_sent_vy_ema.store(next_vy_ema, std::memory_order_relaxed);
             }
             shared_.ctrl_last_send_tick = send_end_tick;
+            if (cmd->target_detected && !cmd->synthetic_recoil) {
+                last_target_send_tick = send_end_tick;
+            }
         } else if (!trigger_sent) {
             std::lock_guard<std::mutex> lock(shared_.mutex);
             decayEgoMotionStateLocked(shared_);
@@ -2486,6 +3005,7 @@ void DeltaApp::controlLoop() {
             const bool sent_ok = movement_sent || trigger_sent;
             recordControlPerf(
                 *perf_,
+                controlPerfKind(*cmd),
                 cmd->cmd_generated == SteadyClock::time_point{} ? 0.0 : secondsSince(cmd->cmd_generated, command_wake_tick),
                 sent_ok,
                 sent_ok ? send_elapsed : 0.0,
@@ -2624,6 +3144,12 @@ void DeltaApp::perfLoop() {
                   << "ms cached=" << (snapshot->cap_cached_rate * 100.0)
                   << "%@" << snapshot->cap_cached_reuse_ms << "ms none=" << snapshot->cap_none
                   << " skipCached=" << snapshot->cap_cached_skipped
+                  << " presentHz=" << snapshot->cap_present_hz
+                  << " outHz=" << snapshot->cap_output_refresh_hz
+                  << " timeoutHz=" << snapshot->cap_timeout_hz
+                  << " pointerOnlyHz=" << snapshot->cap_pointer_only_hz
+                  << " accum=" << snapshot->cap_accum_frames_avg << "/" << snapshot->cap_accum_frames_max
+                  << " coalesced=" << (snapshot->cap_rects_coalesced_rate * 100.0) << "%"
                   << " | inf=" << snapshot->infer_fps << "fps loop=" << snapshot->infer_loop_ms << "ms age="
                   << snapshot->infer_age_ms << "/" << snapshot->infer_age_max_ms << "ms stale=" << snapshot->infer_stale
                   << " lock=" << (snapshot->infer_lock_rate * 100.0) << "% | app(sel/trk/pred/pid/sync/prev/q)="
@@ -2640,11 +3166,30 @@ void DeltaApp::perfLoop() {
                       << snapshot->infer_backend_exec_ms << "/"
                       << snapshot->infer_backend_post_ms << "ms";
         }
-        std::cout << " | ctl=" << snapshot->control_send_hz << "Hz send=" << snapshot->control_send_ms
-                  << "ms cmdAge=" << snapshot->control_cmd_age_ms << "ms e2e=" << snapshot->control_total_latency_ms
-                  << "ms e2eIn=" << snapshot->control_total_apply_latency_ms
-                  << "ms e2eFull=" << snapshot->control_total_latency_full_ms
-                  << "ms e2eFullIn=" << snapshot->control_total_apply_latency_full_ms
+        std::cout << " | totalCtl=" << snapshot->control_send_hz
+                  << "Hz freshCtl=" << snapshot->control_fresh_hz
+                  << "Hz servoCtl=" << snapshot->control_servo_hz
+                  << "Hz send=" << snapshot->control_send_ms
+                  << "ms cmdAge=" << snapshot->control_cmd_age_ms
+                  << "ms sched(due/fresh/servo/def/zero/servo0)=" << snapshot->control_aim_due_hz
+                  << "/" << snapshot->control_aim_fresh_budget_hz
+                  << "/" << snapshot->control_aim_servo_budget_hz
+                  << "/" << snapshot->control_aim_fresh_deferred_hz
+                  << "/" << snapshot->control_aim_zero_hz
+                  << "/" << snapshot->control_servo_zero_hz
+                  << "Hz"
+                  << " e2e(all/fresh/servo)=" << snapshot->control_total_latency_ms
+                  << "/" << snapshot->control_fresh_latency_ms
+                  << "/" << snapshot->control_servo_latency_ms
+                  << "ms e2eIn(all/fresh/servo)=" << snapshot->control_total_apply_latency_ms
+                  << "/" << snapshot->control_fresh_apply_latency_ms
+                  << "/" << snapshot->control_servo_apply_latency_ms
+                  << "ms e2eFull(all/fresh/servo)=" << snapshot->control_total_latency_full_ms
+                  << "/" << snapshot->control_fresh_latency_full_ms
+                  << "/" << snapshot->control_servo_latency_full_ms
+                  << "ms e2eFullIn(all/fresh/servo)=" << snapshot->control_total_apply_latency_full_ms
+                  << "/" << snapshot->control_fresh_apply_latency_full_ms
+                  << "/" << snapshot->control_servo_apply_latency_full_ms
                   << "ms drop(stale/mode)=" << snapshot->control_stale_drop
                   << "/" << snapshot->control_mode_drop
                   << " aimPipe=" << snapshot->infer_cmd_ms

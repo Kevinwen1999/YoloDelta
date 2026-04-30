@@ -23,6 +23,18 @@ std::optional<int> envInt(const char* key) {
     }
 }
 
+std::optional<double> envDouble(const char* key) {
+    const char* raw = std::getenv(key);
+    if (raw == nullptr || *raw == '\0') {
+        return std::nullopt;
+    }
+    try {
+        return std::stod(raw);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 std::optional<bool> envBool(const char* key) {
     const char* raw = std::getenv(key);
     if (raw == nullptr || *raw == '\0') {
@@ -61,6 +73,18 @@ int main() {
         if (const auto tensorrt_inline_fresh_only = envBool("DELTA_TENSORRT_INLINE_FRESH_ONLY");
             tensorrt_inline_fresh_only.has_value()) {
             runtime.tensorrt_inline_fresh_only_enable = *tensorrt_inline_fresh_only;
+        }
+        if (const auto display_rate_servo = envBool("DELTA_DISPLAY_RATE_SERVO");
+            display_rate_servo.has_value()) {
+            runtime.display_rate_servo_enable = *display_rate_servo;
+        }
+        if (const auto display_rate_servo_hz = envDouble("DELTA_DISPLAY_RATE_SERVO_HZ");
+            display_rate_servo_hz.has_value()) {
+            runtime.display_rate_servo_hz = std::max(0.0, *display_rate_servo_hz);
+        }
+        if (const auto display_rate_servo_max_age_ms = envDouble("DELTA_DISPLAY_RATE_SERVO_MAX_TARGET_AGE_MS");
+            display_rate_servo_max_age_ms.has_value()) {
+            runtime.display_rate_servo_max_target_age_ms = std::max(0.0, *display_rate_servo_max_age_ms);
         }
         delta::DeltaApp app(config, runtime);
         return app.run();

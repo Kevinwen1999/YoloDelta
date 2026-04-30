@@ -170,6 +170,9 @@ struct RuntimeConfig {
     bool async_gpu_capture_fresh_only_enable = true;
     bool tensorrt_inline_fresh_only_enable = true;
     bool capture_freeze_to_center_enable = true;
+    bool display_rate_servo_enable = true;
+    double display_rate_servo_hz = 0.0;
+    double display_rate_servo_max_target_age_ms = 35.0;
     float body_y_ratio = 0.15F;
     float head_x_ratio = 0.50F;
     float head_y_ratio = 0.50F;

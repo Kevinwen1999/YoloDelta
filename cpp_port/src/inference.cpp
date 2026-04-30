@@ -812,9 +812,11 @@ void OnnxRuntimeEngine::Impl::createSession(const bool use_tensorrt) {
         if (use_tensorrt) {
             std::cout << "[inference] TensorRT engine initialization can take a while on a new model. "
                          "Set DELTA_ONNX_PROVIDER=cuda to skip TensorRT.\n";
+#if defined(DELTA_WITH_CUDA_PIPELINE)
             if (trt_cuda_graph_requested && ort_stream != nullptr) {
                 std::cout << "[inference] TensorRT CUDA graph requested; leaving user_compute_stream unset so capture stays inside TensorRT.\n";
             }
+#endif
             if (ort_cuda_graph_requested) {
                 std::cout << "[inference] ORT CUDA graph disabled on CUDA fallback provider while TensorRT EP is active.\n";
             }
@@ -1268,17 +1270,20 @@ Ort::Value OnnxRuntimeEngine::Impl::makeGpuInput(const GpuFramePacket& frame) {
 
 InferenceResult OnnxRuntimeEngine::Impl::predictGpu(const GpuFramePacket& frame, const int target_class) {
     InferenceResult result{};
+#if !defined(DELTA_WITH_CUDA_PIPELINE)
+    (void)frame;
+    (void)target_class;
+    return result;
+#else
     if (!session || !gpu_input_ready || frame.device_ptr == nullptr || frame.width <= 0 || frame.height <= 0) {
         return result;
     }
 
     const auto t0 = SteadyClock::now();
     updateGpuInput(frame);
-#if defined(DELTA_WITH_CUDA_PIPELINE)
     if (session_uses_tensorrt && trt_cuda_graph_requested && ort_stream != nullptr) {
         checkCuda(cudaStreamSynchronize(ort_stream), "cudaStreamSynchronize(trt graph input)");
     }
-#endif
     const auto t1 = SteadyClock::now();
     result.timings.preprocess_ms = ms(t0, t1);
 
@@ -1405,6 +1410,7 @@ InferenceResult OnnxRuntimeEngine::Impl::predictGpu(const GpuFramePacket& frame,
     }
     result.timings.postprocess_ms = ms(t4, SteadyClock::now());
     return result;
+#endif
 }
 
 std::optional<std::vector<Detection>> OnnxRuntimeEngine::Impl::decodeNms(
