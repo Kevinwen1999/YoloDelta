@@ -68,6 +68,12 @@ struct RuntimePerfWindow {
     double infer_backend_post_s = 0.0;
     std::uint64_t infer_cmd_samples = 0;
     double infer_cmd_latency_s = 0.0;
+    std::uint64_t kalman_samples = 0;
+    double kalman_residual_px = 0.0;
+    double kalman_max_residual_px = 0.0;
+    double kalman_prediction_age_s = 0.0;
+    std::uint64_t kalman_predicted_only = 0;
+    std::uint64_t kalman_snap = 0;
 
     std::uint64_t control_cmds = 0;
     std::uint64_t control_sent = 0;
@@ -149,6 +155,12 @@ struct RuntimePerfWindow {
         infer_backend_post_s = 0.0;
         infer_cmd_samples = 0;
         infer_cmd_latency_s = 0.0;
+        kalman_samples = 0;
+        kalman_residual_px = 0.0;
+        kalman_max_residual_px = 0.0;
+        kalman_prediction_age_s = 0.0;
+        kalman_predicted_only = 0;
+        kalman_snap = 0;
 
         control_cmds = 0;
         control_sent = 0;
@@ -218,6 +230,9 @@ constexpr float kTrackerReinitMinIou = 0.35F;
 constexpr float kAssocPredictDt = 0.02F;
 constexpr float kAssocSpeedJumpGain = 0.05F;
 constexpr float kAssocMaxJumpPad = 220.0F;
+constexpr float kKalmanSnapMinPx = 120.0F;
+constexpr float kKalmanSnapBoxScale = 1.25F;
+constexpr int kKalmanServoWarmupMeasurements = 3;
 constexpr bool kPerfLogWhenModeOff = true;
 
 enum class ControlPerfKind {
@@ -457,6 +472,13 @@ bool pidRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rh
         || lhs.predictive_pid_deadzone_exit_px != rhs.predictive_pid_deadzone_exit_px;
 }
 
+bool trackerRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rhs) {
+    return lhs.tracking_strategy != rhs.tracking_strategy
+        || lhs.kalman_prediction_enable != rhs.kalman_prediction_enable
+        || lhs.kalman_process_noise != rhs.kalman_process_noise
+        || lhs.kalman_measurement_noise != rhs.kalman_measurement_noise;
+}
+
 DebugPreviewSnapshot makeInactiveDebugPreviewSnapshot(
     const CaptureRegion& capture_region,
     const std::pair<int, int> center) {
@@ -499,6 +521,12 @@ void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, 
     shared.pid_settle_threshold_px = 0.0F;
     shared.lead_active = false;
     shared.lead_time_ms = 0.0F;
+    shared.kalman_prediction_enable = false;
+    shared.kalman_residual_px = 0.0F;
+    shared.kalman_max_residual_px = 0.0F;
+    shared.kalman_prediction_age_ms = 0.0F;
+    shared.kalman_predicted_only_frames = 0;
+    shared.kalman_snap_count = 0;
     shared.predictive_pid_latency_ms = 0.0F;
     shared.predictive_pid_horizon_ms = 0.0F;
     shared.predictive_pid_deadzone_active = false;
@@ -668,6 +696,11 @@ struct PerfLogSnapshot {
     double infer_backend_exec_ms = 0.0;
     double infer_backend_post_ms = 0.0;
     double infer_cmd_ms = 0.0;
+    double kalman_residual_px = 0.0;
+    double kalman_max_residual_px = 0.0;
+    double kalman_prediction_age_ms = 0.0;
+    std::uint64_t kalman_predicted_only = 0;
+    std::uint64_t kalman_snap = 0;
     double control_send_hz = 0.0;
     double control_fresh_hz = 0.0;
     double control_servo_hz = 0.0;
@@ -891,6 +924,25 @@ void recordAimSchedulerPerf(
     }
 }
 
+void recordKalmanPerf(
+    RuntimePerfWindow& perf,
+    const TrackerDiagnostics& diagnostics,
+    const bool predicted_only,
+    const std::uint64_t snap_delta) {
+    std::lock_guard<std::mutex> lock(perf.mutex);
+    if (!diagnostics.kalman_active) {
+        return;
+    }
+    ++perf.kalman_samples;
+    perf.kalman_residual_px += std::max(0.0F, diagnostics.residual_px);
+    perf.kalman_max_residual_px = std::max(perf.kalman_max_residual_px, static_cast<double>(diagnostics.residual_px));
+    perf.kalman_prediction_age_s += std::max(0.0F, diagnostics.prediction_age_s);
+    if (predicted_only) {
+        ++perf.kalman_predicted_only;
+    }
+    perf.kalman_snap += snap_delta;
+}
+
 std::optional<PerfLogSnapshot> takePerfSnapshot(RuntimePerfWindow& perf, const double min_interval_s) {
     const auto now = SteadyClock::now();
     std::lock_guard<std::mutex> lock(perf.mutex);
@@ -949,6 +1001,11 @@ std::optional<PerfLogSnapshot> takePerfSnapshot(RuntimePerfWindow& perf, const d
     snapshot.infer_backend_exec_ms = perf.infer_backend_samples > 0 ? (perf.infer_backend_exec_s * 1000.0 / static_cast<double>(perf.infer_backend_samples)) : 0.0;
     snapshot.infer_backend_post_ms = perf.infer_backend_samples > 0 ? (perf.infer_backend_post_s * 1000.0 / static_cast<double>(perf.infer_backend_samples)) : 0.0;
     snapshot.infer_cmd_ms = perf.infer_cmd_samples > 0 ? (perf.infer_cmd_latency_s * 1000.0 / static_cast<double>(perf.infer_cmd_samples)) : 0.0;
+    snapshot.kalman_residual_px = perf.kalman_samples > 0 ? (perf.kalman_residual_px / static_cast<double>(perf.kalman_samples)) : 0.0;
+    snapshot.kalman_max_residual_px = perf.kalman_max_residual_px;
+    snapshot.kalman_prediction_age_ms = perf.kalman_samples > 0 ? (perf.kalman_prediction_age_s * 1000.0 / static_cast<double>(perf.kalman_samples)) : 0.0;
+    snapshot.kalman_predicted_only = perf.kalman_predicted_only;
+    snapshot.kalman_snap = perf.kalman_snap;
     snapshot.control_send_hz = elapsed > 0.0 ? static_cast<double>(perf.control_sent) / elapsed : 0.0;
     snapshot.control_fresh_hz = elapsed > 0.0 ? static_cast<double>(perf.control_fresh_sent) / elapsed : 0.0;
     snapshot.control_servo_hz = elapsed > 0.0 ? static_cast<double>(perf.control_servo_sent) / elapsed : 0.0;
@@ -1293,9 +1350,15 @@ void DeltaApp::inferenceLoop() {
         RuntimeConfig last_pid_runtime = runtime;
         double last_capture_cached_timeout_ms = runtime.capture_cached_timeout_ms;
         std::uint64_t last_reset_token = runtime_store_.resetToken();
+        RuntimeConfig last_tracker_runtime = runtime;
         TrackingStrategy last_tracking_strategy = runtime.tracking_strategy;
         AimMode last_aim_mode = runtime.aim_mode;
-        auto tracker = makeTargetTracker(last_tracking_strategy, trackerVelocityAlpha(runtime));
+        auto tracker = makeTargetTracker(
+            last_tracking_strategy,
+            trackerVelocityAlpha(runtime),
+            runtime.kalman_prediction_enable,
+            runtime.kalman_process_noise,
+            runtime.kalman_measurement_noise);
         TargetGuardState target_guard_state{};
         TargetLeadState target_lead_state{};
         PIDSettleState pid_settle_state{};
@@ -1306,6 +1369,7 @@ void DeltaApp::inferenceLoop() {
         std::optional<std::array<int, 4>> last_target_bbox;
         SteadyClock::time_point last_pid_tick{};
         SteadyClock::time_point last_track_tick{};
+        std::uint64_t last_kalman_snap_count = 0;
         bool last_debug_preview_enabled = runtime.debug_preview_enable;
         bool last_debug_overlay_enabled = runtime.debug_overlay_enable;
         bool preview_idle_state = true;
@@ -1383,6 +1447,8 @@ void DeltaApp::inferenceLoop() {
 
             if (reset_token != last_reset_token) {
                 resetPidControllers();
+                tracker->reset();
+                last_kalman_snap_count = 0;
                 target_guard_state.reset();
                 target_lead_state.reset();
                 last_reset_token = reset_token;
@@ -1395,9 +1461,17 @@ void DeltaApp::inferenceLoop() {
                 target_lead_state.reset();
             }
 
-            tracker->configure(trackerVelocityAlpha(runtime));
-            if (runtime.tracking_strategy != last_tracking_strategy) {
-                tracker = makeTargetTracker(runtime.tracking_strategy, trackerVelocityAlpha(runtime));
+            tracker->configure(
+                trackerVelocityAlpha(runtime),
+                runtime.kalman_process_noise,
+                runtime.kalman_measurement_noise);
+            if (trackerRuntimeSettingsChanged(runtime, last_tracker_runtime)) {
+                tracker = makeTargetTracker(
+                    runtime.tracking_strategy,
+                    trackerVelocityAlpha(runtime),
+                    runtime.kalman_prediction_enable,
+                    runtime.kalman_process_noise,
+                    runtime.kalman_measurement_noise);
                 resetPidControllers();
                 resetAimTrackingState(
                     lost_frames,
@@ -1410,11 +1484,13 @@ void DeltaApp::inferenceLoop() {
                 target_guard_state.reset();
                 target_lead_state.reset();
                 command_slot_.clear();
+                last_kalman_snap_count = 0;
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     clearAimStateLocked(shared_, center, runtime.tracking_strategy);
                 }
                 last_tracking_strategy = runtime.tracking_strategy;
+                last_tracker_runtime = runtime;
                 if (debug_visuals_enabled) {
                     publishDebugSnapshot(makeInactiveDebugPreviewSnapshot(
                         buildCaptureRegion(config_, center.first, center.second),
@@ -1811,17 +1887,33 @@ void DeltaApp::inferenceLoop() {
             tracker->predict(dt);
 
             bool trigger_fire = false;
+            bool kalman_predicted_only = false;
+            std::uint64_t kalman_snap_delta = 0;
             if (sticky.has_value() && sticky->detection.has_value()) {
                 if (target_switched) {
                     resetPidControllers(now_tick);
+                    last_kalman_snap_count = 0;
                 }
                 if (!tracking_enabled || target_switched) {
                     tracker->reset();
                 }
-                tracker->update(sticky->detection->x, sticky->detection->y);
+                const float selected_box_w = static_cast<float>(std::max(
+                    1,
+                    sticky->detection->bbox[2] - sticky->detection->bbox[0]));
+                const float kalman_snap_threshold_px = runtime.kalman_prediction_enable
+                    ? std::max(kKalmanSnapMinPx, selected_box_w * kKalmanSnapBoxScale)
+                    : 0.0F;
+                tracker->update(sticky->detection->x, sticky->detection->y, kalman_snap_threshold_px);
+                const TrackerDiagnostics diagnostics = tracker->diagnostics();
+                if (diagnostics.snap_count >= last_kalman_snap_count) {
+                    kalman_snap_delta = diagnostics.snap_count - last_kalman_snap_count;
+                } else {
+                    kalman_snap_delta = diagnostics.snap_count;
+                }
+                last_kalman_snap_count = diagnostics.snap_count;
                 active_target_cls = sticky->detection->cls;
                 lost_frames = 0;
-                last_box_w = static_cast<float>(std::max(1, sticky->detection->bbox[2] - sticky->detection->bbox[0]));
+                last_box_w = selected_box_w;
                 last_box_h = static_cast<float>(std::max(1, sticky->detection->bbox[3] - sticky->detection->bbox[1]));
                 last_target_bbox = sticky->detection->bbox;
                 if (target_switched
@@ -1870,6 +1962,7 @@ void DeltaApp::inferenceLoop() {
                 if (lost_frames > runtime.target_max_lost_frames) {
                     app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
                     tracker->reset();
+                    last_kalman_snap_count = 0;
                     resetPidControllers();
                     resetAimTrackingState(
                         lost_frames,
@@ -1909,7 +2002,13 @@ void DeltaApp::inferenceLoop() {
                     }
                     continue;
                 }
+                kalman_predicted_only = runtime.kalman_prediction_enable;
                 app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
+            }
+
+            const TrackerDiagnostics tracker_diagnostics = tracker->diagnostics();
+            if (perf_ && runtime.kalman_prediction_enable) {
+                recordKalmanPerf(*perf_, tracker_diagnostics, kalman_predicted_only, kalman_snap_delta);
             }
 
             const auto aim_predict_start = SteadyClock::now();
@@ -2211,6 +2310,23 @@ void DeltaApp::inferenceLoop() {
                 pid_threshold_px = pid_settle.dynamic_threshold_px;
             }
 
+            if (runtime.kalman_prediction_enable
+                && tracker_diagnostics.kalman_active
+                && !target_lead_prediction.has_value()) {
+                if (tracker_diagnostics.measurement_updates >= kKalmanServoWarmupMeasurements) {
+                    servo_velocity_x = tracker_state.vx;
+                    servo_velocity_y = tracker_state.vy;
+                    servo_acceleration_x = 0.0F;
+                    servo_acceleration_y = 0.0F;
+                    speed = std::sqrt((servo_velocity_x * servo_velocity_x) + (servo_velocity_y * servo_velocity_y));
+                } else {
+                    servo_velocity_x = 0.0F;
+                    servo_velocity_y = 0.0F;
+                    servo_acceleration_x = 0.0F;
+                    servo_acceleration_y = 0.0F;
+                }
+            }
+
             dx = engage_active
                 ? static_cast<int>(std::lround(clamp(
                     desired_x,
@@ -2244,6 +2360,12 @@ void DeltaApp::inferenceLoop() {
                 shared_.pid_settle_threshold_px = pid_threshold_px;
                 shared_.lead_active = target_lead_prediction.has_value() && target_lead_prediction->active;
                 shared_.lead_time_ms = target_lead_prediction.has_value() ? (target_lead_prediction->lead_time_s * 1000.0F) : 0.0F;
+                shared_.kalman_prediction_enable = runtime.kalman_prediction_enable && tracker_diagnostics.kalman_active;
+                shared_.kalman_residual_px = tracker_diagnostics.residual_px;
+                shared_.kalman_max_residual_px = tracker_diagnostics.max_residual_px;
+                shared_.kalman_prediction_age_ms = tracker_diagnostics.prediction_age_s * 1000.0F;
+                shared_.kalman_predicted_only_frames = tracker_diagnostics.predicted_only_frames;
+                shared_.kalman_snap_count = tracker_diagnostics.snap_count;
                 shared_.predictive_pid_latency_ms = predictive_pid_latency_ms;
                 shared_.predictive_pid_horizon_ms = predictive_pid_horizon_ms;
                 shared_.predictive_pid_deadzone_active = predictive_pid_deadzone_active;
@@ -2290,6 +2412,13 @@ void DeltaApp::inferenceLoop() {
                     preview_snapshot.locked_point = *locked_point;
                 }
                 preview_snapshot.predicted_point = std::make_pair(predicted_x, aim_y);
+                if (runtime.kalman_prediction_enable && tracker_diagnostics.kalman_active) {
+                    preview_snapshot.kalman_filtered_point = std::make_pair(tracker_state.x, tracker_state.y);
+                    preview_snapshot.kalman_predicted_point = std::make_pair(predicted_x, aim_y);
+                    if (!target_lead_prediction.has_value() && sticky.has_value() && sticky->detection.has_value()) {
+                        preview_snapshot.detected_point = std::make_pair(sticky->detection->x, sticky->detection->y);
+                    }
+                }
                 if (target_lead_prediction.has_value()) {
                     preview_snapshot.detected_point = target_lead_prediction->detected_point;
                     preview_snapshot.lead_time_s = target_lead_prediction->lead_time_s;
@@ -3166,7 +3295,14 @@ void DeltaApp::perfLoop() {
                       << snapshot->infer_backend_exec_ms << "/"
                       << snapshot->infer_backend_post_ms << "ms";
         }
-        std::cout << " | totalCtl=" << snapshot->control_send_hz
+        std::cout << " | kalman(on/resid/maxResid/predAge/drop/snap)="
+                  << (runtime.kalman_prediction_enable ? 1 : 0)
+                  << "/" << snapshot->kalman_residual_px
+                  << "/" << snapshot->kalman_max_residual_px
+                  << "/" << snapshot->kalman_prediction_age_ms
+                  << "/" << snapshot->kalman_predicted_only
+                  << "/" << snapshot->kalman_snap
+                  << " | totalCtl=" << snapshot->control_send_hz
                   << "Hz freshCtl=" << snapshot->control_fresh_hz
                   << "Hz servoCtl=" << snapshot->control_servo_hz
                   << "Hz send=" << snapshot->control_send_ms

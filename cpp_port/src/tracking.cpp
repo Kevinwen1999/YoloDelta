@@ -11,6 +11,7 @@ namespace {
 constexpr float kMinDt = 1.0F / 240.0F;
 constexpr float kMaxDt = 0.06F;
 constexpr float kMaxSpeed = 1800.0F;
+constexpr float kMinVariance = 1e-9F;
 constexpr float kPidSettleThresholdSharpness = 5.0F;
 constexpr int kBodyClass = 0;
 constexpr int kHeadClass = 1;
@@ -283,11 +284,16 @@ LegacyPidStatus makeLegacyPidStatus(const LegacyPidAxisResult& x_axis, const Leg
 
 ObservedMotionTracker::ObservedMotionTracker(const TrackingStrategy mode, const float velocity_alpha)
     : mode_(mode) {
-    configure(velocity_alpha);
+    configure(velocity_alpha, 0.0F, 0.0F);
     reset();
 }
 
-void ObservedMotionTracker::configure(const float velocity_alpha) {
+void ObservedMotionTracker::configure(
+    const float velocity_alpha,
+    const float process_noise,
+    const float measurement_noise) {
+    (void)process_noise;
+    (void)measurement_noise;
     velocity_alpha_ = clamp(velocity_alpha, 0.0F, 1.0F);
 }
 
@@ -304,7 +310,8 @@ void ObservedMotionTracker::predict(const float dt) {
     last_dt_ = clamp(dt, kMinDt, kMaxDt);
 }
 
-void ObservedMotionTracker::update(const float x, const float y) {
+void ObservedMotionTracker::update(const float x, const float y, const float snap_threshold_px) {
+    (void)snap_threshold_px;
     if (!initialized_) {
         state_.x = x;
         state_.y = y;
@@ -345,6 +352,12 @@ TrackerState ObservedMotionTracker::state() const {
     return state_;
 }
 
+TrackerDiagnostics ObservedMotionTracker::diagnostics() const {
+    return TrackerDiagnostics{
+        .measurement_updates = measurement_updates_,
+    };
+}
+
 float ObservedMotionTracker::feedforwardScale() const {
     if (mode_ == TrackingStrategy::Raw) {
         return 0.0F;
@@ -362,10 +375,261 @@ bool ObservedMotionTracker::initialized() const {
     return initialized_;
 }
 
-std::unique_ptr<ITargetTracker> makeTargetTracker(const TrackingStrategy strategy, const float velocity_alpha) {
+KalmanTargetTracker::KalmanTargetTracker(
+    const TrackingStrategy mode,
+    const float velocity_alpha,
+    const float process_noise,
+    const float measurement_noise)
+    : mode_(mode) {
+    configure(velocity_alpha, process_noise, measurement_noise);
+    reset();
+}
+
+void KalmanTargetTracker::configure(
+    const float velocity_alpha,
+    const float process_noise,
+    const float measurement_noise) {
+    velocity_alpha_ = clamp(velocity_alpha, 0.0F, 1.0F);
+    process_noise_ = std::max(0.0F, std::isfinite(process_noise) ? process_noise : 0.0F);
+    measurement_noise_ = std::max(kMinVariance, std::isfinite(measurement_noise) ? measurement_noise : 16.0F);
+}
+
+void KalmanTargetTracker::reset() {
+    state_ = {};
+    for (auto& row : covariance_) {
+        for (float& value : row) {
+            value = 0.0F;
+        }
+    }
+    last_dt_ = kMinDt;
+    prediction_age_s_ = 0.0F;
+    residual_px_ = 0.0F;
+    max_residual_px_ = 0.0F;
+    initialized_ = false;
+    measurement_updates_ = 0;
+    predicted_only_frames_ = 0;
+    snap_count_ = 0;
+}
+
+void KalmanTargetTracker::resetToMeasurement(const float x, const float y) {
+    state_ = {};
+    state_.x = x;
+    state_.y = y;
+
+    for (auto& row : covariance_) {
+        for (float& value : row) {
+            value = 0.0F;
+        }
+    }
+    const float position_variance = measurement_noise_;
+    const float velocity_variance = std::max(100.0F, process_noise_ * 100.0F);
+    covariance_[0][0] = position_variance;
+    covariance_[1][1] = position_variance;
+    covariance_[2][2] = velocity_variance;
+    covariance_[3][3] = velocity_variance;
+
+    prediction_age_s_ = 0.0F;
+    predicted_only_frames_ = 0;
+    initialized_ = true;
+    measurement_updates_ = 1;
+}
+
+void KalmanTargetTracker::clampVelocity() {
+    if (mode_ == TrackingStrategy::Raw) {
+        state_.vx = 0.0F;
+        state_.vy = 0.0F;
+        return;
+    }
+    state_.vx = clamp(state_.vx, -kMaxSpeed, kMaxSpeed);
+    state_.vy = clamp(state_.vy, -kMaxSpeed, kMaxSpeed);
+}
+
+void KalmanTargetTracker::predict(const float dt) {
+    last_dt_ = clamp(dt, kMinDt, kMaxDt);
+    if (!initialized_) {
+        return;
+    }
+
+    const float t = last_dt_;
+    state_.x += state_.vx * t;
+    state_.y += state_.vy * t;
+
+    const float f[4][4] = {
+        {1.0F, 0.0F, t, 0.0F},
+        {0.0F, 1.0F, 0.0F, t},
+        {0.0F, 0.0F, 1.0F, 0.0F},
+        {0.0F, 0.0F, 0.0F, 1.0F},
+    };
+    float temp[4][4]{};
+    float next[4][4]{};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            for (int k = 0; k < 4; ++k) {
+                temp[r][c] += f[r][k] * covariance_[k][c];
+            }
+        }
+    }
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            for (int k = 0; k < 4; ++k) {
+                next[r][c] += temp[r][k] * f[c][k];
+            }
+        }
+    }
+
+    const float q = process_noise_;
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    const float t4 = t2 * t2;
+    next[0][0] += q * (t4 * 0.25F);
+    next[0][2] += q * (t3 * 0.5F);
+    next[1][1] += q * (t4 * 0.25F);
+    next[1][3] += q * (t3 * 0.5F);
+    next[2][0] += q * (t3 * 0.5F);
+    next[2][2] += q * t2;
+    next[3][1] += q * (t3 * 0.5F);
+    next[3][3] += q * t2;
+
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            covariance_[r][c] = next[r][c];
+        }
+    }
+    clampVelocity();
+    prediction_age_s_ += t;
+    ++predicted_only_frames_;
+}
+
+void KalmanTargetTracker::update(const float x, const float y, const float snap_threshold_px) {
+    if (!initialized_) {
+        residual_px_ = 0.0F;
+        resetToMeasurement(x, y);
+        return;
+    }
+
+    const float innovation_x = x - state_.x;
+    const float innovation_y = y - state_.y;
+    residual_px_ = hypot2(innovation_x, innovation_y);
+    max_residual_px_ = std::max(max_residual_px_, residual_px_);
+
+    if (snap_threshold_px > 0.0F && residual_px_ > snap_threshold_px) {
+        resetToMeasurement(x, y);
+        ++snap_count_;
+        return;
+    }
+
+    const float s00 = covariance_[0][0] + measurement_noise_;
+    const float s01 = covariance_[0][1];
+    const float s10 = covariance_[1][0];
+    const float s11 = covariance_[1][1] + measurement_noise_;
+    const float det = (s00 * s11) - (s01 * s10);
+    if (std::abs(det) <= 1e-9F) {
+        resetToMeasurement(x, y);
+        ++snap_count_;
+        return;
+    }
+    const float inv00 = s11 / det;
+    const float inv01 = -s01 / det;
+    const float inv10 = -s10 / det;
+    const float inv11 = s00 / det;
+
+    float gain[4][2]{};
+    for (int r = 0; r < 4; ++r) {
+        gain[r][0] = (covariance_[r][0] * inv00) + (covariance_[r][1] * inv10);
+        gain[r][1] = (covariance_[r][0] * inv01) + (covariance_[r][1] * inv11);
+    }
+
+    state_.x += (gain[0][0] * innovation_x) + (gain[0][1] * innovation_y);
+    state_.y += (gain[1][0] * innovation_x) + (gain[1][1] * innovation_y);
+    const float pre_vx = state_.vx;
+    const float pre_vy = state_.vy;
+    state_.vx += (gain[2][0] * innovation_x) + (gain[2][1] * innovation_y);
+    state_.vy += (gain[3][0] * innovation_x) + (gain[3][1] * innovation_y);
+    clampVelocity();
+    if (velocity_alpha_ < 1.0F - 1e-6F && measurement_updates_ > 1) {
+        state_.vx = ((1.0F - velocity_alpha_) * pre_vx) + (velocity_alpha_ * state_.vx);
+        state_.vy = ((1.0F - velocity_alpha_) * pre_vy) + (velocity_alpha_ * state_.vy);
+    }
+
+    float ikh[4][4] = {
+        {1.0F, 0.0F, 0.0F, 0.0F},
+        {0.0F, 1.0F, 0.0F, 0.0F},
+        {0.0F, 0.0F, 1.0F, 0.0F},
+        {0.0F, 0.0F, 0.0F, 1.0F},
+    };
+    for (int r = 0; r < 4; ++r) {
+        ikh[r][0] -= gain[r][0];
+        ikh[r][1] -= gain[r][1];
+    }
+
+    float next[4][4]{};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            for (int k = 0; k < 4; ++k) {
+                next[r][c] += ikh[r][k] * covariance_[k][c];
+            }
+        }
+    }
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            covariance_[r][c] = 0.5F * (next[r][c] + next[c][r]);
+        }
+    }
+
+    prediction_age_s_ = 0.0F;
+    predicted_only_frames_ = 0;
+    ++measurement_updates_;
+}
+
+TrackerState KalmanTargetTracker::state() const {
+    return state_;
+}
+
+TrackerDiagnostics KalmanTargetTracker::diagnostics() const {
+    return TrackerDiagnostics{
+        .kalman_active = initialized_,
+        .residual_px = residual_px_,
+        .max_residual_px = max_residual_px_,
+        .prediction_age_s = prediction_age_s_,
+        .predicted_only_frames = predicted_only_frames_,
+        .measurement_updates = measurement_updates_,
+        .snap_count = snap_count_,
+    };
+}
+
+float KalmanTargetTracker::feedforwardScale() const {
+    if (mode_ == TrackingStrategy::Raw) {
+        return 0.0F;
+    }
+    const int warm_min = 1;
+    const int warm_ramp = 3;
+    const int updates = std::max(0, measurement_updates_ - warm_min);
+    if (updates <= 0) {
+        return 0.0F;
+    }
+    return clamp(static_cast<float>(updates) / static_cast<float>(warm_ramp), 0.0F, 1.0F);
+}
+
+bool KalmanTargetTracker::initialized() const {
+    return initialized_;
+}
+
+std::unique_ptr<ITargetTracker> makeTargetTracker(
+    const TrackingStrategy strategy,
+    const float velocity_alpha,
+    const bool kalman_prediction_enable,
+    const float kalman_process_noise,
+    const float kalman_measurement_noise) {
     const TrackingStrategy tracker_mode = (strategy == TrackingStrategy::LegacyPid || strategy == TrackingStrategy::PredictivePid)
         ? TrackingStrategy::RawDelta
         : strategy;
+    if (kalman_prediction_enable) {
+        return std::make_unique<KalmanTargetTracker>(
+            tracker_mode,
+            velocity_alpha,
+            kalman_process_noise,
+            kalman_measurement_noise);
+    }
     return std::make_unique<ObservedMotionTracker>(tracker_mode, velocity_alpha);
 }
 

@@ -26,6 +26,8 @@ struct DebugPreviewSnapshot {
     std::optional<std::pair<float, float>> locked_point;
     std::optional<std::pair<float, float>> detected_point;
     std::optional<std::pair<float, float>> predicted_point;
+    std::optional<std::pair<float, float>> kalman_filtered_point;
+    std::optional<std::pair<float, float>> kalman_predicted_point;
     std::optional<float> lead_time_s;
     bool lead_active = false;
     bool detected_point_stale = false;

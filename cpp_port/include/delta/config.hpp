@@ -205,9 +205,9 @@ struct RuntimeConfig {
     float predictive_pid_kp = 0.6F;
     float predictive_pid_ki = 0.0F;
     float predictive_pid_kd = 0.005F;
-    float predictive_pid_pred_weight_x = 0.75F;
-    float predictive_pid_pred_weight_y = 0.75F;
-    float predictive_pid_init_scale = 0.5F;
+    float predictive_pid_pred_weight_x = 0.4F;
+    float predictive_pid_pred_weight_y = 0.4F;
+    float predictive_pid_init_scale = 0.7F;
     float predictive_pid_ramp_time_s = 0.25F;
     float predictive_pid_integral_limit = 200.0F;
     float predictive_pid_derivative_limit = 75.0F;
@@ -218,7 +218,7 @@ struct RuntimeConfig {
     float predictive_pid_max_acceleration_px_s = 5000000.0F;
     float predictive_pid_reverse_gate_px = 20.0F;
     float predictive_pid_reverse_scale = 0.01F;
-    float predictive_pid_prediction_error_scale = 2.0F;
+    float predictive_pid_prediction_error_scale = 100000.0F;
     float predictive_pid_prediction_min_px = 1.0F;
     float predictive_pid_prediction_max_px = 1000000.0F;
     bool predictive_pid_latency_comp_enable = true;
@@ -246,8 +246,9 @@ struct RuntimeConfig {
     float model_conf = 0.50F;
     float detection_min_conf = 0.50F;
     float detection_box_scale = 1.0F;
-    float kalman_process_noise = 1.5F;
-    float kalman_measurement_noise = 16.0F;
+    bool kalman_prediction_enable = false;
+    float kalman_process_noise = 0.1F;
+    float kalman_measurement_noise = 10.0F;
     bool ego_motion_comp_enable = true;
     float ego_motion_comp_gain_x = 0.3F;
     float ego_motion_comp_gain_y = 0.3F;

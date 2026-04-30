@@ -609,6 +609,34 @@ private:
             const POINT detected = mapPoint(layout, snapshot.capture_region, snapshot.detected_point->first, snapshot.detected_point->second);
             drawMarker(dc, detected, snapshot.detected_point_stale ? RGB(112, 172, 112) : RGB(111, 231, 150), 6);
         }
+        if (snapshot.kalman_filtered_point.has_value()) {
+            const POINT filtered = mapPoint(
+                layout,
+                snapshot.capture_region,
+                snapshot.kalman_filtered_point->first,
+                snapshot.kalman_filtered_point->second);
+            drawMarker(dc, filtered, RGB(172, 128, 255), 6);
+        }
+        if (snapshot.kalman_predicted_point.has_value()) {
+            const POINT kalman_predicted = mapPoint(
+                layout,
+                snapshot.capture_region,
+                snapshot.kalman_predicted_point->first,
+                snapshot.kalman_predicted_point->second);
+            drawMarker(dc, kalman_predicted, RGB(255, 102, 204), 5);
+            if (snapshot.kalman_filtered_point.has_value()) {
+                const POINT filtered = mapPoint(
+                    layout,
+                    snapshot.capture_region,
+                    snapshot.kalman_filtered_point->first,
+                    snapshot.kalman_filtered_point->second);
+                HPEN pen = CreatePen(PS_SOLID, 1, RGB(202, 146, 255));
+                ScopedDeleteObject pen_cleanup(pen);
+                ScopedSelectObject select_pen(dc, pen);
+                MoveToEx(dc, filtered.x, filtered.y, nullptr);
+                LineTo(dc, kalman_predicted.x, kalman_predicted.y);
+            }
+        }
         if (snapshot.predicted_point.has_value()) {
             const POINT predicted = mapPoint(layout, snapshot.capture_region, snapshot.predicted_point->first, snapshot.predicted_point->second);
             drawMarker(dc, predicted, snapshot.lead_active ? RGB(255, 146, 96) : RGB(255, 122, 122), 6);

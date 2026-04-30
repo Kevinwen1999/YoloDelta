@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <memory>
 #include <vector>
@@ -116,6 +117,16 @@ struct LegacyPidStatus {
     float speed = 0.0F;
 };
 
+struct TrackerDiagnostics {
+    bool kalman_active = false;
+    float residual_px = 0.0F;
+    float max_residual_px = 0.0F;
+    float prediction_age_s = 0.0F;
+    int predicted_only_frames = 0;
+    int measurement_updates = 0;
+    std::uint64_t snap_count = 0;
+};
+
 float legacyPidDynamicThresholdPx(const LegacyPidConfig& config, float box_width_px, float capture_width_px);
 LegacyPidAxisResult updateLegacyPidAxis(
     LegacyPidAxisState& state,
@@ -129,11 +140,12 @@ LegacyPidStatus makeLegacyPidStatus(const LegacyPidAxisResult& x_axis, const Leg
 class ITargetTracker {
 public:
     virtual ~ITargetTracker() = default;
-    virtual void configure(float velocity_alpha) = 0;
+    virtual void configure(float velocity_alpha, float process_noise, float measurement_noise) = 0;
     virtual void reset() = 0;
     virtual void predict(float dt) = 0;
-    virtual void update(float x, float y) = 0;
+    virtual void update(float x, float y, float snap_threshold_px = 0.0F) = 0;
     virtual TrackerState state() const = 0;
+    virtual TrackerDiagnostics diagnostics() const = 0;
     virtual float feedforwardScale() const = 0;
     virtual bool initialized() const = 0;
 };
@@ -142,11 +154,12 @@ class ObservedMotionTracker final : public ITargetTracker {
 public:
     explicit ObservedMotionTracker(TrackingStrategy mode, float velocity_alpha);
 
-    void configure(float velocity_alpha) override;
+    void configure(float velocity_alpha, float process_noise, float measurement_noise) override;
     void reset() override;
     void predict(float dt) override;
-    void update(float x, float y) override;
+    void update(float x, float y, float snap_threshold_px = 0.0F) override;
     TrackerState state() const override;
+    TrackerDiagnostics diagnostics() const override;
     float feedforwardScale() const override;
     bool initialized() const override;
 
@@ -161,7 +174,45 @@ private:
     int measurement_updates_ = 0;
 };
 
-std::unique_ptr<ITargetTracker> makeTargetTracker(TrackingStrategy strategy, float velocity_alpha);
+class KalmanTargetTracker final : public ITargetTracker {
+public:
+    KalmanTargetTracker(TrackingStrategy mode, float velocity_alpha, float process_noise, float measurement_noise);
+
+    void configure(float velocity_alpha, float process_noise, float measurement_noise) override;
+    void reset() override;
+    void predict(float dt) override;
+    void update(float x, float y, float snap_threshold_px = 0.0F) override;
+    TrackerState state() const override;
+    TrackerDiagnostics diagnostics() const override;
+    float feedforwardScale() const override;
+    bool initialized() const override;
+
+private:
+    void resetToMeasurement(float x, float y);
+    void clampVelocity();
+
+    TrackingStrategy mode_ = TrackingStrategy::RawDelta;
+    float velocity_alpha_ = 1.0F;
+    float process_noise_ = 1.5F;
+    float measurement_noise_ = 16.0F;
+    TrackerState state_{};
+    float covariance_[4][4]{};
+    float last_dt_ = 1.0F / 240.0F;
+    float prediction_age_s_ = 0.0F;
+    float residual_px_ = 0.0F;
+    float max_residual_px_ = 0.0F;
+    bool initialized_ = false;
+    int measurement_updates_ = 0;
+    int predicted_only_frames_ = 0;
+    std::uint64_t snap_count_ = 0;
+};
+
+std::unique_ptr<ITargetTracker> makeTargetTracker(
+    TrackingStrategy strategy,
+    float velocity_alpha,
+    bool kalman_prediction_enable,
+    float kalman_process_noise,
+    float kalman_measurement_noise);
 
 Detection scaleDetectionBox(const Detection& detection, float box_scale, const CaptureRegion& bounds);
 std::pair<float, float> detectionAimPoint(

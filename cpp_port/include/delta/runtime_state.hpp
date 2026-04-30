@@ -136,6 +136,12 @@ struct SharedState {
     float pid_settle_threshold_px = 0.0F;
     bool lead_active = false;
     float lead_time_ms = 0.0F;
+    bool kalman_prediction_enable = false;
+    float kalman_residual_px = 0.0F;
+    float kalman_max_residual_px = 0.0F;
+    float kalman_prediction_age_ms = 0.0F;
+    int kalman_predicted_only_frames = 0;
+    std::uint64_t kalman_snap_count = 0;
     float predictive_pid_latency_ms = 0.0F;
     float predictive_pid_horizon_ms = 0.0F;
     bool predictive_pid_deadzone_active = false;

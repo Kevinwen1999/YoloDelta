@@ -580,6 +580,27 @@ private:
         }
 
         ImDrawList* draw_list = ImGui::GetForegroundDrawList();
+        if (snapshot.kalman_filtered_point.has_value()) {
+            const ImVec2 filtered(
+                snapshot.kalman_filtered_point->first,
+                snapshot.kalman_filtered_point->second);
+            draw_list->AddCircleFilled(filtered, 4.0F, IM_COL32(8, 12, 15, 220), 12);
+            draw_list->AddCircle(filtered, 4.0F, IM_COL32(172, 128, 255, 230), 12, 1.5F);
+            if (snapshot.kalman_predicted_point.has_value()) {
+                const ImVec2 kalman_predicted(
+                    snapshot.kalman_predicted_point->first,
+                    snapshot.kalman_predicted_point->second);
+                draw_list->AddLine(filtered, kalman_predicted, IM_COL32(202, 146, 255, 210), 1.2F);
+            }
+        }
+        if (snapshot.kalman_predicted_point.has_value()) {
+            const ImVec2 kalman_predicted(
+                snapshot.kalman_predicted_point->first,
+                snapshot.kalman_predicted_point->second);
+            draw_list->AddCircleFilled(kalman_predicted, 3.5F, IM_COL32(8, 12, 15, 220), 12);
+            draw_list->AddCircle(kalman_predicted, 3.5F, IM_COL32(255, 102, 204, 225), 12, 1.4F);
+        }
+
         const ImVec2 predicted(
             snapshot.predicted_point->first,
             snapshot.predicted_point->second);

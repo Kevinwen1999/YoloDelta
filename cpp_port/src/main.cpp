@@ -86,6 +86,18 @@ int main() {
             display_rate_servo_max_age_ms.has_value()) {
             runtime.display_rate_servo_max_target_age_ms = std::max(0.0, *display_rate_servo_max_age_ms);
         }
+        if (const auto kalman_prediction = envBool("DELTA_KALMAN_PREDICTION");
+            kalman_prediction.has_value()) {
+            runtime.kalman_prediction_enable = *kalman_prediction;
+        }
+        if (const auto kalman_process_noise = envDouble("DELTA_KALMAN_PROCESS_NOISE");
+            kalman_process_noise.has_value()) {
+            runtime.kalman_process_noise = std::max(0.0F, static_cast<float>(*kalman_process_noise));
+        }
+        if (const auto kalman_measurement_noise = envDouble("DELTA_KALMAN_MEASUREMENT_NOISE");
+            kalman_measurement_noise.has_value()) {
+            runtime.kalman_measurement_noise = std::max(0.0F, static_cast<float>(*kalman_measurement_noise));
+        }
         delta::DeltaApp app(config, runtime);
         return app.run();
     } catch (const std::exception& error) {
