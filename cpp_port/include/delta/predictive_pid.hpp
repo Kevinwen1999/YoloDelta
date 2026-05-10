@@ -33,6 +33,8 @@ struct PredictivePidConfig {
     bool deadzone_enable = false;
     float deadzone_enter_px = 1.0F;
     float deadzone_exit_px = 1.5F;
+    float deadzone_enter_ratio = 0.0F;
+    float deadzone_exit_ratio = 0.0F;
 };
 
 struct PredictivePidResult {
@@ -92,7 +94,13 @@ class PredictivePidController {
 public:
     void configure(const PredictivePidConfig& config);
     void reset();
-    PredictivePidResult update(float raw_error_x, float raw_error_y, float dt, float measured_latency_s = 0.0F);
+    PredictivePidResult update(
+        float raw_error_x,
+        float raw_error_y,
+        float dt,
+        float measured_latency_s = 0.0F,
+        float target_box_width_px = 0.0F,
+        float target_box_height_px = 0.0F);
     void commitOutput(float output_x, float output_y);
     PredictivePidSnapshot snapshot() const;
 

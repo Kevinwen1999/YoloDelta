@@ -469,7 +469,9 @@ bool pidRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rh
         || lhs.predictive_pid_latency_max_s != rhs.predictive_pid_latency_max_s
         || lhs.predictive_pid_deadzone_enable != rhs.predictive_pid_deadzone_enable
         || lhs.predictive_pid_deadzone_enter_px != rhs.predictive_pid_deadzone_enter_px
-        || lhs.predictive_pid_deadzone_exit_px != rhs.predictive_pid_deadzone_exit_px;
+        || lhs.predictive_pid_deadzone_exit_px != rhs.predictive_pid_deadzone_exit_px
+        || lhs.predictive_pid_deadzone_enter_ratio != rhs.predictive_pid_deadzone_enter_ratio
+        || lhs.predictive_pid_deadzone_exit_ratio != rhs.predictive_pid_deadzone_exit_ratio;
 }
 
 bool trackerRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rhs) {
@@ -2253,7 +2255,13 @@ void DeltaApp::inferenceLoop() {
                             shared_.cmd_send_latency_ema_s.load(std::memory_order_relaxed));
                         measured_latency_s = measurement_age_s + expected_send_s;
                     }
-                    const PredictivePidResult predictive = predictive_pid.update(raw_error_x, raw_error_y, pid_dt, measured_latency_s);
+                    const PredictivePidResult predictive = predictive_pid.update(
+                        raw_error_x,
+                        raw_error_y,
+                        pid_dt,
+                        measured_latency_s,
+                        last_box_w,
+                        last_box_h);
                     desired_x = predictive.output_x;
                     desired_y = predictive.output_y;
                     predictive_pid_latency_ms = predictive.latency_s * 1000.0F;

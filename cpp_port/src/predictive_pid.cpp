@@ -81,6 +81,25 @@ float clampIfLimited(const float value, const float limit) {
     return safe_limit > 0.0F ? clampMagnitude(value, safe_limit) : value;
 }
 
+struct DeadzoneThresholds {
+    float enter_px = 0.0F;
+    float exit_px = 0.0F;
+};
+
+DeadzoneThresholds deadzoneThresholdsForAxis(const PredictivePidConfig& config, const float box_size_px) {
+    if (config.deadzone_enter_ratio > 0.0F && std::isfinite(box_size_px) && box_size_px > 0.0F) {
+        const float enter_px = box_size_px * config.deadzone_enter_ratio;
+        return {
+            .enter_px = enter_px,
+            .exit_px = std::max(enter_px, box_size_px * config.deadzone_exit_ratio),
+        };
+    }
+    return {
+        .enter_px = config.deadzone_enter_px,
+        .exit_px = config.deadzone_exit_px,
+    };
+}
+
 bool updateDeadzoneActive(
     const bool enable,
     const float error,
@@ -131,6 +150,8 @@ PredictivePidConfig buildPredictivePidConfig(const RuntimeConfig& runtime) {
     config.deadzone_enable = runtime.predictive_pid_deadzone_enable;
     config.deadzone_enter_px = runtime.predictive_pid_deadzone_enter_px;
     config.deadzone_exit_px = runtime.predictive_pid_deadzone_exit_px;
+    config.deadzone_enter_ratio = runtime.predictive_pid_deadzone_enter_ratio;
+    config.deadzone_exit_ratio = runtime.predictive_pid_deadzone_exit_ratio;
     return config;
 }
 
@@ -156,6 +177,8 @@ void PredictivePidController::configure(const PredictivePidConfig& config) {
     config_.latency_max_s = sanitizeNonNegative(config_.latency_max_s);
     config_.deadzone_enter_px = sanitizeNonNegative(config_.deadzone_enter_px);
     config_.deadzone_exit_px = std::max(config_.deadzone_enter_px, sanitizeNonNegative(config_.deadzone_exit_px));
+    config_.deadzone_enter_ratio = sanitizeUnit(config_.deadzone_enter_ratio);
+    config_.deadzone_exit_ratio = std::max(config_.deadzone_enter_ratio, sanitizeUnit(config_.deadzone_exit_ratio));
 }
 
 void PredictivePidController::reset() {
@@ -166,7 +189,9 @@ PredictivePidResult PredictivePidController::update(
     const float raw_error_x,
     const float raw_error_y,
     const float dt,
-    const float measured_latency_s) {
+    const float measured_latency_s,
+    const float target_box_width_px,
+    const float target_box_height_px) {
     const float clamped_dt = clamp(sanitizeNonNegative(dt), kMinDt, kMaxDt);
     const bool first_update = !state_.initialized;
     PredictivePidResult result{};
@@ -219,18 +244,20 @@ PredictivePidResult PredictivePidController::update(
     result.acceleration_y = state_.acceleration_y;
     result.fused_error_x = result.raw_error_x + (result.prediction_x * config_.pred_weight_x);
     result.fused_error_y = result.raw_error_y + (result.prediction_y * config_.pred_weight_y);
+    const DeadzoneThresholds x_deadzone = deadzoneThresholdsForAxis(config_, target_box_width_px);
+    const DeadzoneThresholds y_deadzone = deadzoneThresholdsForAxis(config_, target_box_height_px);
     result.deadzone_active_x = updateDeadzoneActive(
         config_.deadzone_enable,
         result.fused_error_x,
         state_.deadzone_active_x,
-        config_.deadzone_enter_px,
-        config_.deadzone_exit_px);
+        x_deadzone.enter_px,
+        x_deadzone.exit_px);
     result.deadzone_active_y = updateDeadzoneActive(
         config_.deadzone_enable,
         result.fused_error_y,
         state_.deadzone_active_y,
-        config_.deadzone_enter_px,
-        config_.deadzone_exit_px);
+        y_deadzone.enter_px,
+        y_deadzone.exit_px);
     result.control_error_x = result.deadzone_active_x ? 0.0F : result.fused_error_x;
     result.control_error_y = result.deadzone_active_y ? 0.0F : result.fused_error_y;
 
