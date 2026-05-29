@@ -145,6 +145,12 @@ struct SharedState {
     float predictive_pid_latency_ms = 0.0F;
     float predictive_pid_horizon_ms = 0.0F;
     bool predictive_pid_deadzone_active = false;
+    bool target_association_enable = false;
+    int target_association_active_id = -1;
+    int target_association_track_count = 0;
+    bool target_association_locked = false;
+    bool target_association_missing = false;
+    std::uint64_t target_association_switch_count = 0;
     bool mouse_move_suppress_active = false;
     bool mouse_move_suppress_supported = false;
     std::uint64_t mouse_move_suppress_count = 0;
