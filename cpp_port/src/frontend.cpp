@@ -242,6 +242,14 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"async_gpu_capture_fresh_only_enable\":" << (cfg.async_gpu_capture_fresh_only_enable ? "true" : "false") << ","
         << "\"tensorrt_inline_fresh_only_enable\":" << (cfg.tensorrt_inline_fresh_only_enable ? "true" : "false") << ","
         << "\"capture_freeze_to_center_enable\":" << (cfg.capture_freeze_to_center_enable ? "true" : "false") << ","
+        << "\"adaptive_capture_crop_enable\":" << (cfg.adaptive_capture_crop_enable ? "true" : "false") << ","
+        << "\"adaptive_capture_crop_min_size\":" << cfg.adaptive_capture_crop_min_size << ","
+        << "\"adaptive_capture_crop_search_size\":" << cfg.adaptive_capture_crop_search_size << ","
+        << "\"adaptive_capture_crop_max_size\":" << cfg.adaptive_capture_crop_max_size << ","
+        << "\"adaptive_capture_crop_target_box_input_px\":" << cfg.adaptive_capture_crop_target_box_input_px << ","
+        << "\"adaptive_capture_crop_smoothing_alpha\":" << cfg.adaptive_capture_crop_smoothing_alpha << ","
+        << "\"adaptive_capture_crop_edge_margin_ratio\":" << cfg.adaptive_capture_crop_edge_margin_ratio << ","
+        << "\"adaptive_capture_crop_step_px\":" << cfg.adaptive_capture_crop_step_px << ","
         << "\"display_rate_servo_enable\":" << (cfg.display_rate_servo_enable ? "true" : "false") << ","
         << "\"display_rate_servo_hz\":" << cfg.display_rate_servo_hz << ","
         << "\"display_rate_servo_max_target_age_ms\":" << cfg.display_rate_servo_max_target_age_ms << ","
@@ -302,6 +310,21 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"predictive_pid_deadzone_enter_ratio\":" << cfg.predictive_pid_deadzone_enter_ratio << ","
         << "\"predictive_pid_deadzone_exit_ratio\":" << cfg.predictive_pid_deadzone_exit_ratio << ","
         << "\"sticky_bias_px\":" << cfg.sticky_bias_px << ","
+        << "\"target_association_enable\":" << (cfg.target_association_enable ? "true" : "false") << ","
+        << "\"target_association_min_iou\":" << cfg.target_association_min_iou << ","
+        << "\"target_association_max_distance_px\":" << cfg.target_association_max_distance_px << ","
+        << "\"target_association_speed_distance_gain\":" << cfg.target_association_speed_distance_gain << ","
+        << "\"target_association_iou_weight\":" << cfg.target_association_iou_weight << ","
+        << "\"target_association_distance_weight\":" << cfg.target_association_distance_weight << ","
+        << "\"target_association_confidence_weight\":" << cfg.target_association_confidence_weight << ","
+        << "\"target_association_same_class_bonus\":" << cfg.target_association_same_class_bonus << ","
+        << "\"target_association_locked_bonus\":" << cfg.target_association_locked_bonus << ","
+        << "\"target_association_min_match_score\":" << cfg.target_association_min_match_score << ","
+        << "\"target_association_lock_hold_frames\":" << cfg.target_association_lock_hold_frames << ","
+        << "\"target_association_hybrid_class_switch_enable\":"
+        << (cfg.target_association_hybrid_class_switch_enable ? "true" : "false") << ","
+        << "\"target_association_hybrid_class_switch_distance_px\":"
+        << cfg.target_association_hybrid_class_switch_distance_px << ","
         << "\"target_guard_enable\":" << (cfg.target_guard_enable ? "true" : "false") << ","
         << "\"target_guard_commit_frames\":" << cfg.target_guard_commit_frames << ","
         << "\"target_guard_hold_frames\":" << cfg.target_guard_hold_frames << ","
@@ -387,6 +410,8 @@ std::string buildStatusJson(const RuntimeConfig& cfg, const SharedState& shared_
         << "\"triggerbot_enable\":" << (cfg.triggerbot_enable ? "true" : "false") << ","
         << "\"mouse_move_suppress_on_fire_enable\":" << (cfg.mouse_move_suppress_on_fire_enable ? "true" : "false") << ","
         << "\"capture_freeze_to_center_enable\":" << (cfg.capture_freeze_to_center_enable ? "true" : "false") << ","
+        << "\"adaptive_capture_crop_enable\":" << (cfg.adaptive_capture_crop_enable ? "true" : "false") << ","
+        << "\"adaptive_capture_crop_size\":" << shared_state.adaptive_capture_crop_size << ","
         << "\"debug_preview_enable\":" << (cfg.debug_preview_enable ? "true" : "false") << ","
         << "\"debug_overlay_enable\":" << (cfg.debug_overlay_enable ? "true" : "false") << ","
         << "\"tracking_strategy\":\"" << jsonEscape(shared_state.tracking_strategy) << "\","
@@ -407,6 +432,12 @@ std::string buildStatusJson(const RuntimeConfig& cfg, const SharedState& shared_
         << "\"predictive_pid_latency_ms\":" << shared_state.predictive_pid_latency_ms << ","
         << "\"predictive_pid_horizon_ms\":" << shared_state.predictive_pid_horizon_ms << ","
         << "\"predictive_pid_deadzone_active\":" << (shared_state.predictive_pid_deadzone_active ? "true" : "false") << ","
+        << "\"target_association_enable\":" << (cfg.target_association_enable ? "true" : "false") << ","
+        << "\"target_association_active_id\":" << shared_state.target_association_active_id << ","
+        << "\"target_association_track_count\":" << shared_state.target_association_track_count << ","
+        << "\"target_association_locked\":" << (shared_state.target_association_locked ? "true" : "false") << ","
+        << "\"target_association_missing\":" << (shared_state.target_association_missing ? "true" : "false") << ","
+        << "\"target_association_switch_count\":" << shared_state.target_association_switch_count << ","
         << "\"mouse_move_suppress_active\":" << (shared_state.mouse_move_suppress_active ? "true" : "false") << ","
         << "\"mouse_move_suppress_supported\":" << (shared_state.mouse_move_suppress_supported ? "true" : "false") << ","
         << "\"mouse_move_suppress_count\":" << shared_state.mouse_move_suppress_count << ","
@@ -547,6 +578,14 @@ std::string buildPageHtml() {
       {key:"model_conf",label:"Model Conf",type:"number",step:0.001,min:0,max:1},
       {key:"detection_min_conf",label:"Detection Min Conf",type:"number",step:0.001,min:0,max:1},
       {key:"detection_box_scale",label:"Detection Box Scale",type:"number",step:0.01,min:0.05,max:2},
+      {key:"adaptive_capture_crop_enable",label:"Adaptive Crop",type:"bool"},
+      {key:"adaptive_capture_crop_min_size",label:"Adaptive Crop Min",type:"number",step:1,min:1},
+      {key:"adaptive_capture_crop_search_size",label:"Adaptive Crop Search",type:"number",step:1,min:1},
+      {key:"adaptive_capture_crop_max_size",label:"Adaptive Crop Max",type:"number",step:1,min:1},
+      {key:"adaptive_capture_crop_target_box_input_px",label:"Target Box Input Px",type:"number",step:1,min:1},
+      {key:"adaptive_capture_crop_smoothing_alpha",label:"Adaptive Crop Smoothing",type:"number",step:0.001,min:0,max:1},
+      {key:"adaptive_capture_crop_edge_margin_ratio",label:"Crop Edge Margin Ratio",type:"number",step:0.001,min:0,max:0.49},
+      {key:"adaptive_capture_crop_step_px",label:"Adaptive Crop Step",type:"number",step:1,min:1},
       {key:"ego_motion_comp_enable",label:"Ego Motion Comp",type:"bool"},
       {key:"ego_motion_comp_gain_x",label:"Ego Comp Gain X",type:"number",step:0.001},
       {key:"ego_motion_comp_gain_y",label:"Ego Comp Gain Y",type:"number",step:0.001},
@@ -612,7 +651,8 @@ std::string buildPageHtml() {
     function renderStatus(status){
       const settle=status.target_found ? `${status.pid_settled ? "settled" : "gating"} ${Number(status.pid_settle_error_metric_px||0).toFixed(1)}/${Number(status.pid_settle_threshold_px||0).toFixed(1)}` : "n/a";
       const kalman=status.kalman_prediction_enable ? `kalman ${status.kalman_active ? "ON" : "idle"} r ${Number(status.kalman_residual_px||0).toFixed(1)}/${Number(status.kalman_max_residual_px||0).toFixed(1)} age ${Number(status.kalman_prediction_age_ms||0).toFixed(1)}ms drop ${Number(status.kalman_predicted_only_frames||0)} snap ${Number(status.kalman_snap_count||0)}` : "kalman off";
-      runtime.textContent=`Runtime ${status.running ? "running" : "stopped"} | mode ${status.mode_label} | aim ${status.aimmode_label} | preview ${status.debug_preview_enable ? "ON" : "OFF"} | overlay ${status.debug_overlay_enable ? "ON" : "OFF"} | F5 X1 custom sequence ${status.side_button_key_sequence_enabled ? "ON" : "OFF"} | track ${status.tracking_strategy} | ${kalman} | target ${status.target_found ? "locked" : "none"} | speed ${Number(status.target_speed).toFixed(1)} | settle ${settle} | cmd (${status.aim_dx}, ${status.aim_dy})`;
+      const crop=status.adaptive_capture_crop_enable ? `adaptive crop ${Number(status.adaptive_capture_crop_size||0)}px` : "fixed crop";
+      runtime.textContent=`Runtime ${status.running ? "running" : "stopped"} | mode ${status.mode_label} | aim ${status.aimmode_label} | preview ${status.debug_preview_enable ? "ON" : "OFF"} | overlay ${status.debug_overlay_enable ? "ON" : "OFF"} | F5 X1 custom sequence ${status.side_button_key_sequence_enabled ? "ON" : "OFF"} | ${crop} | track ${status.tracking_strategy} | ${kalman} | target ${status.target_found ? "locked" : "none"} | speed ${Number(status.target_speed).toFixed(1)} | settle ${settle} | cmd (${status.aim_dx}, ${status.aim_dy})`;
     }
     function collectPayload(){
       const payload={};
@@ -658,9 +698,13 @@ body{margin:0;padding:18px;background:#0f1518;color:#eef6fa;font:14px "Segoe UI"
 <script>
 const F=[
 {g:"General",k:"pid_enable",l:"PID Enabled",t:"b"},{g:"General",k:"tracking_enabled",l:"Tracking Enabled",t:"b"},{g:"General",k:"debug_preview_enable",l:"Debug Preview",t:"b"},{g:"General",k:"debug_overlay_enable",l:"Debug Overlay",t:"b"},{g:"General",k:"capture_cached_timeout_ms",l:"Cached Capture Timeout (ms)",t:"n",s:0.1,n:0},{g:"General",k:"async_gpu_capture_fresh_only_enable",l:"Async GPU Fresh Only",t:"b"},{g:"General",k:"tensorrt_inline_fresh_only_enable",l:"TensorRT Fresh Only",t:"b"},{g:"General",k:"display_rate_servo_enable",l:"Display Rate Servo",t:"b"},{g:"General",k:"display_rate_servo_hz",l:"Display Servo Hz",t:"n",s:1,n:0},{g:"General",k:"display_rate_servo_max_target_age_ms",l:"Servo Max Target Age (ms)",t:"n",s:1,n:0},{g:"General",k:"model_conf",l:"Model Conf",t:"n",s:0.001,n:0,x:1},{g:"General",k:"detection_min_conf",l:"Detection Min Conf",t:"n",s:0.001,n:0,x:1},{g:"General",k:"detection_box_scale",l:"Detection Box Scale",t:"n",s:0.01,n:0.05,x:2},
+{g:"Adaptive Crop",k:"adaptive_capture_crop_enable",l:"Adaptive Crop",t:"b"},{g:"Adaptive Crop",k:"adaptive_capture_crop_min_size",l:"Min Size",t:"n",s:1,n:1},{g:"Adaptive Crop",k:"adaptive_capture_crop_search_size",l:"Search Size",t:"n",s:1,n:1},{g:"Adaptive Crop",k:"adaptive_capture_crop_max_size",l:"Max Size",t:"n",s:1,n:1},{g:"Adaptive Crop",k:"adaptive_capture_crop_target_box_input_px",l:"Target Box Input Px",t:"n",s:1,n:1},{g:"Adaptive Crop",k:"adaptive_capture_crop_smoothing_alpha",l:"Smoothing Alpha",t:"n",s:0.001,n:0,x:1},{g:"Adaptive Crop",k:"adaptive_capture_crop_edge_margin_ratio",l:"Edge Margin Ratio",t:"n",s:0.001,n:0,x:0.49},{g:"Adaptive Crop",k:"adaptive_capture_crop_step_px",l:"Step Px",t:"n",s:1,n:1},
 {g:"Aim & Selection",k:"body_y_ratio",l:"Body Aim Y Ratio",t:"n",s:0.01,n:0},{g:"Aim & Selection",k:"head_x_ratio",l:"Head Aim X Ratio",t:"n",s:0.01},{g:"Aim & Selection",k:"head_y_ratio",l:"Head Aim Y Ratio",t:"n",s:0.01,n:0},{g:"Aim & Selection",k:"tracking_strategy",l:"Tracking Strategy",t:"s",o:[["raw","Raw Detection"],["raw_delta","Raw + Velocity"],["legacy_pid","Legacy PID"],["predictive_pid","Predictive PID"]]},{g:"Aim & Selection",k:"kalman_prediction_enable",l:"Kalman Prediction",t:"b"},{g:"Aim & Selection",k:"kalman_process_noise",l:"Kalman Process Noise",t:"n",s:0.001,n:0},{g:"Aim & Selection",k:"kalman_measurement_noise",l:"Kalman Measurement Noise",t:"n",s:0.001,n:0},{g:"Aim & Selection",k:"sticky_bias_px",l:"Sticky Bias (px)",t:"n",s:1},{g:"Aim & Selection",k:"target_max_lost_frames",l:"Max Lost Frames",t:"n",s:1,n:1},
+{g:"Target Association",k:"target_association_enable",l:"Target Association",t:"b"},{g:"Target Association",k:"target_association_min_iou",l:"Min IoU",t:"n",s:0.001,n:0,x:1},{g:"Target Association",k:"target_association_max_distance_px",l:"Max Distance (px)",t:"n",s:1,n:1},{g:"Target Association",k:"target_association_speed_distance_gain",l:"Speed Distance Gain",t:"n",s:0.001,n:0},{g:"Target Association",k:"target_association_iou_weight",l:"IoU Weight",t:"n",s:0.001,n:0},{g:"Target Association",k:"target_association_distance_weight",l:"Distance Weight",t:"n",s:0.001,n:0},{g:"Target Association",k:"target_association_confidence_weight",l:"Confidence Weight",t:"n",s:0.001,n:0},{g:"Target Association",k:"target_association_same_class_bonus",l:"Same Class Bonus",t:"n",s:0.001,n:0},{g:"Target Association",k:"target_association_locked_bonus",l:"Locked ID Bonus",t:"n",s:0.001,n:0},{g:"Target Association",k:"target_association_min_match_score",l:"Min Match Score",t:"n",s:0.001,n:0},{g:"Target Association",k:"target_association_lock_hold_frames",l:"Lock Hold Frames",t:"n",s:1,n:0},{g:"Target Association",k:"target_association_hybrid_class_switch_enable",l:"Hybrid Class Switch",t:"b"},{g:"Target Association",k:"target_association_hybrid_class_switch_distance_px",l:"Hybrid Switch Distance (px)",t:"n",s:1,n:1},
 {g:"Tracking & PID",k:"tracking_velocity_alpha",l:"Velocity Beta",t:"n",s:0.001},{g:"Tracking & PID",k:"kp",l:"Kp (X/Y)",t:"n",s:0.001},{g:"Tracking & PID",k:"ki",l:"Ki (X/Y)",t:"n",s:0.001},{g:"Tracking & PID",k:"kd",l:"Kd (X/Y)",t:"n",s:0.001},{g:"Tracking & PID",k:"integral_limit",l:"Integral Limit",t:"n",s:1},{g:"Tracking & PID",k:"anti_windup_gain",l:"Anti-Windup Gain",t:"n",s:0.001},{g:"Tracking & PID",k:"derivative_alpha",l:"Derivative Alpha",t:"n",s:0.001},{g:"Tracking & PID",k:"output_limit",l:"PID Output Limit",t:"n",s:1},{g:"Tracking & PID",k:"raw_max_step_x",l:"Raw Max Step X",t:"n",s:1,n:1},{g:"Tracking & PID",k:"raw_max_step_y",l:"Raw Max Step Y",t:"n",s:1,n:1},
 {g:"PID Settle",k:"pid_settle_enable",l:"PID Settle Gate",t:"b"},{g:"PID Settle",k:"pid_settle_error_px",l:"PID Settle Error (px)",t:"n",s:0.1,n:0},{g:"PID Settle",k:"pid_settle_threshold_min_scale",l:"PID Settle Min Scale",t:"n",s:0.001,n:0},{g:"PID Settle",k:"pid_settle_threshold_max_scale",l:"PID Settle Max Scale",t:"n",s:0.001,n:0},{g:"PID Settle",k:"pid_settle_stable_frames",l:"PID Settle Stable Frames",t:"n",s:1,n:1},{g:"PID Settle",k:"pid_settle_error_delta_px",l:"PID Settle Error Delta (px)",t:"n",s:0.1,n:0},{g:"PID Settle",k:"pid_settle_pre_output_scale",l:"PID Pre-Settle Scale",t:"n",s:0.001,n:0,x:1},
+)HTML")
+        + R"HTML(
 {g:"Legacy PID",k:"legacy_pid_lock_error_px",l:"Legacy PID Lock Error (px)",t:"n",s:0.1,n:0},{g:"Legacy PID",k:"legacy_pid_speed_multiplier",l:"Legacy PID Speed Multiplier",t:"n",s:0.001},{g:"Legacy PID",k:"legacy_pid_threshold_min_scale",l:"Legacy PID Min Scale",t:"n",s:0.001,n:0},{g:"Legacy PID",k:"legacy_pid_threshold_max_scale",l:"Legacy PID Max Scale",t:"n",s:0.001,n:0},{g:"Legacy PID",k:"legacy_pid_transition_sharpness",l:"Legacy PID Transition Sharpness",t:"n",s:0.001,n:0},{g:"Legacy PID",k:"legacy_pid_transition_midpoint",l:"Legacy PID Transition Midpoint",t:"n",s:0.001},{g:"Legacy PID",k:"legacy_pid_stable_frames",l:"Legacy PID Stable Frames",t:"n",s:1,n:1},{g:"Legacy PID",k:"legacy_pid_error_delta_px",l:"Legacy PID Error Delta (px)",t:"n",s:0.1,n:0},{g:"Legacy PID",k:"legacy_pid_prelock_scale",l:"Legacy PID Prelock Scale",t:"n",s:0.001,n:0,x:1},
 {g:"Predictive PID",k:"predictive_pid_kp",l:"Predictive Kp",t:"n",s:0.001},{g:"Predictive PID",k:"predictive_pid_ki",l:"Predictive Ki",t:"n",s:0.001},{g:"Predictive PID",k:"predictive_pid_kd",l:"Predictive Kd",t:"n",s:0.001},{g:"Predictive PID",k:"predictive_pid_pred_weight_x",l:"Prediction Weight X",t:"n",s:0.001},{g:"Predictive PID",k:"predictive_pid_pred_weight_y",l:"Prediction Weight Y",t:"n",s:0.001},{g:"Predictive PID",k:"predictive_pid_init_scale",l:"Initial P Scale",t:"n",s:0.001,n:0,x:1},{g:"Predictive PID",k:"predictive_pid_ramp_time_s",l:"P Ramp Time (s)",t:"n",s:0.001,n:0},{g:"Predictive PID",k:"predictive_pid_integral_limit",l:"Integral Limit",t:"n",s:1,n:0},{g:"Predictive PID",k:"predictive_pid_derivative_limit",l:"Derivative Limit",t:"n",s:1,n:0},{g:"Predictive PID",k:"predictive_pid_output_limit",l:"Output Limit",t:"n",s:1,n:0},
 {g:"Predictive PID",k:"predictive_pid_velocity_alpha",l:"Velocity Alpha",t:"n",s:0.001,n:0,x:1},{g:"Predictive PID",k:"predictive_pid_acceleration_alpha",l:"Acceleration Alpha",t:"n",s:0.001,n:0,x:1},{g:"Predictive PID",k:"predictive_pid_max_velocity_px_s",l:"Max Velocity (px/s)",t:"n",s:1,n:0},{g:"Predictive PID",k:"predictive_pid_max_acceleration_px_s",l:"Max Accel (px/s2)",t:"n",s:1,n:0},{g:"Predictive PID",k:"predictive_pid_reverse_gate_px",l:"Reverse Gate (px)",t:"n",s:0.1,n:0},{g:"Predictive PID",k:"predictive_pid_reverse_scale",l:"Reverse Scale",t:"n",s:0.001,n:0,x:1},{g:"Predictive PID",k:"predictive_pid_prediction_error_scale",l:"Prediction Error Scale",t:"n",s:0.001,n:0},{g:"Predictive PID",k:"predictive_pid_prediction_min_px",l:"Prediction Min (px)",t:"n",s:0.1,n:0},{g:"Predictive PID",k:"predictive_pid_prediction_max_px",l:"Prediction Max (px)",t:"n",s:0.1,n:0},{g:"Predictive PID",k:"predictive_pid_latency_comp_enable",l:"Latency Comp",t:"b"},{g:"Predictive PID",k:"predictive_pid_latency_auto_enable",l:"Auto Latency",t:"b"},{g:"Predictive PID",k:"predictive_pid_latency_bias_s",l:"Latency Bias (s)",t:"n",s:0.001,n:0},{g:"Predictive PID",k:"predictive_pid_latency_max_s",l:"Latency Max (s)",t:"n",s:0.001,n:0},{g:"Predictive PID",k:"predictive_pid_deadzone_enable",l:"Dead Zone",t:"b"},{g:"Predictive PID",k:"predictive_pid_deadzone_enter_px",l:"Dead Zone Enter (px)",t:"n",s:0.1,n:0},{g:"Predictive PID",k:"predictive_pid_deadzone_exit_px",l:"Dead Zone Exit (px)",t:"n",s:0.1,n:0},{g:"Predictive PID",k:"predictive_pid_deadzone_enter_ratio",l:"Dead Zone Enter Ratio",t:"n",s:0.001,n:0,x:1},{g:"Predictive PID",k:"predictive_pid_deadzone_exit_ratio",l:"Dead Zone Exit Ratio",t:"n",s:0.001,n:0,x:1},
@@ -673,7 +717,7 @@ const F=[
 {g:"F5 X1 Sequence",k:"side_button_key_sequence_use_right_click",l:"Step 1: Use Right Click",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_right_click_hold_ms",l:"Step 1: Right Click Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_use_left_click",l:"Step 2: Use Left Click",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_left_click_hold_ms",l:"Step 2: Left Click Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_use_key3",l:"Step 3: Use Key 3",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_key3_press_time_ms",l:"Step 3: Key 3 Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_use_key1",l:"Step 4: Use Key 1",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_key1_press_time_ms",l:"Step 4: Key 1 Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_loop_delay_ms",l:"Step 5: Wait Before Next Loop (ms)",t:"n",s:0.001,n:0}
 ];
 F.splice(5,0,{g:"General",k:"capture_freeze_to_center_enable",l:"Freeze Capture Crop",t:"b"});
-)HTML")
+)HTML"
         + R"HTML(const G=id=>document.getElementById(id),groups=G("groups"),runtime=G("runtime"),recoilStatus=G("recoil-status"),recoilDebug=G("recoil-debug"),recoilMode=G("recoil-mode"),recoilProfile=G("recoil-profile"),message=G("message"),strategyNote=G("strategy-note"),form=G("form"),aimMode=G("aim-mode");
 const toggleMode=G("toggle-mode"),toggleF5=G("toggle-f5"),toggleF6=G("toggle-f6"),toggleF7=G("toggle-f7"),toggleF8=G("toggle-f8");
 const setMessage=t=>message.textContent=t;
@@ -685,7 +729,7 @@ function applyRecoilConfig(cfg){recoilMode.value=String(cfg.recoil_mode??"legacy
 function renderToggleChip(node,label,on){node.textContent=`${label}: ${on?"ON":"OFF"}`;}
 function renderModeToggles(s){aimMode.value=String(s.aim_mode??"head");toggleMode.textContent=`${s.mode_label||"OFF"}`;toggleF5.textContent=`${s.side_button_key_sequence_enabled?"ON":"OFF"}`;toggleF6.textContent=`${s.left_hold_engage?"ON":"OFF"}`;toggleF7.textContent=`${s.recoil_tune_fallback?"ON":"OFF"}`;toggleF8.textContent=`${s.triggerbot_enable?"ON":"OFF"}`;}
 function renderRecoilStatus(s){const loaded=s.recoil_profile_loaded?"loaded":"not loaded";const name=s.selected_profile_name||s.selected_profile_id||"none";const err=s.recoil_error?` | error ${s.recoil_error}`:"";const hScale=s.recoil_horizontal_scale_factor ?? s.recoil_scale_factor ?? 0;const virtual=`virtual ${s.recoil_virtual_aim_offset_enable?"ON":"OFF"} ${s.recoil_virtual_active?"ACTIVE":"idle"} (${s.recoil_virtual_dx||0}, ${s.recoil_virtual_dy||0}) #${s.recoil_virtual_apply_count||0}`;recoilStatus.textContent=`F7 ${s.recoil_enabled?"ON":"OFF"} | mode ${s.recoil_mode} | ${virtual} | profile ${name} (${loaded}) | shot ${s.recoil_shot_index}/${s.recoil_shot_count} | scale V/H ${Number(s.recoil_scale_factor||0).toFixed(3)} / ${Number(hScale).toFixed(3)} | interval ${s.recoil_fire_interval_ms||0}ms${err}`;recoilDebug.textContent=`debug ${s.recoil_debug_state||"idle"} | mode-toggle ${s.recoil_mode_active?"ON":"OFF"} | F6 ${s.recoil_hold_engage_toggle?"ON":"OFF"} | ignore-mode ${s.recoil_ignore_mode_check?"ON":"OFF"} | trigger ${s.recoil_trigger_pressed?"DOWN":"UP"} | left ${s.recoil_left_pressed?"DOWN":"UP"} | x1 ${s.recoil_x1_pressed?"DOWN":"UP"} | spray ${s.recoil_spray_active?"ACTIVE":"IDLE"} | virtual aim ${s.recoil_virtual_active?"ACTIVE":"idle"} (${s.recoil_virtual_dx||0}, ${s.recoil_virtual_dy||0}) | scheduled (${s.recoil_scheduled_dx||0}, ${s.recoil_scheduled_dy||0}) | direct fallback last applied (${s.recoil_last_applied_dx||0}, ${s.recoil_last_applied_dy||0}) @ shot ${s.recoil_last_applied_shot_index||0} | applied count ${s.recoil_apply_count||0}`;}
-function renderStatus(s){const settle=s.target_found?`${s.pid_settled?"settled":"gating"} ${Number(s.pid_settle_error_metric_px||0).toFixed(1)}/${Number(s.pid_settle_threshold_px||0).toFixed(1)}`:"n/a";const lead=s.lead_active?`lead ${Number(s.lead_time_ms||0).toFixed(1)}ms`:"lead off";const pred=`pred ${Number(s.predictive_pid_latency_ms||0).toFixed(1)}/${Number(s.predictive_pid_horizon_ms||0).toFixed(1)}ms dz ${s.predictive_pid_deadzone_active?"ON":"OFF"}`;const kalman=s.kalman_prediction_enable?`kalman ${s.kalman_active?"ON":"idle"} r ${Number(s.kalman_residual_px||0).toFixed(1)}/${Number(s.kalman_max_residual_px||0).toFixed(1)} age ${Number(s.kalman_prediction_age_ms||0).toFixed(1)}ms drop ${Number(s.kalman_predicted_only_frames||0)} snap ${Number(s.kalman_snap_count||0)}`:"kalman off";const crop=s.capture_freeze_to_center_enable?"crop center":"crop follow";const suppressCount=Number(s.mouse_move_suppress_count||0);const suppress=!s.mouse_move_suppress_on_fire_enable?"mouse-block off":s.mouse_move_suppress_supported?(s.mouse_move_suppress_active?`mouse-block ON #${suppressCount}`:`mouse-block idle #${suppressCount}`):"mouse-block unsupported";const recoilPath=s.recoil_virtual_aim_offset_enable?`virtual-recoil ${s.recoil_virtual_active?"ACTIVE":"idle"} (${s.recoil_virtual_dx||0}, ${s.recoil_virtual_dy||0})`:"virtual-recoil off";runtime.textContent=`Runtime ${s.running?"running":"stopped"} | mode ${s.mode_label} | aim ${s.aim_mode_label||s.aimmode_label} | preview ${s.debug_preview_enable?"ON":"OFF"} | overlay ${s.debug_overlay_enable?"ON":"OFF"} | F8 ${s.triggerbot_enable?"ON":"OFF"} | ${crop} | ${suppress} | recoil ${s.recoil_mode} | ${recoilPath} | profile ${s.selected_profile_name||s.selected_profile_id||"none"} | target ${s.target_found?"locked":"none"} | speed ${Number(s.target_speed).toFixed(1)} | ${lead} | ${pred} | ${kalman} | settle ${settle} | cmd (${s.aim_dx}, ${s.aim_dy})`;renderStrategyNote(s.tracking_strategy);renderModeToggles(s);renderRecoilStatus(s);}
+function renderStatus(s){const settle=s.target_found?`${s.pid_settled?"settled":"gating"} ${Number(s.pid_settle_error_metric_px||0).toFixed(1)}/${Number(s.pid_settle_threshold_px||0).toFixed(1)}`:"n/a";const lead=s.lead_active?`lead ${Number(s.lead_time_ms||0).toFixed(1)}ms`:"lead off";const pred=`pred ${Number(s.predictive_pid_latency_ms||0).toFixed(1)}/${Number(s.predictive_pid_horizon_ms||0).toFixed(1)}ms dz ${s.predictive_pid_deadzone_active?"ON":"OFF"}`;const kalman=s.kalman_prediction_enable?`kalman ${s.kalman_active?"ON":"idle"} r ${Number(s.kalman_residual_px||0).toFixed(1)}/${Number(s.kalman_max_residual_px||0).toFixed(1)} age ${Number(s.kalman_prediction_age_ms||0).toFixed(1)}ms drop ${Number(s.kalman_predicted_only_frames||0)} snap ${Number(s.kalman_snap_count||0)}`:"kalman off";const assoc=s.target_association_enable?`assoc id ${s.target_association_active_id??-1} ${s.target_association_missing?"missing":s.target_association_locked?"locked":"idle"} tracks ${s.target_association_track_count||0} switches ${s.target_association_switch_count||0}`:"assoc off";const cropMode=s.capture_freeze_to_center_enable?"center":"follow";const crop=s.adaptive_capture_crop_enable?`crop ${cropMode} ${Number(s.adaptive_capture_crop_size||0)}px`:`crop ${cropMode} fixed`;const suppressCount=Number(s.mouse_move_suppress_count||0);const suppress=!s.mouse_move_suppress_on_fire_enable?"mouse-block off":s.mouse_move_suppress_supported?(s.mouse_move_suppress_active?`mouse-block ON #${suppressCount}`:`mouse-block idle #${suppressCount}`):"mouse-block unsupported";const recoilPath=s.recoil_virtual_aim_offset_enable?`virtual-recoil ${s.recoil_virtual_active?"ACTIVE":"idle"} (${s.recoil_virtual_dx||0}, ${s.recoil_virtual_dy||0})`:"virtual-recoil off";runtime.textContent=`Runtime ${s.running?"running":"stopped"} | mode ${s.mode_label} | aim ${s.aim_mode_label||s.aimmode_label} | preview ${s.debug_preview_enable?"ON":"OFF"} | overlay ${s.debug_overlay_enable?"ON":"OFF"} | F8 ${s.triggerbot_enable?"ON":"OFF"} | ${crop} | ${suppress} | recoil ${s.recoil_mode} | ${recoilPath} | profile ${s.selected_profile_name||s.selected_profile_id||"none"} | target ${s.target_found?"locked":"none"} | speed ${Number(s.target_speed).toFixed(1)} | ${lead} | ${pred} | ${kalman} | ${assoc} | settle ${settle} | cmd (${s.aim_dx}, ${s.aim_dy})`;renderStrategyNote(s.tracking_strategy);renderModeToggles(s);renderRecoilStatus(s);}
 function collectPayload(){const out={};for(const f of F){const i=G(f.k);if(!i)continue;out[f.k]=f.t==="b"?Boolean(i.checked):f.t==="s"?String(i.value):Number(i.value);}return out;}
 const collectRecoilPayload=()=>({recoil_mode:String(recoilMode.value),selected_recoil_profile_id:String(recoilProfile.value||"")});
 function renderProfiles(profiles,selectedId){const want=String(selectedId??recoilProfile.value??"");recoilProfile.innerHTML="";const empty=document.createElement("option");empty.value="";empty.textContent="No profile selected";recoilProfile.appendChild(empty);for(const p of profiles||[]){const o=document.createElement("option");o.value=String(p.id);o.textContent=p.valid?`${p.name} (${p.shot_count} shots)`:`${p.name} [invalid]`;o.disabled=!p.valid;recoilProfile.appendChild(o);}recoilProfile.value=want;if(recoilProfile.value!==want)recoilProfile.value="";}
@@ -721,6 +765,30 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     }
     if (const auto value = extractJsonBool(body, "capture_freeze_to_center_enable"); value.has_value()) {
         cfg.capture_freeze_to_center_enable = *value;
+    }
+    if (const auto value = extractJsonBool(body, "adaptive_capture_crop_enable"); value.has_value()) {
+        cfg.adaptive_capture_crop_enable = *value;
+    }
+    if (const auto value = extractJsonNumber(body, "adaptive_capture_crop_min_size"); value.has_value()) {
+        cfg.adaptive_capture_crop_min_size = std::max(1, static_cast<int>(std::lround(*value)));
+    }
+    if (const auto value = extractJsonNumber(body, "adaptive_capture_crop_search_size"); value.has_value()) {
+        cfg.adaptive_capture_crop_search_size = std::max(1, static_cast<int>(std::lround(*value)));
+    }
+    if (const auto value = extractJsonNumber(body, "adaptive_capture_crop_max_size"); value.has_value()) {
+        cfg.adaptive_capture_crop_max_size = std::max(1, static_cast<int>(std::lround(*value)));
+    }
+    if (const auto value = extractJsonNumber(body, "adaptive_capture_crop_target_box_input_px"); value.has_value()) {
+        cfg.adaptive_capture_crop_target_box_input_px = std::max(1.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "adaptive_capture_crop_smoothing_alpha"); value.has_value()) {
+        cfg.adaptive_capture_crop_smoothing_alpha = clamp(static_cast<float>(*value), 0.0F, 1.0F);
+    }
+    if (const auto value = extractJsonNumber(body, "adaptive_capture_crop_edge_margin_ratio"); value.has_value()) {
+        cfg.adaptive_capture_crop_edge_margin_ratio = clamp(static_cast<float>(*value), 0.0F, 0.49F);
+    }
+    if (const auto value = extractJsonNumber(body, "adaptive_capture_crop_step_px"); value.has_value()) {
+        cfg.adaptive_capture_crop_step_px = std::max(1, static_cast<int>(std::lround(*value)));
     }
     if (const auto value = extractJsonBool(body, "display_rate_servo_enable"); value.has_value()) {
         cfg.display_rate_servo_enable = *value;
@@ -875,6 +943,43 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
         cfg.predictive_pid_deadzone_exit_ratio,
         cfg.predictive_pid_deadzone_enter_ratio);
     if (const auto value = extractJsonNumber(body, "sticky_bias_px"); value.has_value()) cfg.sticky_bias_px = std::max(0.0F, static_cast<float>(*value));
+    if (const auto value = extractJsonBool(body, "target_association_enable"); value.has_value()) cfg.target_association_enable = *value;
+    if (const auto value = extractJsonNumber(body, "target_association_min_iou"); value.has_value()) {
+        cfg.target_association_min_iou = clamp(static_cast<float>(*value), 0.0F, 1.0F);
+    }
+    if (const auto value = extractJsonNumber(body, "target_association_max_distance_px"); value.has_value()) {
+        cfg.target_association_max_distance_px = std::max(1.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "target_association_speed_distance_gain"); value.has_value()) {
+        cfg.target_association_speed_distance_gain = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "target_association_iou_weight"); value.has_value()) {
+        cfg.target_association_iou_weight = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "target_association_distance_weight"); value.has_value()) {
+        cfg.target_association_distance_weight = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "target_association_confidence_weight"); value.has_value()) {
+        cfg.target_association_confidence_weight = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "target_association_same_class_bonus"); value.has_value()) {
+        cfg.target_association_same_class_bonus = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "target_association_locked_bonus"); value.has_value()) {
+        cfg.target_association_locked_bonus = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "target_association_min_match_score"); value.has_value()) {
+        cfg.target_association_min_match_score = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "target_association_lock_hold_frames"); value.has_value()) {
+        cfg.target_association_lock_hold_frames = std::max(0, static_cast<int>(std::lround(*value)));
+    }
+    if (const auto value = extractJsonBool(body, "target_association_hybrid_class_switch_enable"); value.has_value()) {
+        cfg.target_association_hybrid_class_switch_enable = *value;
+    }
+    if (const auto value = extractJsonNumber(body, "target_association_hybrid_class_switch_distance_px"); value.has_value()) {
+        cfg.target_association_hybrid_class_switch_distance_px = std::max(1.0F, static_cast<float>(*value));
+    }
     if (const auto value = extractJsonBool(body, "target_guard_enable"); value.has_value()) cfg.target_guard_enable = *value;
     if (const auto value = extractJsonNumber(body, "target_guard_commit_frames"); value.has_value()) {
         cfg.target_guard_commit_frames = std::max(1, static_cast<int>(std::lround(*value)));

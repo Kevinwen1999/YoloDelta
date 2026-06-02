@@ -128,7 +128,7 @@ struct StaticConfig {
     int imgsz = 416;
     int capture_crop_size = 624;
     float conf = 0.30F;
-    int max_detections = 6;
+    int max_detections = 100;
     std::string inference_device = "cuda";
     std::string onnx_provider = "auto";
     std::string onnx_resize_interpolation = "nearest";
@@ -173,6 +173,14 @@ struct RuntimeConfig {
     bool display_rate_servo_enable = true;
     double display_rate_servo_hz = 0.0;
     double display_rate_servo_max_target_age_ms = 35.0;
+    bool adaptive_capture_crop_enable = true;
+    int adaptive_capture_crop_min_size = 320;
+    int adaptive_capture_crop_search_size = 800;
+    int adaptive_capture_crop_max_size = 1200;
+    float adaptive_capture_crop_target_box_input_px = 96.0F;
+    float adaptive_capture_crop_smoothing_alpha = 0.25F;
+    float adaptive_capture_crop_edge_margin_ratio = 0.18F;
+    int adaptive_capture_crop_step_px = 32;
     float body_y_ratio = 0.25F;
     float head_x_ratio = 0.50F;
     float head_y_ratio = 0.50F;
@@ -247,7 +255,7 @@ struct RuntimeConfig {
     bool target_guard_enable = true;
     int target_guard_commit_frames = 5;
     int target_guard_hold_frames = 10;
-    float target_guard_window_scale = 2.25F;
+    float target_guard_window_scale = 5.25F;
     int target_guard_min_window_px = 200;
     bool target_lead_enable = false;
     int target_lead_commit_frames = 3;
@@ -258,8 +266,8 @@ struct RuntimeConfig {
     float target_lead_smoothing_alpha = 0.5F;
     float prediction_time = 0.000F;
     int target_max_lost_frames = 8;
-    float model_conf = 0.50F;
-    float detection_min_conf = 0.50F;
+    float model_conf = 0.10F;
+    float detection_min_conf = 0.30F;
     float detection_box_scale = 1.0F;
     bool kalman_prediction_enable = false;
     float kalman_process_noise = 0.1F;

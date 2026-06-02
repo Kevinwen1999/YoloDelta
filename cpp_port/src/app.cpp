@@ -3,6 +3,7 @@
 #include "delta/mouse_suppression.hpp"
 #include "delta/predictive_pid.hpp"
 #include "delta/recoil_aim_offset.hpp"
+#include "delta/target_association.hpp"
 #include "delta/target_guard.hpp"
 #include "delta/target_lead.hpp"
 #include "delta/triggerbot.hpp"
@@ -372,8 +373,12 @@ float pointToBoxDistance(const std::array<int, 4>& box, const float x, const flo
     return std::sqrt((dx * dx) + (dy * dy));
 }
 
-CaptureRegion buildCaptureRegion(const StaticConfig& config, const int center_x, const int center_y) {
-    const int size = clamp(effectiveCaptureCropSize(config), 1, std::min(config.screen_w, config.screen_h));
+CaptureRegion buildCaptureRegion(
+    const StaticConfig& config,
+    const int center_x,
+    const int center_y,
+    const int crop_size) {
+    const int size = clamp(crop_size > 0 ? crop_size : fixedCaptureCropSize(config), 1, std::min(config.screen_w, config.screen_h));
     const int width = size;
     const int height = size;
     return CaptureRegion{
@@ -514,7 +519,11 @@ DebugPreviewSnapshot makeDebugPreviewSnapshot(
     return snapshot;
 }
 
-void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, const TrackingStrategy strategy) {
+void clearAimStateLocked(
+    SharedState& shared,
+    const std::pair<int, int> center,
+    const TrackingStrategy strategy,
+    const int capture_crop_size) {
     shared.target_found = false;
     shared.target_cls = -1;
     shared.target_speed = 0.0F;
@@ -532,6 +541,12 @@ void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, 
     shared.predictive_pid_latency_ms = 0.0F;
     shared.predictive_pid_horizon_ms = 0.0F;
     shared.predictive_pid_deadzone_active = false;
+    shared.target_association_enable = false;
+    shared.target_association_active_id = -1;
+    shared.target_association_track_count = 0;
+    shared.target_association_locked = false;
+    shared.target_association_missing = false;
+    shared.target_association_switch_count = 0;
     shared.recoil_virtual_active = false;
     shared.recoil_virtual_dx = 0;
     shared.recoil_virtual_dy = 0;
@@ -539,6 +554,7 @@ void clearAimStateLocked(SharedState& shared, const std::pair<int, int> center, 
     shared.aim_dy = 0;
     shared.last_target_full = center;
     shared.capture_focus_full = center;
+    shared.adaptive_capture_crop_size = capture_crop_size;
     shared.target_time = {};
     shared.display_rate_servo = {};
     shared.tracking_strategy = trackingStrategyName(strategy);
@@ -1087,12 +1103,14 @@ DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
         capture_->setCachedFrameTimeoutMs(runtime_store_.snapshot().capture_cached_timeout_ms);
     }
     const auto center = screenCenter(config_);
+    const RuntimeConfig initial_runtime = runtime_store_.snapshot();
     std::lock_guard<std::mutex> lock(shared_.mutex);
     shared_.last_target_full = center;
     shared_.capture_focus_full = center;
-    shared_.tracking_strategy = trackingStrategyName(runtime_store_.snapshot().tracking_strategy);
-    shared_.recoil.mode = runtime_store_.snapshot().recoil_mode;
-    shared_.recoil.selected_profile_id = runtime_store_.snapshot().selected_recoil_profile_id;
+    shared_.adaptive_capture_crop_size = initialCaptureCropSize(config_, initial_runtime);
+    shared_.tracking_strategy = trackingStrategyName(initial_runtime.tracking_strategy);
+    shared_.recoil.mode = initial_runtime.recoil_mode;
+    shared_.recoil.selected_profile_id = initial_runtime.selected_recoil_profile_id;
 }
 
 DeltaApp::~DeltaApp() = default;
@@ -1247,6 +1265,7 @@ void DeltaApp::captureLoop() {
                 capture_->setFreshOnly(skip_cached_async_gpu);
             }
             std::pair<int, int> focus = center;
+            int crop_size = initialCaptureCropSize(config_, runtime);
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
                 focus = selectCaptureFocus(
@@ -1254,9 +1273,15 @@ void DeltaApp::captureLoop() {
                     shared_.target_found,
                     center,
                     shared_.capture_focus_full);
+                if (shared_.adaptive_capture_crop_size > 0) {
+                    crop_size = shared_.adaptive_capture_crop_size;
+                }
+            }
+            if (!runtime.adaptive_capture_crop_enable) {
+                crop_size = fixedCaptureCropSize(config_);
             }
 
-            const CaptureRegion region = buildCaptureRegion(config_, focus.first, focus.second);
+            const CaptureRegion region = buildCaptureRegion(config_, focus.first, focus.second, crop_size);
             bool captured = false;
 
             if (prefer_gpu) {
@@ -1361,6 +1386,8 @@ void DeltaApp::inferenceLoop() {
             runtime.kalman_prediction_enable,
             runtime.kalman_process_noise,
             runtime.kalman_measurement_noise);
+        TargetAssociationTracker target_association{};
+        target_association.configure(buildTargetAssociationConfig(runtime));
         TargetGuardState target_guard_state{};
         TargetLeadState target_lead_state{};
         PIDSettleState pid_settle_state{};
@@ -1410,6 +1437,7 @@ void DeltaApp::inferenceLoop() {
             const std::uint64_t reset_token = runtime_store_.resetToken();
             inference_->setModelConfidence(runtime.model_conf);
             const bool tracking_enabled = runtime.tracking_enabled;
+            const TargetAssociationConfig target_association_config = buildTargetAssociationConfig(runtime);
             const TargetGuardConfig target_guard_config = buildTargetGuardConfig(runtime);
             const TargetLeadConfig target_lead_config = buildTargetLeadConfig(runtime);
             const TriggerbotConfig triggerbot_config = buildTriggerbotConfig(runtime);
@@ -1450,6 +1478,7 @@ void DeltaApp::inferenceLoop() {
             if (reset_token != last_reset_token) {
                 resetPidControllers();
                 tracker->reset();
+                target_association.reset();
                 last_kalman_snap_count = 0;
                 target_guard_state.reset();
                 target_lead_state.reset();
@@ -1467,6 +1496,7 @@ void DeltaApp::inferenceLoop() {
                 trackerVelocityAlpha(runtime),
                 runtime.kalman_process_noise,
                 runtime.kalman_measurement_noise);
+            target_association.configure(target_association_config);
             if (trackerRuntimeSettingsChanged(runtime, last_tracker_runtime)) {
                 tracker = makeTargetTracker(
                     runtime.tracking_strategy,
@@ -1484,18 +1514,19 @@ void DeltaApp::inferenceLoop() {
                     last_pid_tick,
                     last_track_tick);
                 target_guard_state.reset();
+                target_association.reset();
                 target_lead_state.reset();
                 command_slot_.clear();
                 last_kalman_snap_count = 0;
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy);
+                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime));
                 }
                 last_tracking_strategy = runtime.tracking_strategy;
                 last_tracker_runtime = runtime;
                 if (debug_visuals_enabled) {
                     publishDebugSnapshot(makeInactiveDebugPreviewSnapshot(
-                        buildCaptureRegion(config_, center.first, center.second),
+                        buildCaptureRegion(config_, center.first, center.second, initialCaptureCropSize(config_, runtime)),
                         center));
                 }
                 preview_idle_state = true;
@@ -1515,16 +1546,17 @@ void DeltaApp::inferenceLoop() {
                     last_pid_tick,
                     last_track_tick);
                 target_guard_state.reset();
+                target_association.reset();
                 target_lead_state.reset();
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy);
+                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime));
                 }
                 last_aim_mode = runtime.aim_mode;
                 if (debug_visuals_enabled) {
                     publishDebugSnapshot(makeInactiveDebugPreviewSnapshot(
-                        buildCaptureRegion(config_, center.first, center.second),
+                        buildCaptureRegion(config_, center.first, center.second, initialCaptureCropSize(config_, runtime)),
                         center));
                 }
                 preview_idle_state = true;
@@ -1569,15 +1601,16 @@ void DeltaApp::inferenceLoop() {
                     last_pid_tick,
                     last_track_tick);
                 target_guard_state.reset();
+                target_association.reset();
                 target_lead_state.reset();
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy);
+                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime));
                 }
                 if (debug_visuals_enabled && !preview_idle_state) {
                     publishDebugSnapshot(makeInactiveDebugPreviewSnapshot(
-                        buildCaptureRegion(config_, center.first, center.second),
+                        buildCaptureRegion(config_, center.first, center.second, initialCaptureCropSize(config_, runtime)),
                         center));
                 }
                 preview_idle_state = true;
@@ -1598,11 +1631,12 @@ void DeltaApp::inferenceLoop() {
                     last_pid_tick,
                     last_track_tick);
                 target_guard_state.reset();
+                target_association.reset();
                 target_lead_state.reset();
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy);
+                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime));
                 }
             }
 
@@ -1614,6 +1648,7 @@ void DeltaApp::inferenceLoop() {
                 gpu_packet = gpu_frame_slot_.wait_take_for(kInferenceIdleSleep);
             } else if (isInlineGpuCaptureSchedule(capture_schedule)) {
                 std::pair<int, int> focus = center;
+                int crop_size = initialCaptureCropSize(config_, runtime);
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     focus = selectCaptureFocus(
@@ -1621,8 +1656,14 @@ void DeltaApp::inferenceLoop() {
                         shared_.target_found,
                         center,
                         shared_.capture_focus_full);
+                    if (shared_.adaptive_capture_crop_size > 0) {
+                        crop_size = shared_.adaptive_capture_crop_size;
+                    }
                 }
-                const CaptureRegion region = buildCaptureRegion(config_, focus.first, focus.second);
+                if (!runtime.adaptive_capture_crop_enable) {
+                    crop_size = fixedCaptureCropSize(config_);
+                }
+                const CaptureRegion region = buildCaptureRegion(config_, focus.first, focus.second, crop_size);
                 const auto grab_start = SteadyClock::now();
                 if (capture_) {
                     capture_->setFreshOnly(isFreshOnlyCaptureEnabled(capture_schedule, runtime));
@@ -1779,14 +1820,54 @@ void DeltaApp::inferenceLoop() {
 
             std::optional<CaptureRegion> guard_region;
             std::optional<StickyTargetPick> sticky;
+            TargetAssociationPick association_pick{};
             TargetGuardMissResult target_guard_miss = TargetGuardMissResult::Inactive;
             const bool guard_active = target_guard_config.enable && target_guard_state.active.active;
+            const bool association_enabled = tracking_enabled && target_association_config.enable;
+            if (association_enabled) {
+                const SteadyClock::time_point association_tick = SteadyClock::now();
+                const float association_dt = clamp(
+                    last_track_tick == SteadyClock::time_point{}
+                        ? kMinTrackDt
+                        : static_cast<float>(secondsSince(last_track_tick, association_tick)),
+                    kMinTrackDt,
+                    kMaxTrackDt);
+                target_association.update(detections, runtime.aim_mode, association_dt);
+            } else {
+                target_association.reset();
+            }
             if (guard_active) {
                 guard_region = buildTargetGuardRegion(
                     target_guard_state,
                     target_guard_config,
                     capture_region,
                     tracker->initialized() ? std::optional<std::pair<float, float>>(assoc_ref) : std::nullopt);
+            }
+
+            const auto associationToSticky = [](const TargetAssociationPick& pick) -> std::optional<StickyTargetPick> {
+                if (!pick.detection.has_value()) {
+                    return std::nullopt;
+                }
+                StickyTargetPick out{};
+                out.detection = pick.detection;
+                out.switched = pick.switched;
+                return out;
+            };
+
+            const auto pickWithAssociation = [&](const AimCandidatePool& pool) -> bool {
+                if (!association_enabled) {
+                    return false;
+                }
+                association_pick = target_association.pick(pool.candidates, center.first, center.second);
+                sticky = associationToSticky(association_pick);
+                return sticky.has_value() || association_pick.locked_missing;
+            };
+
+            const bool association_locked_before_pick = association_enabled && target_association.hasLockedTrack();
+            if (association_enabled && association_locked_before_pick) {
+                (void)pickWithAssociation(aim_pool);
+            }
+            if (!sticky.has_value() && !association_pick.locked_missing && guard_active) {
                 const std::vector<Detection> guarded_detections = filterDetectionsInTargetGuard(detections, guard_region);
                 const AimCandidatePool guarded_pool = buildAimCandidatePool(
                     guarded_detections,
@@ -1794,7 +1875,9 @@ void DeltaApp::inferenceLoop() {
                     runtime.body_y_ratio,
                     runtime.head_x_ratio,
                     runtime.head_y_ratio);
-                sticky = pickFromPool(guarded_pool);
+                if (!pickWithAssociation(guarded_pool)) {
+                    sticky = pickFromPool(guarded_pool);
+                }
                 if (!sticky.has_value() || !sticky->detection.has_value()) {
                     target_guard_miss = noteTargetGuardMiss(target_guard_state, target_guard_config);
                     if (target_guard_miss == TargetGuardMissResult::Expired) {
@@ -1804,11 +1887,15 @@ void DeltaApp::inferenceLoop() {
                             assoc_limit = kTargetLockMaxJump;
                         }
                         guard_region.reset();
-                        sticky = pickFromPool(aim_pool);
+                        if (!pickWithAssociation(aim_pool)) {
+                            sticky = pickFromPool(aim_pool);
+                        }
                     }
                 }
-            } else {
-                sticky = pickFromPool(aim_pool);
+            } else if (!sticky.has_value() && !association_pick.locked_missing) {
+                if (!pickWithAssociation(aim_pool)) {
+                    sticky = pickFromPool(aim_pool);
+                }
             }
 
             if (sticky.has_value() && sticky->detection.has_value()) {
@@ -1832,9 +1919,36 @@ void DeltaApp::inferenceLoop() {
                 ? frame_ready
                 : frame_time;
             const bool selected_detection = sticky.has_value() && sticky->detection.has_value();
+            const bool association_selected = association_enabled && association_pick.detection.has_value();
+            std::optional<CaptureCropTarget> crop_target;
+            if (selected_detection) {
+                crop_target = CaptureCropTarget{
+                    .bbox = sticky->detection->bbox,
+                    .capture = capture_region,
+                };
+            }
+            int previous_crop_size = initialCaptureCropSize(config_, runtime);
+            {
+                std::lock_guard<std::mutex> lock(shared_.mutex);
+                if (shared_.adaptive_capture_crop_size > 0) {
+                    previous_crop_size = shared_.adaptive_capture_crop_size;
+                }
+            }
+            const int next_crop_size = updateAdaptiveCaptureCropSize(
+                config_,
+                runtime,
+                previous_crop_size,
+                crop_target);
+            {
+                std::lock_guard<std::mutex> lock(shared_.mutex);
+                shared_.adaptive_capture_crop_size = next_crop_size;
+            }
             const bool target_switched = selected_detection
                 && (sticky->switched
-                    || (last_target_bbox.has_value() && bboxIou(sticky->detection->bbox, *last_target_bbox) < 0.05F));
+                    || (
+                        !association_selected
+                        && last_target_bbox.has_value()
+                        && bboxIou(sticky->detection->bbox, *last_target_bbox) < 0.05F));
             if (!debug_overlay_observe_active && target_lead_config.enable) {
                 if (target_switched) {
                     target_lead_state.reset();
@@ -1935,7 +2049,7 @@ void DeltaApp::inferenceLoop() {
                 command_slot_.clear();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy);
+                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime));
                 }
                 if (debug_visuals_enabled) {
                     const auto preview_start = SteadyClock::now();
@@ -1975,11 +2089,12 @@ void DeltaApp::inferenceLoop() {
                         last_pid_tick,
                         last_track_tick);
                     target_guard_state.reset();
+                    target_association.reset();
                     target_lead_state.reset();
                     command_slot_.clear();
                     {
                         std::lock_guard<std::mutex> lock(shared_.mutex);
-                        clearAimStateLocked(shared_, center, runtime.tracking_strategy);
+                        clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime));
                     }
                     if (debug_visuals_enabled) {
                         const auto preview_start = SteadyClock::now();
@@ -2009,6 +2124,7 @@ void DeltaApp::inferenceLoop() {
             }
 
             const TrackerDiagnostics tracker_diagnostics = tracker->diagnostics();
+            const TargetAssociationDiagnostics association_diagnostics = target_association.diagnostics();
             if (perf_ && runtime.kalman_prediction_enable) {
                 recordKalmanPerf(*perf_, tracker_diagnostics, kalman_predicted_only, kalman_snap_delta);
             }
@@ -2377,6 +2493,12 @@ void DeltaApp::inferenceLoop() {
                 shared_.predictive_pid_latency_ms = predictive_pid_latency_ms;
                 shared_.predictive_pid_horizon_ms = predictive_pid_horizon_ms;
                 shared_.predictive_pid_deadzone_active = predictive_pid_deadzone_active;
+                shared_.target_association_enable = target_association_config.enable;
+                shared_.target_association_active_id = association_diagnostics.active_id;
+                shared_.target_association_track_count = association_diagnostics.track_count;
+                shared_.target_association_locked = association_diagnostics.locked;
+                shared_.target_association_missing = association_diagnostics.locked_missing;
+                shared_.target_association_switch_count = association_diagnostics.switch_count;
                 shared_.recoil_virtual_active = virtual_recoil.active;
                 shared_.recoil_virtual_dx = virtual_recoil.dx;
                 shared_.recoil_virtual_dy = virtual_recoil.dy;
@@ -2594,7 +2716,7 @@ void DeltaApp::controlLoop() {
                     command_slot_.clear();
                     pending_aim_cmd.reset();
                     next_aim_budget_tick = {};
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy);
+                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime));
                 }
                 if (config_.debug_log) {
                     std::cout << "[control] Mode: " << mode << " (" << (mode == 1 ? "ACTIVE" : "OFF") << ")\n";
@@ -2608,7 +2730,7 @@ void DeltaApp::controlLoop() {
                 command_slot_.clear();
                 pending_aim_cmd.reset();
                 next_aim_budget_tick = {};
-                clearAimStateLocked(shared_, center, runtime.tracking_strategy);
+                clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime));
             }
             if (risingEdge(snapshot.f6_pressed, previous.f6_pressed) && (steady_now - last_hold_toggle) >= kToggleCooldown) {
                 shared_.toggles.left_hold_engage = !shared_.toggles.left_hold_engage;
@@ -2622,7 +2744,7 @@ void DeltaApp::controlLoop() {
                     command_slot_.clear();
                     pending_aim_cmd.reset();
                     next_aim_budget_tick = {};
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy);
+                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime));
                 }
                 if (config_.debug_log) {
                     std::cout << "[control] HoldEngage: " << (shared_.toggles.left_hold_engage ? "ON" : "OFF") << "\n";
