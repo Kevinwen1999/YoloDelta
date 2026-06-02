@@ -173,6 +173,8 @@ struct RuntimeConfig {
     bool display_rate_servo_enable = true;
     double display_rate_servo_hz = 0.0;
     double display_rate_servo_max_target_age_ms = 35.0;
+    bool detection_dampening_enable = true;
+    int detection_dampening_stable_frames = 3;
     bool adaptive_capture_crop_enable = true;
     int adaptive_capture_crop_min_size = 320;
     int adaptive_capture_crop_search_size = 800;

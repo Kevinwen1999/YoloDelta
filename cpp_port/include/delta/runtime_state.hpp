@@ -151,6 +151,9 @@ struct SharedState {
     bool target_association_locked = false;
     bool target_association_missing = false;
     std::uint64_t target_association_switch_count = 0;
+    bool detection_dampening_ready = true;
+    int detection_dampening_streak = 0;
+    int detection_dampening_required_frames = 3;
     bool mouse_move_suppress_active = false;
     bool mouse_move_suppress_supported = false;
     std::uint64_t mouse_move_suppress_count = 0;
