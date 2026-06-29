@@ -174,7 +174,7 @@ struct RuntimeConfig {
     double display_rate_servo_hz = 0.0;
     double display_rate_servo_max_target_age_ms = 35.0;
     bool detection_dampening_enable = true;
-    int detection_dampening_stable_frames = 3;
+    int detection_dampening_stable_frames = 2;
     bool adaptive_capture_crop_enable = true;
     int adaptive_capture_crop_min_size = 320;
     int adaptive_capture_crop_search_size = 800;
@@ -212,12 +212,12 @@ struct RuntimeConfig {
     int legacy_pid_stable_frames = 2;
     float legacy_pid_error_delta_px = 10.0F;
     float legacy_pid_prelock_scale = 0.2F;
-    float predictive_pid_kp = 0.67F;
+    float predictive_pid_kp = 0.77F;
     float predictive_pid_ki = 0.0F;
     float predictive_pid_kd = 0.01F;
     float predictive_pid_pred_weight_x = 0.6F;
     float predictive_pid_pred_weight_y = 0.6F;
-    float predictive_pid_init_scale = 0.8F;
+    float predictive_pid_init_scale = 0.9F;
     float predictive_pid_ramp_time_s = 0.1F;
     float predictive_pid_integral_limit = 200.0F;
     float predictive_pid_derivative_limit = 75.0F;
@@ -269,7 +269,7 @@ struct RuntimeConfig {
     float prediction_time = 0.000F;
     int target_max_lost_frames = 8;
     float model_conf = 0.10F;
-    float detection_min_conf = 0.30F;
+    float detection_min_conf = 0.10F;
     float detection_box_scale = 1.0F;
     bool kalman_prediction_enable = false;
     float kalman_process_noise = 0.1F;
