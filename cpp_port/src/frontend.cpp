@@ -1,4 +1,5 @@
 #include "delta/frontend.hpp"
+#include "delta/capture_focus.hpp"
 #include "delta/recoil.hpp"
 
 #include <array>
@@ -242,6 +243,9 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"async_gpu_capture_fresh_only_enable\":" << (cfg.async_gpu_capture_fresh_only_enable ? "true" : "false") << ","
         << "\"tensorrt_inline_fresh_only_enable\":" << (cfg.tensorrt_inline_fresh_only_enable ? "true" : "false") << ","
         << "\"capture_freeze_to_center_enable\":" << (cfg.capture_freeze_to_center_enable ? "true" : "false") << ","
+        << "\"third_person_mode_enable\":" << (cfg.third_person_mode_enable ? "true" : "false") << ","
+        << "\"third_person_offset_x_px\":" << cfg.third_person_offset_x_px << ","
+        << "\"third_person_offset_y_px\":" << cfg.third_person_offset_y_px << ","
         << "\"adaptive_capture_crop_enable\":" << (cfg.adaptive_capture_crop_enable ? "true" : "false") << ","
         << "\"adaptive_capture_crop_min_size\":" << cfg.adaptive_capture_crop_min_size << ","
         << "\"adaptive_capture_crop_search_size\":" << cfg.adaptive_capture_crop_search_size << ","
@@ -395,6 +399,12 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
 
 std::string buildStatusJson(const RuntimeConfig& cfg, const SharedState& shared_state) {
     std::lock_guard<std::mutex> lock(shared_state.mutex);
+    const ThirdPersonCaptureOffset third_person_offset = effectiveThirdPersonCaptureOffset(
+        cfg,
+        shared_state.toggles.right_pressed);
+    const bool adaptive_capture_crop_active = isAdaptiveCaptureCropActive(
+        cfg,
+        shared_state.toggles.right_pressed);
     std::ostringstream oss;
     oss << "{"
         << "\"running\":" << (shared_state.running ? "true" : "false") << ","
@@ -412,7 +422,11 @@ std::string buildStatusJson(const RuntimeConfig& cfg, const SharedState& shared_
         << "\"triggerbot_enable\":" << (cfg.triggerbot_enable ? "true" : "false") << ","
         << "\"mouse_move_suppress_on_fire_enable\":" << (cfg.mouse_move_suppress_on_fire_enable ? "true" : "false") << ","
         << "\"capture_freeze_to_center_enable\":" << (cfg.capture_freeze_to_center_enable ? "true" : "false") << ","
+        << "\"third_person_offset_active\":" << (third_person_offset.active ? "true" : "false") << ","
+        << "\"third_person_effective_offset_x_px\":" << third_person_offset.x_px << ","
+        << "\"third_person_effective_offset_y_px\":" << third_person_offset.y_px << ","
         << "\"adaptive_capture_crop_enable\":" << (cfg.adaptive_capture_crop_enable ? "true" : "false") << ","
+        << "\"adaptive_capture_crop_active\":" << (adaptive_capture_crop_active ? "true" : "false") << ","
         << "\"adaptive_capture_crop_size\":" << shared_state.adaptive_capture_crop_size << ","
         << "\"debug_preview_enable\":" << (cfg.debug_preview_enable ? "true" : "false") << ","
         << "\"debug_overlay_enable\":" << (cfg.debug_overlay_enable ? "true" : "false") << ","
@@ -722,6 +736,7 @@ const F=[
 {g:"F5 X1 Sequence",k:"side_button_key_sequence_use_right_click",l:"Step 1: Use Right Click",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_right_click_hold_ms",l:"Step 1: Right Click Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_use_left_click",l:"Step 2: Use Left Click",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_left_click_hold_ms",l:"Step 2: Left Click Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_use_key3",l:"Step 3: Use Key 3",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_key3_press_time_ms",l:"Step 3: Key 3 Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_use_key1",l:"Step 4: Use Key 1",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_key1_press_time_ms",l:"Step 4: Key 1 Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_loop_delay_ms",l:"Step 5: Wait Before Next Loop (ms)",t:"n",s:0.001,n:0}
 ];
 F.splice(5,0,{g:"General",k:"capture_freeze_to_center_enable",l:"Freeze Capture Crop",t:"b"});
+F.splice(6,0,{g:"Third Person",k:"third_person_mode_enable",l:"Third Person Crop Offset",t:"b"},{g:"Third Person",k:"third_person_offset_x_px",l:"Crop Offset X (px)",t:"n",s:1},{g:"Third Person",k:"third_person_offset_y_px",l:"Crop Offset Y (px)",t:"n",s:1});
 )HTML"
         + R"HTML(const G=id=>document.getElementById(id),groups=G("groups"),runtime=G("runtime"),recoilStatus=G("recoil-status"),recoilDebug=G("recoil-debug"),recoilMode=G("recoil-mode"),recoilProfile=G("recoil-profile"),message=G("message"),strategyNote=G("strategy-note"),form=G("form"),aimMode=G("aim-mode");
 const toggleMode=G("toggle-mode"),toggleF5=G("toggle-f5"),toggleF6=G("toggle-f6"),toggleF7=G("toggle-f7"),toggleF8=G("toggle-f8");
@@ -734,7 +749,7 @@ function applyRecoilConfig(cfg){recoilMode.value=String(cfg.recoil_mode??"legacy
 function renderToggleChip(node,label,on){node.textContent=`${label}: ${on?"ON":"OFF"}`;}
 function renderModeToggles(s){aimMode.value=String(s.aim_mode??"head");toggleMode.textContent=`${s.mode_label||"OFF"}`;toggleF5.textContent=`${s.side_button_key_sequence_enabled?"ON":"OFF"}`;toggleF6.textContent=`${s.left_hold_engage?"ON":"OFF"}`;toggleF7.textContent=`${s.recoil_tune_fallback?"ON":"OFF"}`;toggleF8.textContent=`${s.triggerbot_enable?"ON":"OFF"}`;}
 function renderRecoilStatus(s){const loaded=s.recoil_profile_loaded?"loaded":"not loaded";const name=s.selected_profile_name||s.selected_profile_id||"none";const err=s.recoil_error?` | error ${s.recoil_error}`:"";const hScale=s.recoil_horizontal_scale_factor ?? s.recoil_scale_factor ?? 0;const virtual=`virtual ${s.recoil_virtual_aim_offset_enable?"ON":"OFF"} ${s.recoil_virtual_active?"ACTIVE":"idle"} (${s.recoil_virtual_dx||0}, ${s.recoil_virtual_dy||0}) #${s.recoil_virtual_apply_count||0}`;recoilStatus.textContent=`F7 ${s.recoil_enabled?"ON":"OFF"} | mode ${s.recoil_mode} | ${virtual} | profile ${name} (${loaded}) | shot ${s.recoil_shot_index}/${s.recoil_shot_count} | scale V/H ${Number(s.recoil_scale_factor||0).toFixed(3)} / ${Number(hScale).toFixed(3)} | interval ${s.recoil_fire_interval_ms||0}ms${err}`;recoilDebug.textContent=`debug ${s.recoil_debug_state||"idle"} | mode-toggle ${s.recoil_mode_active?"ON":"OFF"} | F6 ${s.recoil_hold_engage_toggle?"ON":"OFF"} | ignore-mode ${s.recoil_ignore_mode_check?"ON":"OFF"} | trigger ${s.recoil_trigger_pressed?"DOWN":"UP"} | left ${s.recoil_left_pressed?"DOWN":"UP"} | x1 ${s.recoil_x1_pressed?"DOWN":"UP"} | spray ${s.recoil_spray_active?"ACTIVE":"IDLE"} | virtual aim ${s.recoil_virtual_active?"ACTIVE":"idle"} (${s.recoil_virtual_dx||0}, ${s.recoil_virtual_dy||0}) | scheduled (${s.recoil_scheduled_dx||0}, ${s.recoil_scheduled_dy||0}) | direct fallback last applied (${s.recoil_last_applied_dx||0}, ${s.recoil_last_applied_dy||0}) @ shot ${s.recoil_last_applied_shot_index||0} | applied count ${s.recoil_apply_count||0}`;}
-function renderStatus(s){const settle=s.target_found?`${s.pid_settled?"settled":"gating"} ${Number(s.pid_settle_error_metric_px||0).toFixed(1)}/${Number(s.pid_settle_threshold_px||0).toFixed(1)}`:"n/a";const damp=s.detection_dampening_ready?`damp ready ${Number(s.detection_dampening_streak||0)}/${Number(s.detection_dampening_required_frames||0)}`:`damp waiting ${Number(s.detection_dampening_streak||0)}/${Number(s.detection_dampening_required_frames||0)}`;const lead=s.lead_active?`lead ${Number(s.lead_time_ms||0).toFixed(1)}ms`:"lead off";const pred=`pred ${Number(s.predictive_pid_latency_ms||0).toFixed(1)}/${Number(s.predictive_pid_horizon_ms||0).toFixed(1)}ms dz ${s.predictive_pid_deadzone_active?"ON":"OFF"}`;const kalman=s.kalman_prediction_enable?`kalman ${s.kalman_active?"ON":"idle"} r ${Number(s.kalman_residual_px||0).toFixed(1)}/${Number(s.kalman_max_residual_px||0).toFixed(1)} age ${Number(s.kalman_prediction_age_ms||0).toFixed(1)}ms drop ${Number(s.kalman_predicted_only_frames||0)} snap ${Number(s.kalman_snap_count||0)}`:"kalman off";const assoc=s.target_association_enable?`assoc id ${s.target_association_active_id??-1} ${s.target_association_missing?"missing":s.target_association_locked?"locked":"idle"} tracks ${s.target_association_track_count||0} switches ${s.target_association_switch_count||0}`:"assoc off";const cropMode=s.capture_freeze_to_center_enable?"center":"follow";const crop=s.adaptive_capture_crop_enable?`crop ${cropMode} ${Number(s.adaptive_capture_crop_size||0)}px`:`crop ${cropMode} fixed`;const suppressCount=Number(s.mouse_move_suppress_count||0);const suppress=!s.mouse_move_suppress_on_fire_enable?"mouse-block off":s.mouse_move_suppress_supported?(s.mouse_move_suppress_active?`mouse-block ON #${suppressCount}`:`mouse-block idle #${suppressCount}`):"mouse-block unsupported";const recoilPath=s.recoil_virtual_aim_offset_enable?`virtual-recoil ${s.recoil_virtual_active?"ACTIVE":"idle"} (${s.recoil_virtual_dx||0}, ${s.recoil_virtual_dy||0})`:"virtual-recoil off";runtime.textContent=`Runtime ${s.running?"running":"stopped"} | mode ${s.mode_label} | aim ${s.aim_mode_label||s.aimmode_label} | preview ${s.debug_preview_enable?"ON":"OFF"} | overlay ${s.debug_overlay_enable?"ON":"OFF"} | F8 ${s.triggerbot_enable?"ON":"OFF"} | ${crop} | ${damp} | ${suppress} | recoil ${s.recoil_mode} | ${recoilPath} | profile ${s.selected_profile_name||s.selected_profile_id||"none"} | target ${s.target_found?"locked":"none"} | speed ${Number(s.target_speed).toFixed(1)} | ${lead} | ${pred} | ${kalman} | ${assoc} | settle ${settle} | cmd (${s.aim_dx}, ${s.aim_dy})`;renderStrategyNote(s.tracking_strategy);renderModeToggles(s);renderRecoilStatus(s);}
+function renderStatus(s){const settle=s.target_found?`${s.pid_settled?"settled":"gating"} ${Number(s.pid_settle_error_metric_px||0).toFixed(1)}/${Number(s.pid_settle_threshold_px||0).toFixed(1)}`:"n/a";const damp=s.detection_dampening_ready?`damp ready ${Number(s.detection_dampening_streak||0)}/${Number(s.detection_dampening_required_frames||0)}`:`damp waiting ${Number(s.detection_dampening_streak||0)}/${Number(s.detection_dampening_required_frames||0)}`;const lead=s.lead_active?`lead ${Number(s.lead_time_ms||0).toFixed(1)}ms`:"lead off";const pred=`pred ${Number(s.predictive_pid_latency_ms||0).toFixed(1)}/${Number(s.predictive_pid_horizon_ms||0).toFixed(1)}ms dz ${s.predictive_pid_deadzone_active?"ON":"OFF"}`;const kalman=s.kalman_prediction_enable?`kalman ${s.kalman_active?"ON":"idle"} r ${Number(s.kalman_residual_px||0).toFixed(1)}/${Number(s.kalman_max_residual_px||0).toFixed(1)} age ${Number(s.kalman_prediction_age_ms||0).toFixed(1)}ms drop ${Number(s.kalman_predicted_only_frames||0)} snap ${Number(s.kalman_snap_count||0)}`:"kalman off";const assoc=s.target_association_enable?`assoc id ${s.target_association_active_id??-1} ${s.target_association_missing?"missing":s.target_association_locked?"locked":"idle"} tracks ${s.target_association_track_count||0} switches ${s.target_association_switch_count||0}`:"assoc off";const cropMode=s.capture_freeze_to_center_enable?"center":"follow";const crop=s.adaptive_capture_crop_active?`crop ${cropMode} ${Number(s.adaptive_capture_crop_size||0)}px`:`crop ${cropMode} fixed`;const third=s.third_person_offset_active?`third-person crop (${s.third_person_effective_offset_x_px||0}, ${s.third_person_effective_offset_y_px||0})`:"third-person crop off";const suppressCount=Number(s.mouse_move_suppress_count||0);const suppress=!s.mouse_move_suppress_on_fire_enable?"mouse-block off":s.mouse_move_suppress_supported?(s.mouse_move_suppress_active?`mouse-block ON #${suppressCount}`:`mouse-block idle #${suppressCount}`):"mouse-block unsupported";const recoilPath=s.recoil_virtual_aim_offset_enable?`virtual-recoil ${s.recoil_virtual_active?"ACTIVE":"idle"} (${s.recoil_virtual_dx||0}, ${s.recoil_virtual_dy||0})`:"virtual-recoil off";runtime.textContent=`Runtime ${s.running?"running":"stopped"} | mode ${s.mode_label} | aim ${s.aim_mode_label||s.aimmode_label} | preview ${s.debug_preview_enable?"ON":"OFF"} | overlay ${s.debug_overlay_enable?"ON":"OFF"} | F8 ${s.triggerbot_enable?"ON":"OFF"} | ${crop} | ${third} | ${damp} | ${suppress} | recoil ${s.recoil_mode} | ${recoilPath} | profile ${s.selected_profile_name||s.selected_profile_id||"none"} | target ${s.target_found?"locked":"none"} | speed ${Number(s.target_speed).toFixed(1)} | ${lead} | ${pred} | ${kalman} | ${assoc} | settle ${settle} | cmd (${s.aim_dx}, ${s.aim_dy})`;renderStrategyNote(s.tracking_strategy);renderModeToggles(s);renderRecoilStatus(s);}
 function collectPayload(){const out={};for(const f of F){const i=G(f.k);if(!i)continue;out[f.k]=f.t==="b"?Boolean(i.checked):f.t==="s"?String(i.value):Number(i.value);}return out;}
 const collectRecoilPayload=()=>({recoil_mode:String(recoilMode.value),selected_recoil_profile_id:String(recoilProfile.value||"")});
 function renderProfiles(profiles,selectedId){const want=String(selectedId??recoilProfile.value??"");recoilProfile.innerHTML="";const empty=document.createElement("option");empty.value="";empty.textContent="No profile selected";recoilProfile.appendChild(empty);for(const p of profiles||[]){const o=document.createElement("option");o.value=String(p.id);o.textContent=p.valid?`${p.name} (${p.shot_count} shots)`:`${p.name} [invalid]`;o.disabled=!p.valid;recoilProfile.appendChild(o);}recoilProfile.value=want;if(recoilProfile.value!==want)recoilProfile.value="";}
@@ -770,6 +785,15 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     }
     if (const auto value = extractJsonBool(body, "capture_freeze_to_center_enable"); value.has_value()) {
         cfg.capture_freeze_to_center_enable = *value;
+    }
+    if (const auto value = extractJsonBool(body, "third_person_mode_enable"); value.has_value()) {
+        cfg.third_person_mode_enable = *value;
+    }
+    if (const auto value = extractJsonNumber(body, "third_person_offset_x_px"); value.has_value()) {
+        cfg.third_person_offset_x_px = static_cast<int>(std::lround(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "third_person_offset_y_px"); value.has_value()) {
+        cfg.third_person_offset_y_px = static_cast<int>(std::lround(*value));
     }
     if (const auto value = extractJsonBool(body, "adaptive_capture_crop_enable"); value.has_value()) {
         cfg.adaptive_capture_crop_enable = *value;

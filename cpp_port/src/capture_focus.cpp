@@ -88,12 +88,54 @@ std::pair<int, int> selectCaptureFocus(
     return tracked_focus;
 }
 
+ThirdPersonCaptureOffset effectiveThirdPersonCaptureOffset(
+    const RuntimeConfig& runtime,
+    const bool right_pressed) {
+    if (!runtime.third_person_mode_enable || right_pressed) {
+        return {};
+    }
+    return ThirdPersonCaptureOffset{
+        .active = runtime.third_person_offset_x_px != 0 || runtime.third_person_offset_y_px != 0,
+        .x_px = runtime.third_person_offset_x_px,
+        .y_px = runtime.third_person_offset_y_px,
+    };
+}
+
+std::pair<int, int> applyThirdPersonCaptureOffset(
+    const std::pair<int, int> focus,
+    const ThirdPersonCaptureOffset& offset,
+    const int screen_w,
+    const int screen_h) {
+    if (!offset.active) {
+        return focus;
+    }
+    return {
+        clamp(focus.first + offset.x_px, 0, std::max(0, screen_w - 1)),
+        clamp(focus.second + offset.y_px, 0, std::max(0, screen_h - 1)),
+    };
+}
+
+bool isAdaptiveCaptureCropActive(const RuntimeConfig& runtime, const bool right_pressed) {
+    return runtime.adaptive_capture_crop_enable
+        && (!runtime.third_person_mode_enable || right_pressed);
+}
+
 int fixedCaptureCropSize(const StaticConfig& config) {
     return clamp(effectiveCaptureCropSize(config), 1, maxCaptureSizeForScreen(config));
 }
 
 int initialCaptureCropSize(const StaticConfig& config, const RuntimeConfig& runtime) {
     if (!runtime.adaptive_capture_crop_enable) {
+        return fixedCaptureCropSize(config);
+    }
+    return adaptiveCropBounds(config, runtime).search_size;
+}
+
+int initialEffectiveCaptureCropSize(
+    const StaticConfig& config,
+    const RuntimeConfig& runtime,
+    const bool right_pressed) {
+    if (!isAdaptiveCaptureCropActive(runtime, right_pressed)) {
         return fixedCaptureCropSize(config);
     }
     return adaptiveCropBounds(config, runtime).search_size;
@@ -134,6 +176,18 @@ int updateAdaptiveCaptureCropSize(
         1.0F);
     const float smoothed = static_cast<float>(current) + ((desired - static_cast<float>(current)) * alpha);
     return quantizeCropSize(smoothed, bounds);
+}
+
+int updateEffectiveAdaptiveCaptureCropSize(
+    const StaticConfig& config,
+    const RuntimeConfig& runtime,
+    const bool right_pressed,
+    const int current_size,
+    const std::optional<CaptureCropTarget>& target) {
+    if (!isAdaptiveCaptureCropActive(runtime, right_pressed)) {
+        return fixedCaptureCropSize(config);
+    }
+    return updateAdaptiveCaptureCropSize(config, runtime, current_size, target);
 }
 
 }  // namespace delta

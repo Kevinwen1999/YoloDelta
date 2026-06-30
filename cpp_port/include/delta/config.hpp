@@ -170,6 +170,9 @@ struct RuntimeConfig {
     bool async_gpu_capture_fresh_only_enable = true;
     bool tensorrt_inline_fresh_only_enable = true;
     bool capture_freeze_to_center_enable = true;
+    bool third_person_mode_enable = false;
+    int third_person_offset_x_px = 250;
+    int third_person_offset_y_px = 0;
     bool display_rate_servo_enable = true;
     double display_rate_servo_hz = 0.0;
     double display_rate_servo_max_target_age_ms = 35.0;

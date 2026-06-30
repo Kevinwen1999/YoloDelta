@@ -164,6 +164,7 @@ struct SharedState {
     std::pair<int, int> last_target_full{1280, 720};
     std::pair<int, int> capture_focus_full{1280, 720};
     int adaptive_capture_crop_size = 624;
+    bool adaptive_capture_crop_active = true;
     SystemClock::time_point target_time{};
     std::atomic<float> ctrl_sent_vx_ema{0.0F};
     std::atomic<float> ctrl_sent_vy_ema{0.0F};

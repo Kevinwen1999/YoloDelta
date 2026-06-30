@@ -487,6 +487,12 @@ bool trackerRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig
         || lhs.kalman_measurement_noise != rhs.kalman_measurement_noise;
 }
 
+bool sameThirdPersonCaptureOffset(const ThirdPersonCaptureOffset& lhs, const ThirdPersonCaptureOffset& rhs) {
+    return lhs.active == rhs.active
+        && lhs.x_px == rhs.x_px
+        && lhs.y_px == rhs.y_px;
+}
+
 bool detectionDampeningRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rhs) {
     return lhs.detection_dampening_enable != rhs.detection_dampening_enable
         || lhs.detection_dampening_stable_frames != rhs.detection_dampening_stable_frames;
@@ -530,6 +536,7 @@ void clearAimStateLocked(
     const std::pair<int, int> center,
     const TrackingStrategy strategy,
     const int capture_crop_size,
+    const bool adaptive_capture_crop_active,
     const RuntimeConfig& runtime) {
     shared.target_found = false;
     shared.target_cls = -1;
@@ -565,6 +572,7 @@ void clearAimStateLocked(
     shared.last_target_full = center;
     shared.capture_focus_full = center;
     shared.adaptive_capture_crop_size = capture_crop_size;
+    shared.adaptive_capture_crop_active = adaptive_capture_crop_active;
     shared.target_time = {};
     shared.display_rate_servo = {};
     shared.tracking_strategy = trackingStrategyName(strategy);
@@ -1117,7 +1125,8 @@ DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
     std::lock_guard<std::mutex> lock(shared_.mutex);
     shared_.last_target_full = center;
     shared_.capture_focus_full = center;
-    shared_.adaptive_capture_crop_size = initialCaptureCropSize(config_, initial_runtime);
+    shared_.adaptive_capture_crop_size = initialEffectiveCaptureCropSize(config_, initial_runtime, false);
+    shared_.adaptive_capture_crop_active = isAdaptiveCaptureCropActive(initial_runtime, false);
     shared_.tracking_strategy = trackingStrategyName(initial_runtime.tracking_strategy);
     shared_.detection_dampening_ready = !initial_runtime.detection_dampening_enable;
     shared_.detection_dampening_streak = 0;
@@ -1278,7 +1287,9 @@ void DeltaApp::captureLoop() {
                 capture_->setFreshOnly(skip_cached_async_gpu);
             }
             std::pair<int, int> focus = center;
-            int crop_size = initialCaptureCropSize(config_, runtime);
+            int shared_crop_size = 0;
+            bool right_pressed = false;
+            bool shared_adaptive_crop_active = false;
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
                 focus = selectCaptureFocus(
@@ -1286,12 +1297,20 @@ void DeltaApp::captureLoop() {
                     shared_.target_found,
                     center,
                     shared_.capture_focus_full);
+                right_pressed = shared_.toggles.right_pressed;
+                shared_adaptive_crop_active = shared_.adaptive_capture_crop_active;
                 if (shared_.adaptive_capture_crop_size > 0) {
-                    crop_size = shared_.adaptive_capture_crop_size;
+                    shared_crop_size = shared_.adaptive_capture_crop_size;
                 }
             }
-            if (!runtime.adaptive_capture_crop_enable) {
-                crop_size = fixedCaptureCropSize(config_);
+            focus = applyThirdPersonCaptureOffset(
+                focus,
+                effectiveThirdPersonCaptureOffset(runtime, right_pressed),
+                config_.screen_w,
+                config_.screen_h);
+            int crop_size = initialEffectiveCaptureCropSize(config_, runtime, right_pressed);
+            if (isAdaptiveCaptureCropActive(runtime, right_pressed) && shared_adaptive_crop_active && shared_crop_size > 0) {
+                crop_size = shared_crop_size;
             }
 
             const CaptureRegion region = buildCaptureRegion(config_, focus.first, focus.second, crop_size);
@@ -1417,6 +1436,8 @@ void DeltaApp::inferenceLoop() {
         bool last_debug_preview_enabled = runtime.debug_preview_enable;
         bool last_debug_overlay_enabled = runtime.debug_overlay_enable;
         bool preview_idle_state = true;
+        std::optional<ThirdPersonCaptureOffset> last_effective_capture_offset;
+        std::optional<bool> last_effective_adaptive_capture_crop;
         const auto resetPidControllers = [&](const SteadyClock::time_point pid_tick = SteadyClock::time_point{}) {
             pid_x.reset();
             pid_y.reset();
@@ -1467,6 +1488,31 @@ void DeltaApp::inferenceLoop() {
                 if (debug_overlay_ && debug_overlay_enabled) {
                     debug_overlay_->publish(std::move(snapshot));
                 }
+            };
+            const auto makeInactiveCaptureRegion = [&](const bool right_pressed, const int crop_size) {
+                const std::pair<int, int> focus = applyThirdPersonCaptureOffset(
+                    center,
+                    effectiveThirdPersonCaptureOffset(runtime, right_pressed),
+                    config_.screen_w,
+                    config_.screen_h);
+                return buildCaptureRegion(config_, focus.first, focus.second, crop_size);
+            };
+            const auto clearAimStateWithEffectiveCrop = [&]() -> std::pair<int, bool> {
+                int reset_crop_size = initialEffectiveCaptureCropSize(config_, runtime, false);
+                bool right_pressed = false;
+                {
+                    std::lock_guard<std::mutex> lock(shared_.mutex);
+                    right_pressed = shared_.toggles.right_pressed;
+                    reset_crop_size = initialEffectiveCaptureCropSize(config_, runtime, right_pressed);
+                    clearAimStateLocked(
+                        shared_,
+                        center,
+                        runtime.tracking_strategy,
+                        reset_crop_size,
+                        isAdaptiveCaptureCropActive(runtime, right_pressed),
+                        runtime);
+                }
+                return {reset_crop_size, right_pressed};
             };
 
             if (debug_preview_ && debug_preview_enabled != last_debug_preview_enabled) {
@@ -1549,15 +1595,12 @@ void DeltaApp::inferenceLoop() {
                 detection_dampening_state.reset();
                 command_slot_.clear();
                 last_kalman_snap_count = 0;
-                {
-                    std::lock_guard<std::mutex> lock(shared_.mutex);
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime), runtime);
-                }
+                const auto [reset_crop_size, reset_right_pressed] = clearAimStateWithEffectiveCrop();
                 last_tracking_strategy = runtime.tracking_strategy;
                 last_tracker_runtime = runtime;
                 if (debug_visuals_enabled) {
                     publishDebugSnapshot(makeInactiveDebugPreviewSnapshot(
-                        buildCaptureRegion(config_, center.first, center.second, initialCaptureCropSize(config_, runtime)),
+                        makeInactiveCaptureRegion(reset_right_pressed, reset_crop_size),
                         center));
                 }
                 preview_idle_state = true;
@@ -1581,14 +1624,11 @@ void DeltaApp::inferenceLoop() {
                 target_lead_state.reset();
                 detection_dampening_state.reset();
                 command_slot_.clear();
-                {
-                    std::lock_guard<std::mutex> lock(shared_.mutex);
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime), runtime);
-                }
+                const auto [reset_crop_size, reset_right_pressed] = clearAimStateWithEffectiveCrop();
                 last_aim_mode = runtime.aim_mode;
                 if (debug_visuals_enabled) {
                     publishDebugSnapshot(makeInactiveDebugPreviewSnapshot(
-                        buildCaptureRegion(config_, center.first, center.second, initialCaptureCropSize(config_, runtime)),
+                        makeInactiveCaptureRegion(reset_right_pressed, reset_crop_size),
                         center));
                 }
                 preview_idle_state = true;
@@ -1609,6 +1649,58 @@ void DeltaApp::inferenceLoop() {
                 prev_target_full = shared_.last_target_full;
                 prev_target_time = shared_.target_time;
                 shared_.tracking_strategy = trackingStrategyName(runtime.tracking_strategy);
+            }
+
+            const ThirdPersonCaptureOffset effective_capture_offset = effectiveThirdPersonCaptureOffset(
+                runtime,
+                toggles.right_pressed);
+            const bool effective_adaptive_capture_crop = isAdaptiveCaptureCropActive(runtime, toggles.right_pressed);
+            if (!last_effective_capture_offset.has_value() || !last_effective_adaptive_capture_crop.has_value()) {
+                last_effective_capture_offset = effective_capture_offset;
+                last_effective_adaptive_capture_crop = effective_adaptive_capture_crop;
+            } else if (!sameThirdPersonCaptureOffset(*last_effective_capture_offset, effective_capture_offset)
+                || *last_effective_adaptive_capture_crop != effective_adaptive_capture_crop) {
+                tracker->reset();
+                resetPidControllers();
+                resetAimTrackingState(
+                    lost_frames,
+                    active_target_cls,
+                    last_box_w,
+                    last_box_h,
+                    last_target_bbox,
+                    last_pid_tick,
+                    last_track_tick);
+                target_guard_state.reset();
+                target_association.reset();
+                target_lead_state.reset();
+                detection_dampening_state.reset();
+                command_slot_.clear();
+                const int reset_crop_size = initialEffectiveCaptureCropSize(config_, runtime, toggles.right_pressed);
+                {
+                    std::lock_guard<std::mutex> lock(shared_.mutex);
+                    clearAimStateLocked(
+                        shared_,
+                        center,
+                        runtime.tracking_strategy,
+                        reset_crop_size,
+                        effective_adaptive_capture_crop,
+                        runtime);
+                }
+                last_effective_capture_offset = effective_capture_offset;
+                last_effective_adaptive_capture_crop = effective_adaptive_capture_crop;
+                if (debug_visuals_enabled) {
+                    const std::pair<int, int> preview_focus = applyThirdPersonCaptureOffset(
+                        center,
+                        effective_capture_offset,
+                        config_.screen_w,
+                        config_.screen_h);
+                    publishDebugSnapshot(makeInactiveDebugPreviewSnapshot(
+                        buildCaptureRegion(config_, preview_focus.first, preview_focus.second, reset_crop_size),
+                        center));
+                }
+                preview_idle_state = true;
+                std::this_thread::sleep_for(kInferenceIdleSleep);
+                continue;
             }
 
             const bool engage_active = (toggles.mode != 0)
@@ -1637,13 +1729,20 @@ void DeltaApp::inferenceLoop() {
                 target_lead_state.reset();
                 detection_dampening_state.reset();
                 command_slot_.clear();
+                const int reset_crop_size = initialEffectiveCaptureCropSize(config_, runtime, toggles.right_pressed);
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime), runtime);
+                    clearAimStateLocked(
+                        shared_,
+                        center,
+                        runtime.tracking_strategy,
+                        reset_crop_size,
+                        isAdaptiveCaptureCropActive(runtime, toggles.right_pressed),
+                        runtime);
                 }
                 if (debug_visuals_enabled && !preview_idle_state) {
                     publishDebugSnapshot(makeInactiveDebugPreviewSnapshot(
-                        buildCaptureRegion(config_, center.first, center.second, initialCaptureCropSize(config_, runtime)),
+                        makeInactiveCaptureRegion(toggles.right_pressed, reset_crop_size),
                         center));
                 }
                 preview_idle_state = true;
@@ -1668,9 +1767,16 @@ void DeltaApp::inferenceLoop() {
                 target_lead_state.reset();
                 detection_dampening_state.reset();
                 command_slot_.clear();
+                const int reset_crop_size = initialEffectiveCaptureCropSize(config_, runtime, toggles.right_pressed);
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime), runtime);
+                    clearAimStateLocked(
+                        shared_,
+                        center,
+                        runtime.tracking_strategy,
+                        reset_crop_size,
+                        isAdaptiveCaptureCropActive(runtime, toggles.right_pressed),
+                        runtime);
                 }
             }
 
@@ -1682,7 +1788,9 @@ void DeltaApp::inferenceLoop() {
                 gpu_packet = gpu_frame_slot_.wait_take_for(kInferenceIdleSleep);
             } else if (isInlineGpuCaptureSchedule(capture_schedule)) {
                 std::pair<int, int> focus = center;
-                int crop_size = initialCaptureCropSize(config_, runtime);
+                int shared_crop_size = 0;
+                bool right_pressed = false;
+                bool shared_adaptive_crop_active = false;
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     focus = selectCaptureFocus(
@@ -1690,12 +1798,20 @@ void DeltaApp::inferenceLoop() {
                         shared_.target_found,
                         center,
                         shared_.capture_focus_full);
+                    right_pressed = shared_.toggles.right_pressed;
+                    shared_adaptive_crop_active = shared_.adaptive_capture_crop_active;
                     if (shared_.adaptive_capture_crop_size > 0) {
-                        crop_size = shared_.adaptive_capture_crop_size;
+                        shared_crop_size = shared_.adaptive_capture_crop_size;
                     }
                 }
-                if (!runtime.adaptive_capture_crop_enable) {
-                    crop_size = fixedCaptureCropSize(config_);
+                focus = applyThirdPersonCaptureOffset(
+                    focus,
+                    effectiveThirdPersonCaptureOffset(runtime, right_pressed),
+                    config_.screen_w,
+                    config_.screen_h);
+                int crop_size = initialEffectiveCaptureCropSize(config_, runtime, right_pressed);
+                if (isAdaptiveCaptureCropActive(runtime, right_pressed) && shared_adaptive_crop_active && shared_crop_size > 0) {
+                    crop_size = shared_crop_size;
                 }
                 const CaptureRegion region = buildCaptureRegion(config_, focus.first, focus.second, crop_size);
                 const auto grab_start = SteadyClock::now();
@@ -1961,21 +2077,24 @@ void DeltaApp::inferenceLoop() {
                     .capture = capture_region,
                 };
             }
-            int previous_crop_size = initialCaptureCropSize(config_, runtime);
+            int previous_crop_size = initialEffectiveCaptureCropSize(config_, runtime, toggles.right_pressed);
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
-                if (shared_.adaptive_capture_crop_size > 0) {
+                if (shared_.adaptive_capture_crop_active == effective_adaptive_capture_crop
+                    && shared_.adaptive_capture_crop_size > 0) {
                     previous_crop_size = shared_.adaptive_capture_crop_size;
                 }
             }
-            const int next_crop_size = updateAdaptiveCaptureCropSize(
+            const int next_crop_size = updateEffectiveAdaptiveCaptureCropSize(
                 config_,
                 runtime,
+                toggles.right_pressed,
                 previous_crop_size,
                 crop_target);
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
                 shared_.adaptive_capture_crop_size = next_crop_size;
+                shared_.adaptive_capture_crop_active = effective_adaptive_capture_crop;
             }
             const bool target_switched = selected_detection
                 && (sticky->switched
@@ -2197,9 +2316,16 @@ void DeltaApp::inferenceLoop() {
                 target_lead_state.reset();
                 recoil_aim_offset.reset();
                 command_slot_.clear();
+                const int reset_crop_size = initialEffectiveCaptureCropSize(config_, runtime, toggles.right_pressed);
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime), runtime);
+                    clearAimStateLocked(
+                        shared_,
+                        center,
+                        runtime.tracking_strategy,
+                        reset_crop_size,
+                        isAdaptiveCaptureCropActive(runtime, toggles.right_pressed),
+                        runtime);
                 }
                 if (debug_visuals_enabled) {
                     const auto preview_start = SteadyClock::now();
@@ -2242,9 +2368,16 @@ void DeltaApp::inferenceLoop() {
                     target_association.reset();
                     target_lead_state.reset();
                     command_slot_.clear();
+                    const int reset_crop_size = initialEffectiveCaptureCropSize(config_, runtime, toggles.right_pressed);
                     {
                         std::lock_guard<std::mutex> lock(shared_.mutex);
-                        clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime), runtime);
+                        clearAimStateLocked(
+                            shared_,
+                            center,
+                            runtime.tracking_strategy,
+                            reset_crop_size,
+                            isAdaptiveCaptureCropActive(runtime, toggles.right_pressed),
+                            runtime);
                     }
                     if (debug_visuals_enabled) {
                         const auto preview_start = SteadyClock::now();
@@ -2869,7 +3002,13 @@ void DeltaApp::controlLoop() {
                     command_slot_.clear();
                     pending_aim_cmd.reset();
                     next_aim_budget_tick = {};
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime), runtime);
+                    clearAimStateLocked(
+                        shared_,
+                        center,
+                        runtime.tracking_strategy,
+                        initialEffectiveCaptureCropSize(config_, runtime, snapshot.right_pressed),
+                        isAdaptiveCaptureCropActive(runtime, snapshot.right_pressed),
+                        runtime);
                 }
                 if (config_.debug_log) {
                     std::cout << "[control] Mode: " << mode << " (" << (mode == 1 ? "ACTIVE" : "OFF") << ")\n";
@@ -2883,7 +3022,13 @@ void DeltaApp::controlLoop() {
                 command_slot_.clear();
                 pending_aim_cmd.reset();
                 next_aim_budget_tick = {};
-                clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime), runtime);
+                clearAimStateLocked(
+                    shared_,
+                    center,
+                    runtime.tracking_strategy,
+                    initialEffectiveCaptureCropSize(config_, runtime, snapshot.right_pressed),
+                    isAdaptiveCaptureCropActive(runtime, snapshot.right_pressed),
+                    runtime);
             }
             if (risingEdge(snapshot.f6_pressed, previous.f6_pressed) && (steady_now - last_hold_toggle) >= kToggleCooldown) {
                 shared_.toggles.left_hold_engage = !shared_.toggles.left_hold_engage;
@@ -2897,7 +3042,13 @@ void DeltaApp::controlLoop() {
                     command_slot_.clear();
                     pending_aim_cmd.reset();
                     next_aim_budget_tick = {};
-                    clearAimStateLocked(shared_, center, runtime.tracking_strategy, initialCaptureCropSize(config_, runtime), runtime);
+                    clearAimStateLocked(
+                        shared_,
+                        center,
+                        runtime.tracking_strategy,
+                        initialEffectiveCaptureCropSize(config_, runtime, snapshot.right_pressed),
+                        isAdaptiveCaptureCropActive(runtime, snapshot.right_pressed),
+                        runtime);
                 }
                 if (config_.debug_log) {
                     std::cout << "[control] HoldEngage: " << (shared_.toggles.left_hold_engage ? "ON" : "OFF") << "\n";
