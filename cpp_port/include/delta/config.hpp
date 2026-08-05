@@ -288,6 +288,7 @@ struct RuntimeConfig {
     RecoilMode recoil_mode = RecoilMode::Legacy;
     std::string selected_recoil_profile_id;
     bool recoil_virtual_aim_offset_enable = false;
+    bool recoil_fallback_with_target_enable = false;
     float recoil_compensation_y_rate_px_s = 0.0F;
     float recoil_compensation_y_px = 8.0F;
     LeftHoldEngageButton left_hold_engage_button = LeftHoldEngageButton::Both;
@@ -298,7 +299,7 @@ struct RuntimeConfig {
     int triggerbot_arm_min_x_px = 0;
     int triggerbot_arm_min_y_px = 0;
     float triggerbot_click_hold_s = 0.001F;
-    float triggerbot_click_cooldown_s = 0.001F;
+    float triggerbot_click_cooldown_s = 0.000F;
     bool mouse_move_suppress_on_fire_enable = false;
     bool mouse_move_suppress_on_fire_debug = false;
     bool side_button_key_sequence_use_key3 = true;

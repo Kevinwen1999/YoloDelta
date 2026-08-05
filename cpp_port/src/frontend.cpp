@@ -146,6 +146,7 @@ json buildRecoilConfigJson(const RuntimeConfig& cfg) {
         {"recoil_mode", recoilModeName(cfg.recoil_mode)},
         {"selected_recoil_profile_id", cfg.selected_recoil_profile_id},
         {"recoil_virtual_aim_offset_enable", cfg.recoil_virtual_aim_offset_enable},
+        {"recoil_fallback_with_target_enable", cfg.recoil_fallback_with_target_enable},
     };
 }
 
@@ -154,6 +155,7 @@ json buildRecoilStatusObject(const RuntimeConfig& cfg, const SharedState& shared
     return json{
         {"recoil_mode", recoilModeName(shared_state.recoil.mode)},
         {"recoil_virtual_aim_offset_enable", cfg.recoil_virtual_aim_offset_enable},
+        {"recoil_fallback_with_target_enable", cfg.recoil_fallback_with_target_enable},
         {"recoil_enabled", shared_state.recoil.enabled},
         {"recoil_ignore_mode_check", shared_state.recoil.ignore_mode_check},
         {"recoil_mode_active", shared_state.recoil.mode_active},
@@ -227,6 +229,13 @@ bool applyRecoilPatch(const std::string& body, RuntimeConfig& cfg, std::string& 
             return false;
         }
         cfg.recoil_virtual_aim_offset_enable = it->get<bool>();
+    }
+    if (const auto it = payload.find("recoil_fallback_with_target_enable"); it != payload.end()) {
+        if (!it->is_boolean()) {
+            error = "recoil_fallback_with_target_enable must be a bool.";
+            return false;
+        }
+        cfg.recoil_fallback_with_target_enable = it->get<bool>();
     }
     return true;
 }
@@ -363,6 +372,7 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"recoil_mode\":\"" << recoilModeName(cfg.recoil_mode) << "\","
         << "\"selected_recoil_profile_id\":\"" << jsonEscape(cfg.selected_recoil_profile_id) << "\","
         << "\"recoil_virtual_aim_offset_enable\":" << (cfg.recoil_virtual_aim_offset_enable ? "true" : "false") << ","
+        << "\"recoil_fallback_with_target_enable\":" << (cfg.recoil_fallback_with_target_enable ? "true" : "false") << ","
         << "\"triggerbot_enable\":" << (cfg.triggerbot_enable ? "true" : "false") << ","
         << "\"triggerbot_arm_scale_x\":" << cfg.triggerbot_arm_scale_x << ","
         << "\"triggerbot_arm_scale_y\":" << cfg.triggerbot_arm_scale_y << ","
@@ -464,6 +474,7 @@ std::string buildStatusJson(const RuntimeConfig& cfg, const SharedState& shared_
         << "\"aim_dx\":" << shared_state.aim_dx << ","
         << "\"aim_dy\":" << shared_state.aim_dy << ","
         << "\"recoil_virtual_aim_offset_enable\":" << (cfg.recoil_virtual_aim_offset_enable ? "true" : "false") << ","
+        << "\"recoil_fallback_with_target_enable\":" << (cfg.recoil_fallback_with_target_enable ? "true" : "false") << ","
         << "\"recoil_virtual_active\":" << (shared_state.recoil_virtual_active ? "true" : "false") << ","
         << "\"recoil_virtual_dx\":" << shared_state.recoil_virtual_dx << ","
         << "\"recoil_virtual_dy\":" << shared_state.recoil_virtual_dy << ","
@@ -628,6 +639,7 @@ std::string buildPageHtml() {
       {key:"recoil_compensation_y_rate_px_s",label:"Recoil Comp Y Rate (px/s)",type:"number",step:1},
       {key:"recoil_compensation_y_px",label:"Legacy Recoil Comp Y (px/cmd)",type:"number",step:0.1},
       {key:"recoil_virtual_aim_offset_enable",label:"Virtual Recoil Aim Offset",type:"bool"},
+      {key:"recoil_fallback_with_target_enable",label:"Recoil Fallback With Target",type:"bool"},
       {key:"left_hold_engage_button",label:"F6 Engage Button",type:"select",options:[{value:"rightkey",label:"Right Key"},{value:"leftkey",label:"Left Key"},{value:"x1",label:"X1 Side Button"},{value:"both",label:"Left / Right / X1"}]},
       {key:"recoil_tune_fallback_ignore_mode_check",label:"F7 Ignore Mode Check",type:"bool"},
       {key:"sendinput_gain_x",label:"SendInput Gain X",type:"number",step:0.001},
@@ -731,7 +743,7 @@ const F=[
 {g:"Target Lead",k:"target_lead_enable",l:"Target Lead",t:"b"},{g:"Target Lead",k:"target_lead_commit_frames",l:"Target Lead Commit Frames",t:"n",s:1,n:1},{g:"Target Lead",k:"target_lead_auto_latency_enable",l:"Target Lead Auto Latency",t:"b"},{g:"Target Lead",k:"target_lead_max_time_s",l:"Target Lead Max Time (s)",t:"n",s:0.001,n:0},{g:"Target Lead",k:"target_lead_min_speed_px_s",l:"Target Lead Min Speed (px/s)",t:"n",s:1,n:0},{g:"Target Lead",k:"target_lead_max_offset_box_scale",l:"Target Lead Max Box Scale",t:"n",s:0.01,n:0},{g:"Target Lead",k:"target_lead_smoothing_alpha",l:"Target Lead Smoothing",t:"n",s:0.001,n:0,x:1},{g:"Target Lead",k:"prediction_time",l:"Target Lead Manual Bias (s)",t:"n",s:0.001},
 {g:"TriggerBot",k:"triggerbot_enable",l:"Trigger Bot",t:"b"},{g:"TriggerBot",k:"triggerbot_arm_scale_x",l:"Trigger Arm X Scale",t:"n",s:0.01,n:0},{g:"TriggerBot",k:"triggerbot_arm_scale_y",l:"Trigger Arm Y Scale",t:"n",s:0.01,n:0},{g:"TriggerBot",k:"triggerbot_arm_min_x_px",l:"Trigger Arm Min X (px)",t:"n",s:1,n:0},{g:"TriggerBot",k:"triggerbot_arm_min_y_px",l:"Trigger Arm Min Y (px)",t:"n",s:1,n:0},{g:"TriggerBot",k:"triggerbot_click_hold_s",l:"Trigger Hold (s)",t:"n",s:0.001,n:0},{g:"TriggerBot",k:"triggerbot_click_cooldown_s",l:"Trigger Cooldown (s)",t:"n",s:0.001,n:0},
 {g:"Ego Motion",k:"ego_motion_comp_enable",l:"Ego Motion Comp",t:"b"},{g:"Ego Motion",k:"ego_motion_comp_gain_x",l:"Ego Comp Gain X",t:"n",s:0.001},{g:"Ego Motion",k:"ego_motion_comp_gain_y",l:"Ego Comp Gain Y",t:"n",s:0.001},{g:"Ego Motion",k:"ego_motion_error_gate_enable",l:"Ego Error Gate",t:"b"},{g:"Ego Motion",k:"ego_motion_error_gate_px",l:"Ego Gate Error (px)",t:"n",s:1,n:0},{g:"Ego Motion",k:"ego_motion_error_gate_normalize_by_box",l:"Ego Gate Normalize By Box",t:"b"},{g:"Ego Motion",k:"ego_motion_error_gate_norm_threshold",l:"Ego Gate Norm Threshold",t:"n",s:0.01,n:0},{g:"Ego Motion",k:"ego_motion_reset_on_switch",l:"Reset Ego On Switch",t:"b"},
-{g:"Recoil & Engage",k:"recoil_compensation_y_rate_px_s",l:"Legacy Recoil Y Rate (px/s)",t:"n",s:1},{g:"Recoil & Engage",k:"recoil_compensation_y_px",l:"Legacy Recoil Y (px/cmd)",t:"n",s:0.1},{g:"Recoil & Engage",k:"recoil_virtual_aim_offset_enable",l:"Virtual Recoil Aim Offset",t:"b"},{g:"Recoil & Engage",k:"left_hold_engage_button",l:"F6 Engage Button",t:"s",o:[["rightkey","Right Key"],["leftkey","Left Key"],["x1","X1 Side Button"],["both","Left / Right / X1"]]},{g:"Recoil & Engage",k:"recoil_tune_fallback_ignore_mode_check",l:"F7 Ignore Mode Check",t:"b"},
+{g:"Recoil & Engage",k:"recoil_compensation_y_rate_px_s",l:"Legacy Recoil Y Rate (px/s)",t:"n",s:1},{g:"Recoil & Engage",k:"recoil_compensation_y_px",l:"Legacy Recoil Y (px/cmd)",t:"n",s:0.1},{g:"Recoil & Engage",k:"recoil_virtual_aim_offset_enable",l:"Virtual Recoil Aim Offset",t:"b"},{g:"Recoil & Engage",k:"recoil_fallback_with_target_enable",l:"Recoil Fallback With Target",t:"b"},{g:"Recoil & Engage",k:"left_hold_engage_button",l:"F6 Engage Button",t:"s",o:[["rightkey","Right Key"],["leftkey","Left Key"],["x1","X1 Side Button"],["both","Left / Right / X1"]]},{g:"Recoil & Engage",k:"recoil_tune_fallback_ignore_mode_check",l:"F7 Ignore Mode Check",t:"b"},
 {g:"Input & Suppression",k:"mouse_move_suppress_on_fire_enable",l:"Suppress Mouse Move While Firing",t:"b"},{g:"Input & Suppression",k:"mouse_move_suppress_on_fire_debug",l:"Mouse Suppression Debug",t:"b"},{g:"Input & Suppression",k:"sendinput_gain_x",l:"SendInput Gain X",t:"n",s:0.001},{g:"Input & Suppression",k:"sendinput_gain_y",l:"SendInput Gain Y",t:"n",s:0.001},{g:"Input & Suppression",k:"sendinput_max_step",l:"SendInput Max Step",t:"n",s:1,n:1},
 {g:"F5 X1 Sequence",k:"side_button_key_sequence_use_right_click",l:"Step 1: Use Right Click",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_right_click_hold_ms",l:"Step 1: Right Click Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_use_left_click",l:"Step 2: Use Left Click",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_left_click_hold_ms",l:"Step 2: Left Click Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_use_key3",l:"Step 3: Use Key 3",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_key3_press_time_ms",l:"Step 3: Key 3 Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_use_key1",l:"Step 4: Use Key 1",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_key1_press_time_ms",l:"Step 4: Key 1 Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_loop_delay_ms",l:"Step 5: Wait Before Next Loop (ms)",t:"n",s:0.001,n:0}
 ];
@@ -1075,6 +1087,9 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     if (const auto value = extractJsonString(body, "selected_recoil_profile_id"); value.has_value()) cfg.selected_recoil_profile_id = *value;
     if (const auto value = extractJsonBool(body, "recoil_virtual_aim_offset_enable"); value.has_value()) {
         cfg.recoil_virtual_aim_offset_enable = *value;
+    }
+    if (const auto value = extractJsonBool(body, "recoil_fallback_with_target_enable"); value.has_value()) {
+        cfg.recoil_fallback_with_target_enable = *value;
     }
     if (const auto value = extractJsonBool(body, "triggerbot_enable"); value.has_value()) cfg.triggerbot_enable = *value;
     if (const auto value = extractJsonNumber(body, "triggerbot_arm_scale_x"); value.has_value()) {

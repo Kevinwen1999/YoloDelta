@@ -204,6 +204,12 @@ RecoilMode parseRecoilMode(const std::string_view value) {
     return RecoilMode::Legacy;
 }
 
+bool shouldAllowRecoilFallbackCommand(const RuntimeConfig& runtime, const bool target_command_allowed) {
+    return !target_command_allowed
+        || runtime.recoil_tune_fallback_ignore_mode_check
+        || runtime.recoil_fallback_with_target_enable;
+}
+
 bool ensureRecoilProfilesDirectory(const StaticConfig& config, std::string* error) {
     std::error_code ec;
     const fs::path root = recoilProfilesRoot(config);

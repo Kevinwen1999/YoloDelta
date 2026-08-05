@@ -17,6 +17,13 @@ TriggerbotConfig buildTriggerbotConfig(const RuntimeConfig& runtime) {
     return config;
 }
 
+bool isTriggerbotMonitorActive(
+    const TriggerbotConfig& config,
+    const bool mode_active,
+    const bool user_left_pressed) {
+    return config.enable && mode_active && !user_left_pressed;
+}
+
 std::pair<float, float> triggerbotArmThresholds(
     const Detection& detection,
     const TriggerbotConfig& config) {

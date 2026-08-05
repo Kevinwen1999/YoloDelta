@@ -19,6 +19,11 @@ struct TriggerbotConfig {
 
 TriggerbotConfig buildTriggerbotConfig(const RuntimeConfig& runtime);
 
+bool isTriggerbotMonitorActive(
+    const TriggerbotConfig& config,
+    bool mode_active,
+    bool user_left_pressed);
+
 std::pair<float, float> triggerbotArmThresholds(
     const Detection& detection,
     const TriggerbotConfig& config);

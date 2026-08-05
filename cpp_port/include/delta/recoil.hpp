@@ -71,6 +71,7 @@ struct RecoilSchedulerUpdate {
 
 const char* recoilModeName(RecoilMode mode);
 RecoilMode parseRecoilMode(std::string_view value);
+bool shouldAllowRecoilFallbackCommand(const RuntimeConfig& runtime, bool target_command_allowed);
 
 bool ensureRecoilProfilesDirectory(const StaticConfig& config, std::string* error = nullptr);
 std::filesystem::path recoilProfilesRoot(const StaticConfig& config);

@@ -1710,7 +1710,10 @@ void DeltaApp::inferenceLoop() {
                     toggles.left_pressed,
                     toggles.right_pressed,
                     toggles.x1_pressed);
-            const bool triggerbot_monitor_active = (toggles.mode != 0) && runtime.triggerbot_enable;
+            const bool triggerbot_monitor_active = isTriggerbotMonitorActive(
+                triggerbot_config,
+                toggles.mode != 0,
+                toggles.left_pressed);
             const bool debug_overlay_observe_active = debug_overlay_enabled && !engage_active && !triggerbot_monitor_active;
 
             if (!(engage_active || triggerbot_monitor_active || debug_overlay_observe_active)) {
@@ -3332,7 +3335,7 @@ void DeltaApp::controlLoop() {
                 };
             } else {
                 const bool mode_ok = runtime.recoil_tune_fallback_ignore_mode_check || (toggles.mode != 0);
-                const bool target_ok = runtime.recoil_tune_fallback_ignore_mode_check || !target_command_allowed;
+                const bool target_ok = shouldAllowRecoilFallbackCommand(runtime, target_command_allowed);
                 const bool engage_ok = isLeftHoldEngageSatisfied(
                     toggles.left_hold_engage,
                     runtime.left_hold_engage_button,
@@ -3416,7 +3419,10 @@ void DeltaApp::controlLoop() {
                 toggles.left_pressed,
                 toggles.right_pressed,
                 toggles.x1_pressed));
-        const bool trigger_enabled = triggerbot_config.enable;
+        const bool trigger_enabled = isTriggerbotMonitorActive(
+            triggerbot_config,
+            toggles.mode != 0,
+            toggles.left_pressed);
         const bool trigger_fire = trigger_enabled && target_command_allowed && cmd->trigger_fire;
         if (!(engage_active || trigger_fire)) {
             {
