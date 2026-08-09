@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <regex>
 #include <sstream>
@@ -396,6 +397,9 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"left_hold_engage_button\":\"" << engageButtonName(cfg.left_hold_engage_button) << "\","
         << "\"recoil_tune_fallback_ignore_mode_check\":"
         << (cfg.recoil_tune_fallback_ignore_mode_check ? "true" : "false") << ","
+        << "\"mouse_output_method\":\"" << mouseOutputMethodName(cfg.mouse_output_method) << "\","
+        << "\"serial_mouse_port\":\"" << jsonEscape(cfg.serial_mouse_port) << "\","
+        << "\"serial_mouse_baud\":" << cfg.serial_mouse_baud << ","
         << "\"sendinput_gain_x\":" << cfg.sendinput_gain_x << ","
         << "\"sendinput_gain_y\":" << cfg.sendinput_gain_y << ","
         << "\"sendinput_max_step\":" << cfg.sendinput_max_step << ","
@@ -470,6 +474,10 @@ std::string buildStatusJson(const RuntimeConfig& cfg, const SharedState& shared_
         << "\"mouse_move_suppress_active\":" << (shared_state.mouse_move_suppress_active ? "true" : "false") << ","
         << "\"mouse_move_suppress_supported\":" << (shared_state.mouse_move_suppress_supported ? "true" : "false") << ","
         << "\"mouse_move_suppress_count\":" << shared_state.mouse_move_suppress_count << ","
+        << "\"mouse_output_method\":\"" << jsonEscape(shared_state.mouse_output_method) << "\","
+        << "\"mouse_output_status\":\"" << jsonEscape(shared_state.mouse_output_status) << "\","
+        << "\"serial_mouse_connected\":" << (shared_state.serial_mouse_connected ? "true" : "false") << ","
+        << "\"serial_mouse_error\":\"" << jsonEscape(shared_state.serial_mouse_error) << "\","
         << "\"target_cls\":" << shared_state.target_cls << ","
         << "\"aim_dx\":" << shared_state.aim_dx << ","
         << "\"aim_dy\":" << shared_state.aim_dy << ","
@@ -725,7 +733,7 @@ body{margin:0;padding:18px;background:#0f1518;color:#eef6fa;font:14px "Segoe UI"
 <section><h1>Delta Native Runtime</h1><div id="runtime" class="bar">Connecting...</div><div id="message" class="bar">Loading configuration...</div><div id="strategy-note" class="bar">Loading strategy note...</div></section>
 <section><h2>Mode Toggles</h2><div class="grid"><div class="field"><label for="aim-mode">F4 Aim Mode</label><select id="aim-mode"><option value="head">Head</option><option value="body">Body</option><option value="hybrid">Hybrid</option></select></div><div class="field"><label>XBUTTON2 Mode</label><div id="toggle-mode" class="chip">Loading...</div></div><div class="field"><label>F5 X1 Sequence</label><div id="toggle-f5" class="chip">Loading...</div></div><div class="field"><label>F6 Left-Hold Engage</label><div id="toggle-f6" class="chip">Loading...</div></div><div class="field"><label>F7 Recoil Fallback</label><div id="toggle-f7" class="chip">Loading...</div></div><div class="field"><label>F8 TriggerBot</label><div id="toggle-f8" class="chip">Loading...</div></div></div></section>
 <section><h2>Advanced Recoil</h2><div class="grid"><div class="field"><label for="recoil-mode">Recoil Mode</label><select id="recoil-mode"><option value="legacy">Legacy</option><option value="advanced_profile">Advanced Profile</option></select></div><div class="field"><label for="recoil-profile">Saved Profiles</label><select id="recoil-profile"></select></div><div class="field"><label for="recoil-editor-link">Profile Editor</label><a id="recoil-editor-link" href="http://127.0.0.1:8766/" target="_blank" rel="noreferrer">Open Python Recoil Editor</a></div></div><div id="recoil-status" class="bar">Loading recoil status...</div><div id="recoil-debug" class="bar">Loading recoil debug...</div><div class="actions"><button class="primary" type="button" id="recoil-apply">Apply Recoil Selection</button><button class="secondary" type="button" id="recoil-refresh">Refresh Recoil Profiles</button></div></section>
-<section><h2>Runtime Tuning</h2><form id="form"><div class="tuning-groups" id="groups"></div><div class="actions"><button class="primary" type="submit">Apply Runtime Changes</button><button class="secondary" type="button" id="reload">Reload</button><button class="secondary" type="button" id="reset">Reset PID</button></div></form></section>
+<section><h2>Runtime Tuning</h2><div id="input-status" class="bar">Mouse output: loading...</div><form id="form"><div class="tuning-groups" id="groups"></div><div class="actions"><button class="primary" type="submit">Apply Runtime Changes</button><button class="secondary" type="button" id="input-reconnect">Retry Serial Connection</button><button class="secondary" type="button" id="reload">Reload</button><button class="secondary" type="button" id="reset">Reset PID</button></div></form></section>
 <script>
 const F=[
 {g:"General",k:"pid_enable",l:"PID Enabled",t:"b"},{g:"General",k:"tracking_enabled",l:"Tracking Enabled",t:"b"},{g:"General",k:"debug_preview_enable",l:"Debug Preview",t:"b"},{g:"General",k:"debug_overlay_enable",l:"Debug Overlay",t:"b"},{g:"General",k:"capture_cached_timeout_ms",l:"Cached Capture Timeout (ms)",t:"n",s:0.1,n:0},{g:"General",k:"async_gpu_capture_fresh_only_enable",l:"Async GPU Fresh Only",t:"b"},{g:"General",k:"tensorrt_inline_fresh_only_enable",l:"TensorRT Fresh Only",t:"b"},{g:"General",k:"display_rate_servo_enable",l:"Display Rate Servo",t:"b"},{g:"General",k:"display_rate_servo_hz",l:"Display Servo Hz",t:"n",s:1,n:0},{g:"General",k:"display_rate_servo_max_target_age_ms",l:"Servo Max Target Age (ms)",t:"n",s:1,n:0},{g:"General",k:"model_conf",l:"Model Conf",t:"n",s:0.001,n:0,x:1},{g:"General",k:"detection_min_conf",l:"Detection Min Conf",t:"n",s:0.001,n:0,x:1},{g:"General",k:"detection_box_scale",l:"Detection Box Scale",t:"n",s:0.01,n:0.05,x:2},
@@ -744,25 +752,26 @@ const F=[
 {g:"TriggerBot",k:"triggerbot_enable",l:"Trigger Bot",t:"b"},{g:"TriggerBot",k:"triggerbot_arm_scale_x",l:"Trigger Arm X Scale",t:"n",s:0.01,n:0},{g:"TriggerBot",k:"triggerbot_arm_scale_y",l:"Trigger Arm Y Scale",t:"n",s:0.01,n:0},{g:"TriggerBot",k:"triggerbot_arm_min_x_px",l:"Trigger Arm Min X (px)",t:"n",s:1,n:0},{g:"TriggerBot",k:"triggerbot_arm_min_y_px",l:"Trigger Arm Min Y (px)",t:"n",s:1,n:0},{g:"TriggerBot",k:"triggerbot_click_hold_s",l:"Trigger Hold (s)",t:"n",s:0.001,n:0},{g:"TriggerBot",k:"triggerbot_click_cooldown_s",l:"Trigger Cooldown (s)",t:"n",s:0.001,n:0},
 {g:"Ego Motion",k:"ego_motion_comp_enable",l:"Ego Motion Comp",t:"b"},{g:"Ego Motion",k:"ego_motion_comp_gain_x",l:"Ego Comp Gain X",t:"n",s:0.001},{g:"Ego Motion",k:"ego_motion_comp_gain_y",l:"Ego Comp Gain Y",t:"n",s:0.001},{g:"Ego Motion",k:"ego_motion_error_gate_enable",l:"Ego Error Gate",t:"b"},{g:"Ego Motion",k:"ego_motion_error_gate_px",l:"Ego Gate Error (px)",t:"n",s:1,n:0},{g:"Ego Motion",k:"ego_motion_error_gate_normalize_by_box",l:"Ego Gate Normalize By Box",t:"b"},{g:"Ego Motion",k:"ego_motion_error_gate_norm_threshold",l:"Ego Gate Norm Threshold",t:"n",s:0.01,n:0},{g:"Ego Motion",k:"ego_motion_reset_on_switch",l:"Reset Ego On Switch",t:"b"},
 {g:"Recoil & Engage",k:"recoil_compensation_y_rate_px_s",l:"Legacy Recoil Y Rate (px/s)",t:"n",s:1},{g:"Recoil & Engage",k:"recoil_compensation_y_px",l:"Legacy Recoil Y (px/cmd)",t:"n",s:0.1},{g:"Recoil & Engage",k:"recoil_virtual_aim_offset_enable",l:"Virtual Recoil Aim Offset",t:"b"},{g:"Recoil & Engage",k:"recoil_fallback_with_target_enable",l:"Recoil Fallback With Target",t:"b"},{g:"Recoil & Engage",k:"left_hold_engage_button",l:"F6 Engage Button",t:"s",o:[["rightkey","Right Key"],["leftkey","Left Key"],["x1","X1 Side Button"],["both","Left / Right / X1"]]},{g:"Recoil & Engage",k:"recoil_tune_fallback_ignore_mode_check",l:"F7 Ignore Mode Check",t:"b"},
-{g:"Input & Suppression",k:"mouse_move_suppress_on_fire_enable",l:"Suppress Mouse Move While Firing",t:"b"},{g:"Input & Suppression",k:"mouse_move_suppress_on_fire_debug",l:"Mouse Suppression Debug",t:"b"},{g:"Input & Suppression",k:"sendinput_gain_x",l:"SendInput Gain X",t:"n",s:0.001},{g:"Input & Suppression",k:"sendinput_gain_y",l:"SendInput Gain Y",t:"n",s:0.001},{g:"Input & Suppression",k:"sendinput_max_step",l:"SendInput Max Step",t:"n",s:1,n:1},
+{g:"Input & Suppression",k:"mouse_output_method",l:"Output Backend",t:"s",o:[["sendinput","SendInput"],["serial","Serial (CDC)"]]},{g:"Input & Suppression",k:"serial_mouse_port",l:"Serial Port",t:"x",serialOnly:true},{g:"Input & Suppression",k:"serial_mouse_baud",l:"Serial Baud",t:"n",s:1,n:1,serialOnly:true},{g:"Input & Suppression",k:"mouse_move_suppress_on_fire_enable",l:"Suppress Mouse Move While Firing",t:"b"},{g:"Input & Suppression",k:"mouse_move_suppress_on_fire_debug",l:"Mouse Suppression Debug",t:"b"},{g:"Input & Suppression",k:"sendinput_gain_x",l:"SendInput Gain X",t:"n",s:0.001},{g:"Input & Suppression",k:"sendinput_gain_y",l:"SendInput Gain Y",t:"n",s:0.001},{g:"Input & Suppression",k:"sendinput_max_step",l:"SendInput Max Step",t:"n",s:1,n:1},
 {g:"F5 X1 Sequence",k:"side_button_key_sequence_use_right_click",l:"Step 1: Use Right Click",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_right_click_hold_ms",l:"Step 1: Right Click Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_use_left_click",l:"Step 2: Use Left Click",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_left_click_hold_ms",l:"Step 2: Left Click Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_use_key3",l:"Step 3: Use Key 3",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_key3_press_time_ms",l:"Step 3: Key 3 Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_use_key1",l:"Step 4: Use Key 1",t:"b"},{g:"F5 X1 Sequence",k:"side_button_key_sequence_key1_press_time_ms",l:"Step 4: Key 1 Hold (ms)",t:"n",s:0.001,n:0},{g:"F5 X1 Sequence",k:"side_button_key_sequence_loop_delay_ms",l:"Step 5: Wait Before Next Loop (ms)",t:"n",s:0.001,n:0}
 ];
 F.splice(5,0,{g:"General",k:"capture_freeze_to_center_enable",l:"Freeze Capture Crop",t:"b"});
 F.splice(6,0,{g:"Third Person",k:"third_person_mode_enable",l:"Third Person Crop Offset",t:"b"},{g:"Third Person",k:"third_person_offset_x_px",l:"Crop Offset X (px)",t:"n",s:1},{g:"Third Person",k:"third_person_offset_y_px",l:"Crop Offset Y (px)",t:"n",s:1});
 )HTML"
-        + R"HTML(const G=id=>document.getElementById(id),groups=G("groups"),runtime=G("runtime"),recoilStatus=G("recoil-status"),recoilDebug=G("recoil-debug"),recoilMode=G("recoil-mode"),recoilProfile=G("recoil-profile"),message=G("message"),strategyNote=G("strategy-note"),form=G("form"),aimMode=G("aim-mode");
+        + R"HTML(const G=id=>document.getElementById(id),groups=G("groups"),runtime=G("runtime"),inputStatus=G("input-status"),recoilStatus=G("recoil-status"),recoilDebug=G("recoil-debug"),recoilMode=G("recoil-mode"),recoilProfile=G("recoil-profile"),message=G("message"),strategyNote=G("strategy-note"),form=G("form"),aimMode=G("aim-mode");
 const toggleMode=G("toggle-mode"),toggleF5=G("toggle-f5"),toggleF6=G("toggle-f6"),toggleF7=G("toggle-f7"),toggleF8=G("toggle-f8");
 const setMessage=t=>message.textContent=t;
 function renderStrategyNote(strategy){const mode=String(strategy||"raw_delta");strategyNote.textContent=mode==="legacy_pid"?"Legacy PID keeps its dedicated controller path. Target Lead still applies when enabled, but Legacy PID ignores Velocity Beta, ego-motion compensation, anti-windup, derivative smoothing, output limit, and PID settle knobs.":mode==="predictive_pid"?"Predictive PID keeps target lead, then uses controller-space prediction, P-ramp, and its own PID gains.":"Raw/raw_delta use the modern PID + feedforward path, and Target Lead can add lock-gated aim-ahead on top.";}
-function buildField(f){const w=document.createElement("div");w.className=f.t==="b"?"field toggle":"field";const l=document.createElement("label");l.htmlFor=f.k;l.textContent=f.l;w.appendChild(l);let i;if(f.t==="s"){i=document.createElement("select");for(const [v,t] of f.o){const o=document.createElement("option");o.value=v;o.textContent=t;i.appendChild(o);}}else{i=document.createElement("input");i.type=f.t==="b"?"checkbox":"number";if(f.t==="n"){i.step="any";if(f.n!==undefined)i.min=String(f.n);if(f.x!==undefined)i.max=String(f.x);}}i.id=f.k;w.appendChild(i);return w;}
+function buildField(f){const w=document.createElement("div");w.className=f.t==="b"?"field toggle":"field";w.id=`field-${f.k}`;const l=document.createElement("label");l.htmlFor=f.k;l.textContent=f.l;w.appendChild(l);let i;if(f.t==="s"){i=document.createElement("select");for(const [v,t] of f.o){const o=document.createElement("option");o.value=v;o.textContent=t;i.appendChild(o);}}else{i=document.createElement("input");i.type=f.t==="b"?"checkbox":f.t==="x"?"text":"number";if(f.t==="n"){i.step="any";if(f.n!==undefined)i.min=String(f.n);if(f.x!==undefined)i.max=String(f.x);}}i.id=f.k;w.appendChild(i);return w;}
 function buildFields(){groups.innerHTML="";const groupMap=new Map();for(const f of F){let groupGrid=groupMap.get(f.g);if(!groupGrid){const card=document.createElement("div");card.className="config-group";const title=document.createElement("h3");title.textContent=f.g;card.appendChild(title);groupGrid=document.createElement("div");groupGrid.className="group-grid";card.appendChild(groupGrid);groups.appendChild(card);groupMap.set(f.g,groupGrid);}groupGrid.appendChild(buildField(f));}}
-function applyConfig(cfg){for(const f of F){const i=G(f.k);if(!i)continue;if(f.t==="b")i.checked=Boolean(cfg[f.k]);else if(cfg[f.k]!==undefined)i.value=cfg[f.k];}if(cfg.aim_mode!==undefined)aimMode.value=String(cfg.aim_mode);renderStrategyNote(cfg.tracking_strategy);}
+function updateInputVisibility(){const serial=G("mouse_output_method")?.value==="serial";for(const f of F){if(f.serialOnly){const w=G(`field-${f.k}`);if(w)w.style.display=serial?"grid":"none";}}G("input-reconnect").style.display=serial?"inline-block":"none";}
+function applyConfig(cfg){for(const f of F){const i=G(f.k);if(!i)continue;if(f.t==="b")i.checked=Boolean(cfg[f.k]);else if(cfg[f.k]!==undefined)i.value=cfg[f.k];}if(cfg.aim_mode!==undefined)aimMode.value=String(cfg.aim_mode);renderStrategyNote(cfg.tracking_strategy);updateInputVisibility();}
 function applyRecoilConfig(cfg){recoilMode.value=String(cfg.recoil_mode??"legacy");recoilProfile.value=String(cfg.selected_recoil_profile_id??"");}
 function renderToggleChip(node,label,on){node.textContent=`${label}: ${on?"ON":"OFF"}`;}
 function renderModeToggles(s){aimMode.value=String(s.aim_mode??"head");toggleMode.textContent=`${s.mode_label||"OFF"}`;toggleF5.textContent=`${s.side_button_key_sequence_enabled?"ON":"OFF"}`;toggleF6.textContent=`${s.left_hold_engage?"ON":"OFF"}`;toggleF7.textContent=`${s.recoil_tune_fallback?"ON":"OFF"}`;toggleF8.textContent=`${s.triggerbot_enable?"ON":"OFF"}`;}
 function renderRecoilStatus(s){const loaded=s.recoil_profile_loaded?"loaded":"not loaded";const name=s.selected_profile_name||s.selected_profile_id||"none";const err=s.recoil_error?` | error ${s.recoil_error}`:"";const hScale=s.recoil_horizontal_scale_factor ?? s.recoil_scale_factor ?? 0;const virtual=`virtual ${s.recoil_virtual_aim_offset_enable?"ON":"OFF"} ${s.recoil_virtual_active?"ACTIVE":"idle"} (${s.recoil_virtual_dx||0}, ${s.recoil_virtual_dy||0}) #${s.recoil_virtual_apply_count||0}`;recoilStatus.textContent=`F7 ${s.recoil_enabled?"ON":"OFF"} | mode ${s.recoil_mode} | ${virtual} | profile ${name} (${loaded}) | shot ${s.recoil_shot_index}/${s.recoil_shot_count} | scale V/H ${Number(s.recoil_scale_factor||0).toFixed(3)} / ${Number(hScale).toFixed(3)} | interval ${s.recoil_fire_interval_ms||0}ms${err}`;recoilDebug.textContent=`debug ${s.recoil_debug_state||"idle"} | mode-toggle ${s.recoil_mode_active?"ON":"OFF"} | F6 ${s.recoil_hold_engage_toggle?"ON":"OFF"} | ignore-mode ${s.recoil_ignore_mode_check?"ON":"OFF"} | trigger ${s.recoil_trigger_pressed?"DOWN":"UP"} | left ${s.recoil_left_pressed?"DOWN":"UP"} | x1 ${s.recoil_x1_pressed?"DOWN":"UP"} | spray ${s.recoil_spray_active?"ACTIVE":"IDLE"} | virtual aim ${s.recoil_virtual_active?"ACTIVE":"idle"} (${s.recoil_virtual_dx||0}, ${s.recoil_virtual_dy||0}) | scheduled (${s.recoil_scheduled_dx||0}, ${s.recoil_scheduled_dy||0}) | direct fallback last applied (${s.recoil_last_applied_dx||0}, ${s.recoil_last_applied_dy||0}) @ shot ${s.recoil_last_applied_shot_index||0} | applied count ${s.recoil_apply_count||0}`;}
-function renderStatus(s){const settle=s.target_found?`${s.pid_settled?"settled":"gating"} ${Number(s.pid_settle_error_metric_px||0).toFixed(1)}/${Number(s.pid_settle_threshold_px||0).toFixed(1)}`:"n/a";const damp=s.detection_dampening_ready?`damp ready ${Number(s.detection_dampening_streak||0)}/${Number(s.detection_dampening_required_frames||0)}`:`damp waiting ${Number(s.detection_dampening_streak||0)}/${Number(s.detection_dampening_required_frames||0)}`;const lead=s.lead_active?`lead ${Number(s.lead_time_ms||0).toFixed(1)}ms`:"lead off";const pred=`pred ${Number(s.predictive_pid_latency_ms||0).toFixed(1)}/${Number(s.predictive_pid_horizon_ms||0).toFixed(1)}ms dz ${s.predictive_pid_deadzone_active?"ON":"OFF"}`;const kalman=s.kalman_prediction_enable?`kalman ${s.kalman_active?"ON":"idle"} r ${Number(s.kalman_residual_px||0).toFixed(1)}/${Number(s.kalman_max_residual_px||0).toFixed(1)} age ${Number(s.kalman_prediction_age_ms||0).toFixed(1)}ms drop ${Number(s.kalman_predicted_only_frames||0)} snap ${Number(s.kalman_snap_count||0)}`:"kalman off";const assoc=s.target_association_enable?`assoc id ${s.target_association_active_id??-1} ${s.target_association_missing?"missing":s.target_association_locked?"locked":"idle"} tracks ${s.target_association_track_count||0} switches ${s.target_association_switch_count||0}`:"assoc off";const cropMode=s.capture_freeze_to_center_enable?"center":"follow";const crop=s.adaptive_capture_crop_active?`crop ${cropMode} ${Number(s.adaptive_capture_crop_size||0)}px`:`crop ${cropMode} fixed`;const third=s.third_person_offset_active?`third-person crop (${s.third_person_effective_offset_x_px||0}, ${s.third_person_effective_offset_y_px||0})`:"third-person crop off";const suppressCount=Number(s.mouse_move_suppress_count||0);const suppress=!s.mouse_move_suppress_on_fire_enable?"mouse-block off":s.mouse_move_suppress_supported?(s.mouse_move_suppress_active?`mouse-block ON #${suppressCount}`:`mouse-block idle #${suppressCount}`):"mouse-block unsupported";const recoilPath=s.recoil_virtual_aim_offset_enable?`virtual-recoil ${s.recoil_virtual_active?"ACTIVE":"idle"} (${s.recoil_virtual_dx||0}, ${s.recoil_virtual_dy||0})`:"virtual-recoil off";runtime.textContent=`Runtime ${s.running?"running":"stopped"} | mode ${s.mode_label} | aim ${s.aim_mode_label||s.aimmode_label} | preview ${s.debug_preview_enable?"ON":"OFF"} | overlay ${s.debug_overlay_enable?"ON":"OFF"} | F8 ${s.triggerbot_enable?"ON":"OFF"} | ${crop} | ${third} | ${damp} | ${suppress} | recoil ${s.recoil_mode} | ${recoilPath} | profile ${s.selected_profile_name||s.selected_profile_id||"none"} | target ${s.target_found?"locked":"none"} | speed ${Number(s.target_speed).toFixed(1)} | ${lead} | ${pred} | ${kalman} | ${assoc} | settle ${settle} | cmd (${s.aim_dx}, ${s.aim_dy})`;renderStrategyNote(s.tracking_strategy);renderModeToggles(s);renderRecoilStatus(s);}
-function collectPayload(){const out={};for(const f of F){const i=G(f.k);if(!i)continue;out[f.k]=f.t==="b"?Boolean(i.checked):f.t==="s"?String(i.value):Number(i.value);}return out;}
+function renderStatus(s){const settle=s.target_found?`${s.pid_settled?"settled":"gating"} ${Number(s.pid_settle_error_metric_px||0).toFixed(1)}/${Number(s.pid_settle_threshold_px||0).toFixed(1)}`:"n/a";const damp=s.detection_dampening_ready?`damp ready ${Number(s.detection_dampening_streak||0)}/${Number(s.detection_dampening_required_frames||0)}`:`damp waiting ${Number(s.detection_dampening_streak||0)}/${Number(s.detection_dampening_required_frames||0)}`;const lead=s.lead_active?`lead ${Number(s.lead_time_ms||0).toFixed(1)}ms`:"lead off";const pred=`pred ${Number(s.predictive_pid_latency_ms||0).toFixed(1)}/${Number(s.predictive_pid_horizon_ms||0).toFixed(1)}ms dz ${s.predictive_pid_deadzone_active?"ON":"OFF"}`;const kalman=s.kalman_prediction_enable?`kalman ${s.kalman_active?"ON":"idle"} r ${Number(s.kalman_residual_px||0).toFixed(1)}/${Number(s.kalman_max_residual_px||0).toFixed(1)} age ${Number(s.kalman_prediction_age_ms||0).toFixed(1)}ms drop ${Number(s.kalman_predicted_only_frames||0)} snap ${Number(s.kalman_snap_count||0)}`:"kalman off";const assoc=s.target_association_enable?`assoc id ${s.target_association_active_id??-1} ${s.target_association_missing?"missing":s.target_association_locked?"locked":"idle"} tracks ${s.target_association_track_count||0} switches ${s.target_association_switch_count||0}`:"assoc off";const cropMode=s.capture_freeze_to_center_enable?"center":"follow";const crop=s.adaptive_capture_crop_active?`crop ${cropMode} ${Number(s.adaptive_capture_crop_size||0)}px`:`crop ${cropMode} fixed`;const third=s.third_person_offset_active?`third-person crop (${s.third_person_effective_offset_x_px||0}, ${s.third_person_effective_offset_y_px||0})`:"third-person crop off";const suppressCount=Number(s.mouse_move_suppress_count||0);const suppress=!s.mouse_move_suppress_on_fire_enable?"mouse-block off":s.mouse_move_suppress_supported?(s.mouse_move_suppress_active?`mouse-block ON #${suppressCount}`:`mouse-block idle #${suppressCount}`):"mouse-block unsupported";const recoilPath=s.recoil_virtual_aim_offset_enable?`virtual-recoil ${s.recoil_virtual_active?"ACTIVE":"idle"} (${s.recoil_virtual_dx||0}, ${s.recoil_virtual_dy||0})`:"virtual-recoil off";const mouse=s.mouse_output_method==="serial"?`Serial ${s.mouse_output_status||"disconnected"}`:"SendInput ready";inputStatus.textContent=`Mouse output: ${mouse}. Movement uses the selected backend; clicks use SendInput.${s.serial_mouse_error?` Error: ${s.serial_mouse_error}`:""}`;runtime.textContent=`Runtime ${s.running?"running":"stopped"} | mode ${s.mode_label} | aim ${s.aim_mode_label||s.aimmode_label} | input ${mouse} | preview ${s.debug_preview_enable?"ON":"OFF"} | overlay ${s.debug_overlay_enable?"ON":"OFF"} | F8 ${s.triggerbot_enable?"ON":"OFF"} | ${crop} | ${third} | ${damp} | ${suppress} | recoil ${s.recoil_mode} | ${recoilPath} | profile ${s.selected_profile_name||s.selected_profile_id||"none"} | target ${s.target_found?"locked":"none"} | speed ${Number(s.target_speed).toFixed(1)} | ${lead} | ${pred} | ${kalman} | ${assoc} | settle ${settle} | cmd (${s.aim_dx}, ${s.aim_dy})`;renderStrategyNote(s.tracking_strategy);renderModeToggles(s);renderRecoilStatus(s);}
+function collectPayload(){const out={};for(const f of F){const i=G(f.k);if(!i)continue;out[f.k]=f.t==="b"?Boolean(i.checked):(f.t==="s"||f.t==="x")?String(i.value):Number(i.value);}return out;}
 const collectRecoilPayload=()=>({recoil_mode:String(recoilMode.value),selected_recoil_profile_id:String(recoilProfile.value||"")});
 function renderProfiles(profiles,selectedId){const want=String(selectedId??recoilProfile.value??"");recoilProfile.innerHTML="";const empty=document.createElement("option");empty.value="";empty.textContent="No profile selected";recoilProfile.appendChild(empty);for(const p of profiles||[]){const o=document.createElement("option");o.value=String(p.id);o.textContent=p.valid?`${p.name} (${p.shot_count} shots)`:`${p.name} [invalid]`;o.disabled=!p.valid;recoilProfile.appendChild(o);}recoilProfile.value=want;if(recoilProfile.value!==want)recoilProfile.value="";}
 async function requestJson(path,options={}){const res=await fetch(path,options);const data=await res.json();if(!res.ok)throw new Error(data.error||`HTTP ${res.status}`);return data;}
@@ -774,13 +783,50 @@ form.addEventListener("submit",async e=>{e.preventDefault();try{const p=await re
 aimMode.addEventListener("change",async()=>{try{const p=await requestJson("/api/pid",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({aim_mode:String(aimMode.value)})});applyConfig(p.config);renderStatus(p.status);setMessage("Applied aim mode.");}catch(err){setMessage(err.message);}});
 G("reload").addEventListener("click",()=>loadAll().catch(err=>setMessage(err.message)));
 G("reset").addEventListener("click",async()=>{try{renderStatus((await requestJson("/api/pid/reset",{method:"POST"})).status);setMessage("PID reset requested.");}catch(err){setMessage(err.message);}});
+G("input-reconnect").addEventListener("click",async()=>{try{const p=await requestJson("/api/input/reconnect",{method:"POST"});renderStatus(p.status);setMessage("Serial reconnect requested.");}catch(err){setMessage(err.message);}});
 G("recoil-apply").addEventListener("click",async()=>{try{const p=await requestJson("/api/recoil",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(collectRecoilPayload())});applyRecoilConfig(p.config);renderProfiles(p.profiles,p.config.selected_recoil_profile_id);renderRecoilStatus(p.status);setMessage("Applied recoil profile selection.");}catch(err){setMessage(err.message);}});
 G("recoil-refresh").addEventListener("click",async()=>{try{renderProfiles((await requestJson("/api/recoil/profiles")).profiles,recoilProfile.value);setMessage("Reloaded recoil profiles.");}catch(err){setMessage(err.message);}});
-buildFields();loadAll().catch(err=>setMessage(err.message));window.setInterval(refreshStatus,1000);
+buildFields();G("mouse_output_method").addEventListener("change",updateInputVisibility);loadAll().catch(err=>setMessage(err.message));window.setInterval(refreshStatus,1000);
 </script></main></body></html>)HTML";
 }
 
 bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string& error) {
+    const json payload = json::parse(body, nullptr, false);
+    if (payload.is_discarded() || !payload.is_object()) {
+        error = "Request body must be a JSON object.";
+        return false;
+    }
+    if (const auto it = payload.find("mouse_output_method"); it != payload.end()) {
+        if (!it->is_string()) {
+            error = "mouse_output_method must be a string.";
+            return false;
+        }
+        const std::string value = it->get<std::string>();
+        if (value != "sendinput" && value != "serial") {
+            error = "mouse_output_method must be 'sendinput' or 'serial'.";
+            return false;
+        }
+        cfg.mouse_output_method = parseMouseOutputMethod(value);
+    }
+    if (const auto it = payload.find("serial_mouse_port"); it != payload.end()) {
+        if (!it->is_string() || it->get<std::string>().empty()) {
+            error = "serial_mouse_port must be a non-empty string.";
+            return false;
+        }
+        cfg.serial_mouse_port = it->get<std::string>();
+    }
+    if (const auto it = payload.find("serial_mouse_baud"); it != payload.end()) {
+        if (!it->is_number_integer()) {
+            error = "serial_mouse_baud must be a positive integer.";
+            return false;
+        }
+        const auto value = it->get<long long>();
+        if (value <= 0 || value > std::numeric_limits<int>::max()) {
+            error = "serial_mouse_baud must be a positive 32-bit integer.";
+            return false;
+        }
+        cfg.serial_mouse_baud = static_cast<int>(value);
+    }
     if (const auto value = extractJsonBool(body, "pid_enable"); value.has_value()) cfg.pid_enable = *value;
     if (const auto value = extractJsonBool(body, "tracking_enabled"); value.has_value()) cfg.tracking_enabled = *value;
     if (const auto value = extractJsonBool(body, "debug_preview_enable"); value.has_value()) cfg.debug_preview_enable = *value;
@@ -1148,10 +1194,6 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     if (const auto value = extractJsonNumber(body, "sendinput_max_step"); value.has_value()) cfg.sendinput_max_step = std::max(1, static_cast<int>(std::lround(*value)));
     if (const auto value = extractJsonNumber(body, "raw_max_step_x"); value.has_value()) cfg.raw_max_step_x = std::max(1, static_cast<int>(std::lround(*value)));
     if (const auto value = extractJsonNumber(body, "raw_max_step_y"); value.has_value()) cfg.raw_max_step_y = std::max(1, static_cast<int>(std::lround(*value)));
-    if (body.find('{') == std::string::npos) {
-        error = "Request body must be a JSON object.";
-        return false;
-    }
     return true;
 }
 
@@ -1334,6 +1376,17 @@ void RuntimeFrontendServer::serve() {
         } else if (method == "POST" && (pathMatches(path, "/api/pid/reset") || pathMatches(path, "/api/pidf/reset"))) {
             config_store_.requestReset();
             response = httpResponse(buildApiPayload(config_store_, shared_state_), "application/json; charset=utf-8");
+        } else if (method == "POST" && pathMatches(path, "/api/input/reconnect")) {
+            if (config_store_.snapshot().mouse_output_method != MouseOutputMethod::Serial) {
+                response = httpResponse(
+                    "{\"error\":\"Select the serial output backend before reconnecting.\"}",
+                    "application/json; charset=utf-8",
+                    400,
+                    "Bad Request");
+            } else {
+                config_store_.requestInputReconnect();
+                response = httpResponse(buildApiPayload(config_store_, shared_state_), "application/json; charset=utf-8");
+            }
         } else if (method == "GET" && (pathMatches(path, "/api/pid") || pathMatches(path, "/api/pidf"))) {
             response = httpResponse(buildApiPayload(config_store_, shared_state_), "application/json; charset=utf-8");
         } else if (method == "POST" && (pathMatches(path, "/api/pid") || pathMatches(path, "/api/pidf"))) {

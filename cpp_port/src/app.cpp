@@ -1131,6 +1131,10 @@ DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
     shared_.detection_dampening_ready = !initial_runtime.detection_dampening_enable;
     shared_.detection_dampening_streak = 0;
     shared_.detection_dampening_required_frames = std::max(1, initial_runtime.detection_dampening_stable_frames);
+    shared_.mouse_output_method = mouseOutputMethodName(initial_runtime.mouse_output_method);
+    shared_.mouse_output_status = initial_runtime.mouse_output_method == MouseOutputMethod::Serial ? "disconnected" : "ready";
+    shared_.serial_mouse_connected = false;
+    shared_.serial_mouse_error.clear();
     shared_.recoil.mode = initial_runtime.recoil_mode;
     shared_.recoil.selected_profile_id = initial_runtime.selected_recoil_profile_id;
 }
@@ -3107,15 +3111,56 @@ void DeltaApp::controlLoop() {
         const TriggerbotConfig triggerbot_config = buildTriggerbotConfig(runtime);
 
         const MouseSenderConfig sender_config{
+            .method = runtime.mouse_output_method,
+            .serial_port = runtime.serial_mouse_port,
+            .serial_baud = runtime.serial_mouse_baud,
+            .reconnect_token = runtime_store_.inputReconnectToken(),
             .gain_x = runtime.sendinput_gain_x,
             .gain_y = runtime.sendinput_gain_y,
             .max_step = runtime.sendinput_max_step,
         };
-        if (!sender_config_initialized
+        const bool serial_connection_change = !sender_config_initialized
+            || sender_config.method != last_sender_config.method
+            || sender_config.serial_port != last_sender_config.serial_port
+            || sender_config.serial_baud != last_sender_config.serial_baud
+            || sender_config.reconnect_token != last_sender_config.reconnect_token;
+        const bool sender_config_changed = serial_connection_change
             || sender_config.gain_x != last_sender_config.gain_x
             || sender_config.gain_y != last_sender_config.gain_y
-            || sender_config.max_step != last_sender_config.max_step) {
+            || sender_config.max_step != last_sender_config.max_step;
+        if (sender_config_changed) {
+            if (serial_connection_change) {
+                command_slot_.clear();
+                pending_aim_cmd.reset();
+                next_aim_budget_tick = {};
+                servo_carry_x = 0.0;
+                servo_carry_y = 0.0;
+                {
+                    std::lock_guard<std::mutex> lock(shared_.mutex);
+                    shared_.pending_recoil = {};
+                    shared_.mouse_output_method = mouseOutputMethodName(sender_config.method);
+                    shared_.mouse_output_status = sender_config.method == MouseOutputMethod::Serial
+                        ? "connecting"
+                        : "ready";
+                    shared_.serial_mouse_connected = false;
+                    shared_.serial_mouse_error.clear();
+                }
+            }
             input_sender_->configure(sender_config);
+            if (serial_connection_change) {
+                // Commands generated while a serial device was opening may already be stale.
+                command_slot_.clear();
+                std::lock_guard<std::mutex> lock(shared_.mutex);
+                shared_.pending_recoil = {};
+            }
+            const InputSenderStatus sender_status = input_sender_->status();
+            {
+                std::lock_guard<std::mutex> lock(shared_.mutex);
+                shared_.mouse_output_method = mouseOutputMethodName(sender_status.method);
+                shared_.mouse_output_status = inputSenderStateName(sender_status.state);
+                shared_.serial_mouse_connected = sender_status.serial_connected;
+                shared_.serial_mouse_error = sender_status.error;
+            }
             last_sender_config = sender_config;
             sender_config_initialized = true;
         }
@@ -3501,6 +3546,14 @@ void DeltaApp::controlLoop() {
             if (trigger_sent) {
                 last_trigger_click = SystemClock::now();
             }
+        }
+        {
+            const InputSenderStatus sender_status = input_sender_->status();
+            std::lock_guard<std::mutex> lock(shared_.mutex);
+            shared_.mouse_output_method = mouseOutputMethodName(sender_status.method);
+            shared_.mouse_output_status = inputSenderStateName(sender_status.state);
+            shared_.serial_mouse_connected = sender_status.serial_connected;
+            shared_.serial_mouse_error = sender_status.error;
         }
         const auto send_end_tick = SteadyClock::now();
         const double send_elapsed = secondsSince(send_start, send_end_tick);

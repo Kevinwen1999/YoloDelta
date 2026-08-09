@@ -107,7 +107,10 @@ The `vs2022-cuda-probe` preset now also builds `delta_native` with the CUDA pipe
 ## Native Control Path
 
 - The native port does not use the Python socket mouse backend.
-- `src/control.cpp` uses Win32 hotkey polling and `SendInput` directly for relative mouse movement and left-click injection.
+- `src/control.cpp` supports live selection between Win32 `SendInput` movement and a serial CDC movement backend. Left-click injection always remains on `SendInput` because the serial protocol only defines movement frames.
+- Configure the backend in the HTTP frontend's **Input & Suppression** group. Serial defaults to `COM6` at `921600` baud; the selection is runtime-only and returns to `SendInput` on the next launch.
+- Serial movement frames are `AA DXH DXL DYH DYL CHECKSUM`, with signed 16-bit big-endian axes and an XOR checksum. The port uses 8-N-1, DTR/RTS disabled, a 500 ms write timeout, and a two-second CDC settling delay.
+- A serial open/write failure stops movement without falling back to `SendInput`. The frontend reports the error and provides **Retry Serial Connection**; switching back to `SendInput` remains available.
 - The low-level sender now mirrors the Python GHUB-style behavior more closely by keeping fractional movement remainders and splitting large moves into bounded steps.
 - `delta_native` now starts the full native runtime by default: capture, inference, raw/raw-delta/legacy_pid tracking, frontend, and `SendInput` control.
 - `StaticConfig.imgsz` stays the inference input size. `StaticConfig.capture_crop_size` controls the square desktop crop size, and `0` keeps it locked to `imgsz`.

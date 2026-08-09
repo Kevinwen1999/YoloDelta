@@ -98,11 +98,22 @@ public:
         return reset_token_;
     }
 
+    void requestInputReconnect() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++input_reconnect_token_;
+    }
+
+    std::uint64_t inputReconnectToken() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return input_reconnect_token_;
+    }
+
 private:
     mutable std::mutex mutex_;
     RuntimeConfig value_{};
     std::uint64_t version_ = 0;
     std::uint64_t reset_token_ = 0;
+    std::uint64_t input_reconnect_token_ = 0;
 };
 
 struct DisplayRateServoState {
@@ -157,6 +168,10 @@ struct SharedState {
     bool mouse_move_suppress_active = false;
     bool mouse_move_suppress_supported = false;
     std::uint64_t mouse_move_suppress_count = 0;
+    std::string mouse_output_method = "sendinput";
+    std::string mouse_output_status = "ready";
+    bool serial_mouse_connected = false;
+    std::string serial_mouse_error;
     bool recoil_virtual_active = false;
     int recoil_virtual_dx = 0;
     int recoil_virtual_dy = 0;

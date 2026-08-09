@@ -70,6 +70,23 @@ enum class AimMode {
     Hybrid = 2,
 };
 
+enum class MouseOutputMethod {
+    SendInput,
+    Serial,
+};
+
+inline const char* mouseOutputMethodName(const MouseOutputMethod method) {
+    switch (method) {
+    case MouseOutputMethod::Serial: return "serial";
+    case MouseOutputMethod::SendInput:
+    default: return "sendinput";
+    }
+}
+
+inline MouseOutputMethod parseMouseOutputMethod(const std::string_view value) {
+    return value == "serial" ? MouseOutputMethod::Serial : MouseOutputMethod::SendInput;
+}
+
 inline const char* aimModeName(const AimMode mode) {
     switch (mode) {
     case AimMode::Body: return "body";
@@ -311,6 +328,9 @@ struct RuntimeConfig {
     bool side_button_key_sequence_use_left_click = true;
     double side_button_key_sequence_left_click_hold_ms = 0.0;
     double side_button_key_sequence_loop_delay_ms = 8.0;
+    MouseOutputMethod mouse_output_method = MouseOutputMethod::SendInput;
+    std::string serial_mouse_port = "COM7";
+    int serial_mouse_baud = 921600;
     float sendinput_gain_x = 1.0F;
     float sendinput_gain_y = 1.0F;
     int sendinput_max_step = 12700;

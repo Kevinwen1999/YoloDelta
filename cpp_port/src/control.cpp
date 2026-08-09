@@ -4,7 +4,9 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <memory>
+#include <sstream>
 #include <thread>
 
 #if defined(_WIN32)
@@ -36,8 +38,190 @@ bool sendMouseClickTap(const DWORD down_flag, const DWORD up_flag, const double 
     return SendInput(1, &up, sizeof(INPUT)) == 1;
 }
 
+std::string win32ErrorMessage(const char* operation, const DWORD code = GetLastError()) {
+    char* message = nullptr;
+    const DWORD length = FormatMessageA(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr,
+        code,
+        0,
+        reinterpret_cast<char*>(&message),
+        0,
+        nullptr);
+    std::ostringstream oss;
+    oss << operation << " failed (Win32 " << code << ')';
+    if (length > 0 && message != nullptr) {
+        std::string detail(message, length);
+        while (!detail.empty() && (detail.back() == '\r' || detail.back() == '\n' || detail.back() == ' ')) {
+            detail.pop_back();
+        }
+        if (!detail.empty()) {
+            oss << ": " << detail;
+        }
+    }
+    if (message != nullptr) {
+        LocalFree(message);
+    }
+    return oss.str();
+}
+
+std::wstring serialDevicePath(const std::string& port) {
+    const std::string prefix = R"(\\.\)";
+    const std::string normalized = port.rfind(prefix, 0) == 0 ? port : prefix + port;
+    return std::wstring(normalized.begin(), normalized.end());
+}
+
+class Win32SerialMouseTransport final : public ISerialMouseTransport {
+public:
+    ~Win32SerialMouseTransport() override {
+        close();
+    }
+
+    bool open(const std::string& port, const int baud, std::string& error) override {
+        close();
+        if (port.empty()) {
+            error = "Serial port must not be empty.";
+            return false;
+        }
+        if (baud <= 0) {
+            error = "Serial baud must be positive.";
+            return false;
+        }
+
+        handle_ = CreateFileW(
+            serialDevicePath(port).c_str(),
+            GENERIC_WRITE,
+            0,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (handle_ == INVALID_HANDLE_VALUE) {
+            error = win32ErrorMessage("Opening serial port");
+            return false;
+        }
+
+        auto fail = [this, &error](const char* operation) {
+            error = win32ErrorMessage(operation);
+            close();
+            return false;
+        };
+
+        SetupComm(handle_, 4096, 4096);
+        DCB dcb{};
+        dcb.DCBlength = sizeof(dcb);
+        if (!GetCommState(handle_, &dcb)) {
+            return fail("GetCommState");
+        }
+        dcb.BaudRate = static_cast<DWORD>(baud);
+        dcb.ByteSize = 8;
+        dcb.Parity = NOPARITY;
+        dcb.StopBits = ONESTOPBIT;
+        dcb.fBinary = TRUE;
+        dcb.fParity = FALSE;
+        dcb.fOutxCtsFlow = FALSE;
+        dcb.fOutxDsrFlow = FALSE;
+        dcb.fDtrControl = DTR_CONTROL_DISABLE;
+        dcb.fDsrSensitivity = FALSE;
+        dcb.fOutX = FALSE;
+        dcb.fInX = FALSE;
+        dcb.fRtsControl = RTS_CONTROL_DISABLE;
+        if (!SetCommState(handle_, &dcb)) {
+            return fail("SetCommState");
+        }
+
+        COMMTIMEOUTS timeouts{};
+        timeouts.WriteTotalTimeoutConstant = 500;
+        if (!SetCommTimeouts(handle_, &timeouts)) {
+            return fail("SetCommTimeouts");
+        }
+        EscapeCommFunction(handle_, CLRDTR);
+        EscapeCommFunction(handle_, CLRRTS);
+        PurgeComm(handle_, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
+
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        error.clear();
+        return true;
+    }
+
+    void close() override {
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+            handle_ = INVALID_HANDLE_VALUE;
+        }
+    }
+
+    bool isOpen() const override {
+        return handle_ != INVALID_HANDLE_VALUE;
+    }
+
+    bool write(const std::uint8_t* data, const std::size_t size, std::string& error) override {
+        if (!isOpen()) {
+            error = "Serial port is not open.";
+            return false;
+        }
+        if (size > static_cast<std::size_t>(std::numeric_limits<DWORD>::max())) {
+            error = "Serial write is too large.";
+            return false;
+        }
+        DWORD written = 0;
+        if (!WriteFile(handle_, data, static_cast<DWORD>(size), &written, nullptr)) {
+            error = win32ErrorMessage("Serial write");
+            return false;
+        }
+        if (written != size) {
+            error = "Serial write incomplete (" + std::to_string(written) + "/" + std::to_string(size) + " bytes).";
+            return false;
+        }
+        error.clear();
+        return true;
+    }
+
+private:
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+};
+
 }  // namespace
 #endif
+
+#if !defined(_WIN32)
+namespace {
+
+class UnsupportedSerialMouseTransport final : public ISerialMouseTransport {
+public:
+    bool open(const std::string&, int, std::string& error) override {
+        error = "Serial mouse output is supported on Windows only.";
+        return false;
+    }
+    void close() override {}
+    bool isOpen() const override { return false; }
+    bool write(const std::uint8_t*, std::size_t, std::string& error) override {
+        error = "Serial mouse output is supported on Windows only.";
+        return false;
+    }
+};
+
+}  // namespace
+#endif
+
+std::array<std::uint8_t, 6> encodeSerialMouseFrame(const int dx, const int dy) {
+    constexpr std::uint8_t sync = 0xAA;
+    const auto x = static_cast<std::uint16_t>(static_cast<std::int16_t>(std::clamp(dx, -32768, 32767)));
+    const auto y = static_cast<std::uint16_t>(static_cast<std::int16_t>(std::clamp(dy, -32768, 32767)));
+    const auto dxh = static_cast<std::uint8_t>((x >> 8U) & 0xFFU);
+    const auto dxl = static_cast<std::uint8_t>(x & 0xFFU);
+    const auto dyh = static_cast<std::uint8_t>((y >> 8U) & 0xFFU);
+    const auto dyl = static_cast<std::uint8_t>(y & 0xFFU);
+    return {sync, dxh, dxl, dyh, dyl, static_cast<std::uint8_t>(dxh ^ dxl ^ dyh ^ dyl)};
+}
+
+std::unique_ptr<ISerialMouseTransport> makeSerialMouseTransport() {
+#if defined(_WIN32)
+    return std::make_unique<Win32SerialMouseTransport>();
+#else
+    return std::make_unique<UnsupportedSerialMouseTransport>();
+#endif
+}
 
 InputSnapshot Win32HotkeySource::poll() const {
     InputSnapshot snapshot{};
@@ -122,6 +306,119 @@ bool SendInputMouseSender::clickLeft(double hold_s) {
     return sendLeftClickTap(hold_s);
 }
 
+SerialMouseSender::SerialMouseSender(std::unique_ptr<ISerialMouseTransport> transport)
+    : transport_(std::move(transport)) {}
+
+SerialMouseSender::~SerialMouseSender() {
+    disconnect();
+}
+
+void SerialMouseSender::disconnect(std::string error) {
+    if (transport_) {
+        transport_->close();
+    }
+    status_.method = MouseOutputMethod::Serial;
+    status_.state = InputSenderState::Disconnected;
+    status_.serial_connected = false;
+    status_.error = std::move(error);
+}
+
+void SerialMouseSender::configure(const MouseSenderConfig& config) {
+    const bool settings_changed = config.serial_port != port_ || config.serial_baud != baud_;
+    const bool reconnect_requested = config.reconnect_token != reconnect_token_;
+    port_ = config.serial_port;
+    baud_ = config.serial_baud;
+    reconnect_token_ = config.reconnect_token;
+
+    if (config.method != MouseOutputMethod::Serial) {
+        disconnect();
+        return;
+    }
+    if (!settings_changed && !reconnect_requested && transport_ && transport_->isOpen()) {
+        status_ = {MouseOutputMethod::Serial, InputSenderState::Connected, true, {}};
+        return;
+    }
+
+    disconnect();
+    status_ = {MouseOutputMethod::Serial, InputSenderState::Connecting, false, {}};
+    std::string error;
+    if (!transport_ || !transport_->open(port_, baud_, error)) {
+        disconnect(error.empty() ? "Failed to open serial mouse output." : std::move(error));
+        return;
+    }
+    status_ = {MouseOutputMethod::Serial, InputSenderState::Connected, true, {}};
+}
+
+bool SerialMouseSender::sendRelative(const int dx, const int dy) {
+    if (dx == 0 && dy == 0) {
+        return true;
+    }
+    if (!transport_ || !transport_->isOpen()) {
+        if (status_.error.empty()) {
+            status_.error = "Serial port is not open.";
+        }
+        status_.state = InputSenderState::Disconnected;
+        status_.serial_connected = false;
+        return false;
+    }
+    const auto frame = encodeSerialMouseFrame(dx, dy);
+    std::string error;
+    if (!transport_->write(frame.data(), frame.size(), error)) {
+        disconnect(error.empty() ? "Serial mouse write failed." : std::move(error));
+        return false;
+    }
+    return true;
+}
+
+bool SerialMouseSender::clickLeft(double) {
+    return false;
+}
+
+SwitchableMouseSender::SwitchableMouseSender()
+    : SwitchableMouseSender(
+        std::make_unique<SendInputMouseSender>(),
+        std::make_unique<SerialMouseSender>()) {}
+
+SwitchableMouseSender::SwitchableMouseSender(
+    std::unique_ptr<IInputSender> sendinput,
+    std::unique_ptr<IInputSender> serial)
+    : sendinput_(std::move(sendinput)),
+      serial_(std::move(serial)) {}
+
+std::string_view SwitchableMouseSender::name() const {
+    const IInputSender* selected = method_ == MouseOutputMethod::Serial ? serial_.get() : sendinput_.get();
+    return selected ? selected->name() : "none";
+}
+
+void SwitchableMouseSender::configure(const MouseSenderConfig& config) {
+    method_ = config.method;
+    if (sendinput_) {
+        sendinput_->configure(config);
+    }
+    if (serial_) {
+        serial_->configure(config);
+    }
+}
+
+bool SwitchableMouseSender::sendRelative(const int dx, const int dy) {
+    IInputSender* selected = method_ == MouseOutputMethod::Serial ? serial_.get() : sendinput_.get();
+    return selected && selected->sendRelative(dx, dy);
+}
+
+bool SwitchableMouseSender::clickLeft(const double hold_s) {
+    return sendinput_ && sendinput_->clickLeft(hold_s);
+}
+
+InputSenderStatus SwitchableMouseSender::status() const {
+    const IInputSender* selected = method_ == MouseOutputMethod::Serial ? serial_.get() : sendinput_.get();
+    if (!selected) {
+        return {method_, InputSenderState::Disconnected, false, "Mouse output backend is unavailable."};
+    }
+    InputSenderStatus result = selected->status();
+    result.method = method_;
+    return result;
+}
+
 bool sendLeftClickTap(const double hold_s) {
 #if defined(_WIN32)
     return sendMouseClickTap(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, hold_s);
@@ -199,7 +496,7 @@ bool sendVirtualKeyTap(const std::uint16_t virtual_key, const double hold_ms) {
 }
 
 std::unique_ptr<IInputSender> makeInputSender() {
-    return std::make_unique<SendInputMouseSender>();
+    return std::make_unique<SwitchableMouseSender>();
 }
 
 }  // namespace delta
