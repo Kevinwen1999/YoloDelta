@@ -143,7 +143,7 @@ struct StaticConfig {
     int screen_w = 2560;
     int screen_h = 1440;
     int imgsz = 416;
-    int capture_crop_size = 624;
+    int capture_crop_size = 640;
     float conf = 0.30F;
     int max_detections = 100;
     std::string inference_device = "cuda";
@@ -151,7 +151,12 @@ struct StaticConfig {
     std::string onnx_resize_interpolation = "nearest";
     float onnx_nms_iou = 0.50F;
     int onnx_topk_pre_nms = 500;
-    int onnx_cuda_device_id = 0;
+    // CUDA device ONNX Runtime/TensorRT runs inference on. Independent of
+    // capture_device_idx below -- capture and inference may target different
+    // physical GPUs. When they differ, zero-copy GPU capture is unavailable
+    // (no cross-adapter D3D11/CUDA interop) and capture automatically falls
+    // back to the host-memory path; inference itself is unaffected.
+    int onnx_cuda_device_id = 1;
     bool onnx_output_has_nms = true;
     bool onnx_force_target_class_decode = true;
     bool onnx_use_tensorrt = true;
@@ -161,6 +166,10 @@ struct StaticConfig {
     bool onnx_enable_cuda_graph = true;
     bool onnx_trt_cuda_graph_enable = true;
     bool async_gpu_capture_enable = true;
+    // DXGI adapter index Desktop Duplication captures from. May safely differ
+    // from onnx_cuda_device_id above -- see that field's comment. A mismatch
+    // is detected once at startup (informational log) and only disables the
+    // GPU zero-copy capture optimization, never capture or inference.
     int capture_device_idx = 0;
     int capture_output_idx = 0;
     int capture_timeout_ms = 1;
@@ -203,7 +212,7 @@ struct RuntimeConfig {
     float adaptive_capture_crop_smoothing_alpha = 0.25F;
     float adaptive_capture_crop_edge_margin_ratio = 0.18F;
     int adaptive_capture_crop_step_px = 32;
-    float body_y_ratio = 0.25F;
+    float body_y_ratio = 0.15F;
     float head_x_ratio = 0.50F;
     float head_y_ratio = 0.50F;
     TrackingStrategy tracking_strategy = TrackingStrategy::PredictivePid;
@@ -232,7 +241,7 @@ struct RuntimeConfig {
     int legacy_pid_stable_frames = 2;
     float legacy_pid_error_delta_px = 10.0F;
     float legacy_pid_prelock_scale = 0.2F;
-    float predictive_pid_kp = 0.77F;
+    float predictive_pid_kp = 0.65F;
     float predictive_pid_ki = 0.0F;
     float predictive_pid_kd = 0.01F;
     float predictive_pid_pred_weight_x = 0.6F;
@@ -255,7 +264,7 @@ struct RuntimeConfig {
     bool predictive_pid_latency_auto_enable = true;
     float predictive_pid_latency_bias_s = 0.0F;
     float predictive_pid_latency_max_s = 0.050F;
-    bool predictive_pid_deadzone_enable = true;
+    bool predictive_pid_deadzone_enable = false;
     float predictive_pid_deadzone_enter_px = 5.0F;
     float predictive_pid_deadzone_exit_px = 5.5F;
     float predictive_pid_deadzone_enter_ratio = 0.1F;
@@ -277,7 +286,7 @@ struct RuntimeConfig {
     bool target_guard_enable = true;
     int target_guard_commit_frames = 5;
     int target_guard_hold_frames = 10;
-    float target_guard_window_scale = 5.25F;
+    float target_guard_window_scale = 2.25F;
     int target_guard_min_window_px = 200;
     bool target_lead_enable = false;
     int target_lead_commit_frames = 3;

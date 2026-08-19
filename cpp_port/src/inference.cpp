@@ -440,6 +440,21 @@ struct OnnxRuntimeEngine::Impl {
         preprocess(frame);
         const auto t1 = SteadyClock::now();
         result.timings.preprocess_ms = ms(t0, t1);
+#if defined(DELTA_WITH_CUDA_PIPELINE)
+        if (gpu_input_ready && gpu_input_buffer != nullptr) {
+            // Session has a persistent GPU input buffer (CUDA graph replay and/or a bound
+            // IoBinding may depend on it keeping a fixed address) -- route host-preprocessed
+            // frames through it via a plain H2D copy rather than calling session->Run() with a
+            // freshly-built CPU-memory Ort::Value, which is incompatible with graph replay and
+            // produces an opaque ORT-internal error ("ort_value must contain a constructed
+            // tensor") once a graph has been captured.
+            const void* host_src = input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16
+                ? static_cast<const void*>(input_f16.data())
+                : static_cast<const void*>(input_f32.data());
+            checkCuda(cudaMemcpy(gpu_input_buffer, host_src, input_tensor_bytes, cudaMemcpyHostToDevice), "cudaMemcpy(host input -> gpu)");
+            return runGpuBufferInference(std::move(result), frame.width, frame.height, target_class);
+        }
+#endif
         Ort::RunOptions run_options;
         Ort::Value input = makeInput();
         const char* input_names[] = {input_name.c_str()};
@@ -470,6 +485,7 @@ struct OnnxRuntimeEngine::Impl {
     }
 
     InferenceResult predictGpu(const GpuFramePacket& frame, const int target_class);
+    InferenceResult runGpuBufferInference(InferenceResult result, int frame_width, int frame_height, int target_class);
 
     void init();
     ProviderPreference requestedProvider() const;
@@ -1287,6 +1303,18 @@ InferenceResult OnnxRuntimeEngine::Impl::predictGpu(const GpuFramePacket& frame,
     const auto t1 = SteadyClock::now();
     result.timings.preprocess_ms = ms(t0, t1);
 
+    return runGpuBufferInference(std::move(result), frame.width, frame.height, target_class);
+#endif
+}
+
+InferenceResult OnnxRuntimeEngine::Impl::runGpuBufferInference(
+    InferenceResult result, const int frame_width, const int frame_height, const int target_class) {
+#if !defined(DELTA_WITH_CUDA_PIPELINE)
+    (void)frame_width;
+    (void)frame_height;
+    (void)target_class;
+    return result;
+#else
     Ort::RunOptions run_options;
     if (cuda_graph_enabled) {
         run_options.AddConfigEntry("gpu_graph_id", "0");
@@ -1332,8 +1360,8 @@ InferenceResult OnnxRuntimeEngine::Impl::predictGpu(const GpuFramePacket& frame,
             if (output_has_nms) {
                 if (auto decoded = decodeNms(
                         first_tensor_debug.has_value() ? *first_tensor_debug : toFlatTensor(outputs.front()),
-                        frame.width,
-                        frame.height,
+                        frame_width,
+                        frame_height,
                         target_class);
                     decoded.has_value()) {
                     result.detections = std::move(decoded.value());
@@ -1342,7 +1370,7 @@ InferenceResult OnnxRuntimeEngine::Impl::predictGpu(const GpuFramePacket& frame,
                 }
             }
             for (const auto& out : outputs) {
-                if (auto decoded = decodeNms(toFlatTensor(out), frame.width, frame.height, target_class); decoded.has_value()) {
+                if (auto decoded = decodeNms(toFlatTensor(out), frame_width, frame_height, target_class); decoded.has_value()) {
                     result.detections = std::move(decoded.value());
                     result.timings.postprocess_ms = ms(t4, SteadyClock::now());
                     return result;
@@ -1350,8 +1378,8 @@ InferenceResult OnnxRuntimeEngine::Impl::predictGpu(const GpuFramePacket& frame,
             }
             result.detections = decodeRaw(
                 first_tensor_debug.has_value() ? *first_tensor_debug : toFlatTensor(outputs.front()),
-                frame.width,
-                frame.height,
+                frame_width,
+                frame_height,
                 target_class);
         }
         result.timings.postprocess_ms = ms(t4, SteadyClock::now());
@@ -1393,20 +1421,20 @@ InferenceResult OnnxRuntimeEngine::Impl::predictGpu(const GpuFramePacket& frame,
     }
     if (!outputs.empty()) {
         if (output_has_nms) {
-            if (auto decoded = decodeNms(outputs.front(), frame.width, frame.height, target_class); decoded.has_value()) {
+            if (auto decoded = decodeNms(outputs.front(), frame_width, frame_height, target_class); decoded.has_value()) {
                 result.detections = std::move(decoded.value());
                 result.timings.postprocess_ms = ms(t4, SteadyClock::now());
                 return result;
             }
         }
         for (const auto& out : outputs) {
-            if (auto decoded = decodeNms(out, frame.width, frame.height, target_class); decoded.has_value()) {
+            if (auto decoded = decodeNms(out, frame_width, frame_height, target_class); decoded.has_value()) {
                 result.detections = std::move(decoded.value());
                 result.timings.postprocess_ms = ms(t4, SteadyClock::now());
                 return result;
             }
         }
-        result.detections = decodeRaw(outputs.front(), frame.width, frame.height, target_class);
+        result.detections = decodeRaw(outputs.front(), frame_width, frame_height, target_class);
     }
     result.timings.postprocess_ms = ms(t4, SteadyClock::now());
     return result;

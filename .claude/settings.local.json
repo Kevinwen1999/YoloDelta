@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(xargs grep *)"
+      "Bash(xargs grep *)",
+      "Bash(cmake --build --preset delta-native-cuda-debug)",
+      "PowerShell(Get-Command cmake -ErrorAction SilentlyContinue)"
     ]
   }
 }

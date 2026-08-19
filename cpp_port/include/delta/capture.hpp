@@ -15,6 +15,7 @@ public:
     virtual std::string_view name() const = 0;
     virtual std::optional<FramePacket> grab(const CaptureRegion& region) = 0;
     virtual std::optional<GpuFramePacket> grabGpu(const CaptureRegion&) { return std::nullopt; }
+    virtual bool supportsGpuCapture() const { return false; }
     virtual void setGpuConsumerStream(void*) {}
     virtual void setCachedFrameTimeoutMs(double) {}
     virtual void setFreshOnly(bool) {}
@@ -34,6 +35,7 @@ public:
     std::string_view name() const override { return "desktop-duplication"; }
     std::optional<FramePacket> grab(const CaptureRegion& region) override;
     std::optional<GpuFramePacket> grabGpu(const CaptureRegion& region) override;
+    bool supportsGpuCapture() const override;
     void setGpuConsumerStream(void* stream) override;
     void setCachedFrameTimeoutMs(double timeout_ms) override;
     void setFreshOnly(bool fresh_only) override;

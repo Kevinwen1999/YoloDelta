@@ -15,9 +15,9 @@ def main():
 
     model.train(
         data=path,
-        imgsz=416,
+        imgsz=640,
         epochs=150,
-        batch=64,
+        batch=32,
         workers=8,
         device=device,
 
@@ -38,7 +38,7 @@ def main():
         save_period=10,
 
         # Run name
-        name="train4",
+        name="train6",
         exist_ok=True,
     )
 

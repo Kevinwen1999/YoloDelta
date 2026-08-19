@@ -6,3 +6,5 @@
 *.txt
 /11nBackup/
 tmp*
+/test/
+/train_backups/

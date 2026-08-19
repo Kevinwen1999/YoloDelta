@@ -6,8 +6,8 @@ nc: 2
 names: ['0', '1']
 
 roboflow:
-  workspace: ala-xuls
-  project: delta-9ez3o
-  version: 31
+  workspace: vision-uycle
+  project: vision-8gjic
+  version: 1
   license: CC BY 4.0
-  url: https://universe.roboflow.com/ala-xuls/delta-9ez3o/dataset/31
+  url: https://universe.roboflow.com/vision-uycle/vision-8gjic/dataset/1

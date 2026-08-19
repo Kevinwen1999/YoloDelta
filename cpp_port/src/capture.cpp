@@ -216,6 +216,10 @@ struct DesktopDuplicationCapture::Impl {
             throw std::runtime_error("Desktop output has invalid dimensions.");
         }
 
+#if defined(DELTA_WITH_CUDA_PIPELINE)
+        checkGpuInteropDeviceMatch();
+#endif
+
         constexpr D3D_FEATURE_LEVEL levels[] = {
             D3D_FEATURE_LEVEL_11_1,
             D3D_FEATURE_LEVEL_11_0,
@@ -367,6 +371,24 @@ struct DesktopDuplicationCapture::Impl {
         std::shared_ptr<std::atomic_bool> copy_pending = std::make_shared<std::atomic_bool>(false);
         std::shared_ptr<std::atomic_bool> in_use = std::make_shared<std::atomic_bool>(false);
     };
+
+    void checkGpuInteropDeviceMatch() {
+        int resolved_cuda_device = -1;
+        if (cudaD3D11GetDevice(&resolved_cuda_device, adapter.Get()) != cudaSuccess) {
+            return;
+        }
+        if (config.onnx_cuda_device_id >= 0 && resolved_cuda_device != config.onnx_cuda_device_id) {
+            gpu_capture_disabled.store(true, std::memory_order_relaxed);
+            if (config.debug_log && !gpu_capture_failure_logged) {
+                std::cout << "[capture] capture adapter " << adapter_name << " " << output_name
+                    << " is CUDA device " << resolved_cuda_device
+                    << "; inference is configured for CUDA device " << config.onnx_cuda_device_id
+                    << ". Zero-copy GPU capture is unavailable across different physical GPUs; "
+                       "using the host-memory capture path instead.\n";
+                gpu_capture_failure_logged = true;
+            }
+        }
+    }
 
     void initializeCudaInterop() {
         if (cuda_ready) {
@@ -798,11 +820,14 @@ struct DesktopDuplicationCapture::Impl {
 
 #if defined(DELTA_WITH_CUDA_PIPELINE)
     std::optional<GpuFramePacket> grabGpu(const CaptureRegion& requested_region) {
-        if (gpu_capture_disabled) {
+        if (gpu_capture_disabled.load(std::memory_order_relaxed)) {
             return std::nullopt;
         }
 
         initialize();
+        if (gpu_capture_disabled.load(std::memory_order_relaxed)) {
+            return std::nullopt;
+        }
         const CaptureRegion region = clampRegionToDesktop(requested_region, desktop_width, desktop_height);
         const auto acquire_started = SteadyClock::now();
 
@@ -904,7 +929,7 @@ struct DesktopDuplicationCapture::Impl {
     bool gpu_slots_initialized = false;
     std::size_t next_gpu_slot = 0;
     std::mutex gpu_slots_mutex;
-    bool gpu_capture_disabled = false;
+    std::atomic_bool gpu_capture_disabled{false};
     bool gpu_capture_failure_logged = false;
 #endif
     DXGI_OUTPUT_DESC output_desc{};
@@ -949,7 +974,7 @@ std::optional<GpuFramePacket> DesktopDuplicationCapture::grabGpu(const CaptureRe
         return impl_->grabGpu(region);
     } catch (const std::exception& ex) {
         impl_->releaseCudaResources();
-        impl_->gpu_capture_disabled = true;
+        impl_->gpu_capture_disabled.store(true, std::memory_order_relaxed);
         if (impl_->config.debug_log && !impl_->gpu_capture_failure_logged) {
             std::cerr << "[capture] " << ex.what() << "\n";
             std::cerr << "[capture] GPU interop disabled for this run.\n";
@@ -960,6 +985,14 @@ std::optional<GpuFramePacket> DesktopDuplicationCapture::grabGpu(const CaptureRe
 #else
     (void)region;
     return std::nullopt;
+#endif
+}
+
+bool DesktopDuplicationCapture::supportsGpuCapture() const {
+#if defined(DELTA_WITH_CUDA_PIPELINE)
+    return impl_ && !impl_->gpu_capture_disabled.load(std::memory_order_relaxed);
+#else
+    return false;
 #endif
 }
 

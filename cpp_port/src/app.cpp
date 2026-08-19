@@ -1345,7 +1345,8 @@ void DeltaApp::captureLoop() {
                 }
             }
 
-            if (!captured && !prefer_gpu) {
+            const bool gpu_capture_unavailable = prefer_gpu && capture_ && !capture_->supportsGpuCapture();
+            if (!captured && (!prefer_gpu || gpu_capture_unavailable)) {
                 const auto grab_start = SteadyClock::now();
                 if (std::optional<FramePacket> packet = capture_->grab(region); packet.has_value()) {
                     gpu_frame_slot_.clear();
@@ -1793,6 +1794,9 @@ void DeltaApp::inferenceLoop() {
             const GpuCaptureSchedule capture_schedule = inference_->gpuCaptureSchedule();
             if (capture_schedule == GpuCaptureSchedule::AsyncLatest) {
                 gpu_packet = gpu_frame_slot_.wait_take_for(kInferenceIdleSleep);
+                if (!gpu_packet.has_value() && capture_ && !capture_->supportsGpuCapture()) {
+                    cpu_packet = frame_slot_.try_take();
+                }
             } else if (isInlineGpuCaptureSchedule(capture_schedule)) {
                 std::pair<int, int> focus = center;
                 int shared_crop_size = 0;
