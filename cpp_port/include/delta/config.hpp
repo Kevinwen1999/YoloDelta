@@ -134,7 +134,7 @@ inline int aimModeTargetClass(const AimMode mode) {
 }
 
 struct StaticConfig {
-    std::string model_path = R"(C:\YOLO\Delta\runs\detect\train4\weights\best.onnx)";
+    std::string model_path = R"(C:\YOLO\Delta\runs\detect\train6\weights\best.onnx)";
     std::string onnxruntime_root;
     std::string cuda_root;
     std::string tensorrt_root;
@@ -142,7 +142,7 @@ struct StaticConfig {
     std::string recoil_profiles_dir = R"(C:\YOLO\Delta\cpp_port\runtime\recoil_profiles)";
     int screen_w = 2560;
     int screen_h = 1440;
-    int imgsz = 416;
+    int imgsz = 640;
     int capture_crop_size = 640;
     float conf = 0.30F;
     int max_detections = 100;
@@ -337,7 +337,7 @@ struct RuntimeConfig {
     bool side_button_key_sequence_use_left_click = true;
     double side_button_key_sequence_left_click_hold_ms = 0.0;
     double side_button_key_sequence_loop_delay_ms = 8.0;
-    MouseOutputMethod mouse_output_method = MouseOutputMethod::SendInput;
+    MouseOutputMethod mouse_output_method = MouseOutputMethod::Serial;
     std::string serial_mouse_port = "COM7";
     int serial_mouse_baud = 921600;
     float sendinput_gain_x = 1.0F;

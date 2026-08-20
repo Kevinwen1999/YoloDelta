@@ -3547,9 +3547,12 @@ void DeltaApp::controlLoop() {
         bool trigger_sent = false;
         if (trigger_will_click) {
             trigger_sent = input_sender_->clickLeft(triggerbot_config.click_hold_s);
-            if (trigger_sent) {
-                last_trigger_click = SystemClock::now();
-            }
+            // Always advance the cooldown clock, even on failure. Otherwise a
+            // sender that keeps failing (blocked SendInput, disconnected serial,
+            // etc.) gets retried with no pacing at all: trigger_will_click stays
+            // true and this loop spins clickLeft() as fast as it can run, which
+            // also starves hotkey polling on this same thread.
+            last_trigger_click = SystemClock::now();
         }
         {
             const InputSenderStatus sender_status = input_sender_->status();

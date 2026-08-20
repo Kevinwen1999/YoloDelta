@@ -15,6 +15,13 @@
 
 namespace delta {
 
+namespace {
+// Rate limit for silently retrying a dropped serial connection from the
+// control loop, so a persistently absent/unresponsive device can't turn
+// sendRelative() into a tight retry loop that starves hotkey polling.
+constexpr std::chrono::milliseconds kSerialAutoReconnectInterval{1000};
+}  // namespace
+
 #if defined(_WIN32)
 namespace {
 
@@ -310,20 +317,41 @@ SerialMouseSender::SerialMouseSender(std::unique_ptr<ISerialMouseTransport> tran
     : transport_(std::move(transport)) {}
 
 SerialMouseSender::~SerialMouseSender() {
+    if (reconnect_worker_.joinable()) {
+        reconnect_worker_.join();
+    }
     disconnect();
 }
 
+void SerialMouseSender::setStatus(InputSenderStatus status) {
+    std::lock_guard<std::mutex> lock(status_mutex_);
+    status_ = std::move(status);
+}
+
+InputSenderStatus SerialMouseSender::status() const {
+    std::lock_guard<std::mutex> lock(status_mutex_);
+    return status_;
+}
+
 void SerialMouseSender::disconnect(std::string error) {
+    std::lock_guard<std::mutex> lock(transport_mutex_);
     if (transport_) {
         transport_->close();
     }
-    status_.method = MouseOutputMethod::Serial;
-    status_.state = InputSenderState::Disconnected;
-    status_.serial_connected = false;
-    status_.error = std::move(error);
+    setStatus({MouseOutputMethod::Serial, InputSenderState::Disconnected, false, std::move(error)});
 }
 
 void SerialMouseSender::configure(const MouseSenderConfig& config) {
+    // A background auto-reconnect attempt (see maybeStartAutoReconnect()) may be
+    // using transport_/port_/baud_ right now. Reap it first so this explicit,
+    // user-driven (re)configure never races it. By the time reconnect_worker_ is
+    // joinable and we get here, any in-flight attempt has either already finished
+    // or is about to — this does not wait on a fresh multi-second connect.
+    if (reconnect_worker_.joinable()) {
+        reconnect_worker_.join();
+    }
+
+    std::lock_guard<std::mutex> lock(transport_mutex_);
     const bool settings_changed = config.serial_port != port_ || config.serial_baud != baud_;
     const bool reconnect_requested = config.reconnect_token != reconnect_token_;
     port_ = config.serial_port;
@@ -331,40 +359,105 @@ void SerialMouseSender::configure(const MouseSenderConfig& config) {
     reconnect_token_ = config.reconnect_token;
 
     if (config.method != MouseOutputMethod::Serial) {
-        disconnect();
+        if (transport_) {
+            transport_->close();
+        }
+        setStatus({MouseOutputMethod::Serial, InputSenderState::Disconnected, false, {}});
         return;
     }
     if (!settings_changed && !reconnect_requested && transport_ && transport_->isOpen()) {
-        status_ = {MouseOutputMethod::Serial, InputSenderState::Connected, true, {}};
+        setStatus({MouseOutputMethod::Serial, InputSenderState::Connected, true, {}});
         return;
     }
 
-    disconnect();
-    status_ = {MouseOutputMethod::Serial, InputSenderState::Connecting, false, {}};
+    if (transport_) {
+        transport_->close();
+    }
+    setStatus({MouseOutputMethod::Serial, InputSenderState::Connecting, false, {}});
+    next_auto_reconnect_attempt_ = std::chrono::steady_clock::now() + kSerialAutoReconnectInterval;
     std::string error;
     if (!transport_ || !transport_->open(port_, baud_, error)) {
-        disconnect(error.empty() ? "Failed to open serial mouse output." : std::move(error));
+        setStatus({MouseOutputMethod::Serial, InputSenderState::Disconnected, false,
+                   error.empty() ? "Failed to open serial mouse output." : std::move(error)});
         return;
     }
-    status_ = {MouseOutputMethod::Serial, InputSenderState::Connected, true, {}};
+    setStatus({MouseOutputMethod::Serial, InputSenderState::Connected, true, {}});
+}
+
+void SerialMouseSender::maybeStartAutoReconnect() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_auto_reconnect_attempt_) {
+        return;
+    }
+    next_auto_reconnect_attempt_ = now + kSerialAutoReconnectInterval;
+
+    bool expected = false;
+    if (!reconnect_in_progress_.compare_exchange_strong(expected, true)) {
+        return;  // an attempt is already running
+    }
+    // reconnect_in_progress_ was false, so any previous worker already finished
+    // and released transport_mutex_ before clearing that flag (see below) — this
+    // join reaps a completed thread, it does not wait on a fresh connect.
+    if (reconnect_worker_.joinable()) {
+        reconnect_worker_.join();
+    }
+    reconnect_worker_ = std::thread([this]() {
+        {
+            std::lock_guard<std::mutex> lock(transport_mutex_);
+            if (transport_ && !transport_->isOpen() && !port_.empty()) {
+                std::string error;
+                if (transport_->open(port_, baud_, error)) {
+                    setStatus({MouseOutputMethod::Serial, InputSenderState::Connected, true, {}});
+                } else {
+                    setStatus({MouseOutputMethod::Serial, InputSenderState::Disconnected, false,
+                               error.empty() ? "Failed to reconnect serial mouse output." : error});
+                }
+            }
+        }
+        reconnect_in_progress_ = false;
+    });
 }
 
 bool SerialMouseSender::sendRelative(const int dx, const int dy) {
     if (dx == 0 && dy == 0) {
         return true;
     }
+    // try_lock, not lock: if a background reconnect attempt currently owns
+    // transport_ (including a multi-second open()), this must fail fast rather
+    // than block the caller — sendRelative() runs on the real-time control loop
+    // thread, which also polls hotkeys (including the panic-stop key) and paces
+    // the triggerbot. Blocking it here previously caused exactly the "locks up
+    // issuing left click constantly" symptom this whole reconnect path exists
+    // to prevent.
+    std::unique_lock<std::mutex> lock(transport_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return false;
+    }
+
     if (!transport_ || !transport_->isOpen()) {
-        if (status_.error.empty()) {
-            status_.error = "Serial port is not open.";
+        // A previous write/open failure disconnected the transport. Without
+        // reconnecting, the sender stays dead forever after a single transient
+        // hiccup: aim correction silently stops while the crosshair sits frozen
+        // on whatever it last saw, which lets the triggerbot fire nonstop on a
+        // target it can no longer track off of. Kick off a backoff-paced retry
+        // on a background thread instead of giving up for good.
+        {
+            std::lock_guard<std::mutex> slock(status_mutex_);
+            if (status_.error.empty()) {
+                status_.error = "Serial port is not open.";
+            }
+            status_.state = InputSenderState::Disconnected;
+            status_.serial_connected = false;
         }
-        status_.state = InputSenderState::Disconnected;
-        status_.serial_connected = false;
+        maybeStartAutoReconnect();
         return false;
     }
     const auto frame = encodeSerialMouseFrame(dx, dy);
     std::string error;
     if (!transport_->write(frame.data(), frame.size(), error)) {
-        disconnect(error.empty() ? "Serial mouse write failed." : std::move(error));
+        transport_->close();
+        setStatus({MouseOutputMethod::Serial, InputSenderState::Disconnected, false,
+                   error.empty() ? "Serial mouse write failed." : std::move(error)});
         return false;
     }
     return true;

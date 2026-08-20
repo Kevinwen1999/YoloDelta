@@ -1,11 +1,15 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "delta/config.hpp"
 
@@ -109,16 +113,32 @@ public:
     void configure(const MouseSenderConfig& config) override;
     bool sendRelative(int dx, int dy) override;
     bool clickLeft(double hold_s) override;
-    InputSenderStatus status() const override { return status_; }
+    InputSenderStatus status() const override;
 
 private:
     void disconnect(std::string error = {});
+    void setStatus(InputSenderStatus status);
+    // Kicks off a background reconnect attempt if one isn't already running and the
+    // retry backoff has elapsed. Never blocks the caller: the actual transport_->open()
+    // (which can take seconds, e.g. Win32SerialMouseTransport's post-open settle delay)
+    // runs on reconnect_worker_, never on whatever thread calls sendRelative().
+    void maybeStartAutoReconnect();
 
     std::unique_ptr<ISerialMouseTransport> transport_;
     std::string port_;
     int baud_ = 921600;
     std::uint64_t reconnect_token_ = 0;
     InputSenderStatus status_{MouseOutputMethod::Serial, InputSenderState::Disconnected, false, {}};
+    std::chrono::steady_clock::time_point next_auto_reconnect_attempt_{};
+
+    // Guards transport_/port_/baud_, which reconnect_worker_ touches concurrently
+    // with the calling (control-loop) thread's sendRelative()/configure() calls.
+    mutable std::mutex transport_mutex_;
+    // Guards status_ separately (finer-grained than transport_mutex_) so status()
+    // never has to wait on an in-flight reconnect attempt.
+    mutable std::mutex status_mutex_;
+    std::atomic<bool> reconnect_in_progress_{false};
+    std::thread reconnect_worker_;
 };
 
 class SwitchableMouseSender final : public IInputSender {
