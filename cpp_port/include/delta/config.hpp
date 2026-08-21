@@ -269,6 +269,16 @@ struct RuntimeConfig {
     float predictive_pid_deadzone_exit_px = 5.5F;
     float predictive_pid_deadzone_enter_ratio = 0.1F;
     float predictive_pid_deadzone_exit_ratio = 0.15F;
+    bool predictive_pid_human_motion_enable = false;
+    float predictive_pid_human_fitts_a_ms = 0.1F;
+    float predictive_pid_human_fitts_b_ms = 0.15F;
+    float predictive_pid_human_target_width_px = 10.0F;
+    float predictive_pid_human_overshoot_probability = 0.15F;
+    float predictive_pid_human_curvature_scale = 0.012F;
+    float predictive_pid_human_ou_sigma = 0.2F;
+    float predictive_pid_human_tremor_amplitude_px = 0.15F;
+    float predictive_pid_human_signal_noise = 0.02F;
+    float predictive_pid_human_sample_interval_ms = 3.4F;
     float sticky_bias_px = 800.0F;
     bool target_association_enable = false;
     float target_association_min_iou = 0.08F;

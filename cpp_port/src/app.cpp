@@ -3,6 +3,7 @@
 #include "delta/detection_dampening.hpp"
 #include "delta/mouse_suppression.hpp"
 #include "delta/predictive_pid.hpp"
+#include "delta/sigma_drift.hpp"
 #include "delta/recoil_aim_offset.hpp"
 #include "delta/target_association.hpp"
 #include "delta/target_guard.hpp"
@@ -477,7 +478,17 @@ bool pidRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rh
         || lhs.predictive_pid_deadzone_enter_px != rhs.predictive_pid_deadzone_enter_px
         || lhs.predictive_pid_deadzone_exit_px != rhs.predictive_pid_deadzone_exit_px
         || lhs.predictive_pid_deadzone_enter_ratio != rhs.predictive_pid_deadzone_enter_ratio
-        || lhs.predictive_pid_deadzone_exit_ratio != rhs.predictive_pid_deadzone_exit_ratio;
+        || lhs.predictive_pid_deadzone_exit_ratio != rhs.predictive_pid_deadzone_exit_ratio
+        || lhs.predictive_pid_human_motion_enable != rhs.predictive_pid_human_motion_enable
+        || lhs.predictive_pid_human_fitts_a_ms != rhs.predictive_pid_human_fitts_a_ms
+        || lhs.predictive_pid_human_fitts_b_ms != rhs.predictive_pid_human_fitts_b_ms
+        || lhs.predictive_pid_human_target_width_px != rhs.predictive_pid_human_target_width_px
+        || lhs.predictive_pid_human_overshoot_probability != rhs.predictive_pid_human_overshoot_probability
+        || lhs.predictive_pid_human_curvature_scale != rhs.predictive_pid_human_curvature_scale
+        || lhs.predictive_pid_human_ou_sigma != rhs.predictive_pid_human_ou_sigma
+        || lhs.predictive_pid_human_tremor_amplitude_px != rhs.predictive_pid_human_tremor_amplitude_px
+        || lhs.predictive_pid_human_signal_noise != rhs.predictive_pid_human_signal_noise
+        || lhs.predictive_pid_human_sample_interval_ms != rhs.predictive_pid_human_sample_interval_ms;
 }
 
 bool trackerRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rhs) {
@@ -1384,6 +1395,7 @@ void DeltaApp::inferenceLoop() {
         LegacyPidAxisState legacy_pid_x{};
         LegacyPidAxisState legacy_pid_y{};
         PredictivePidController predictive_pid{};
+        SigmaDriftShaper sigma_drift{};
         RecoilAimOffsetIntegrator recoil_aim_offset{};
 
         RuntimeConfig runtime = runtime_store_.snapshot();
@@ -1405,6 +1417,7 @@ void DeltaApp::inferenceLoop() {
                 current.derivative_alpha,
                 current.output_limit);
             predictive_pid.configure(buildPredictivePidConfig(current));
+            sigma_drift.configure(buildSigmaDriftConfig(current));
         };
         configurePidControllers(runtime);
         if (capture_) {
@@ -1449,6 +1462,7 @@ void DeltaApp::inferenceLoop() {
             legacy_pid_x.reset();
             legacy_pid_y.reset();
             predictive_pid.reset();
+            sigma_drift.reset();
             recoil_aim_offset.reset();
             pid_settle_state.reset();
             last_pid_tick = pid_tick;
@@ -2672,8 +2686,21 @@ void DeltaApp::inferenceLoop() {
                         measured_latency_s,
                         last_box_w,
                         last_box_h);
-                    desired_x = predictive.output_x;
-                    desired_y = predictive.output_y;
+                    if (runtime.predictive_pid_human_motion_enable) {
+                        const SigmaDriftResult human_motion = sigma_drift.update(
+                            predictive.output_x,
+                            predictive.output_y,
+                            predictive.fused_error_x,
+                            predictive.fused_error_y,
+                            pid_dt,
+                            last_box_w,
+                            last_box_h);
+                        desired_x = human_motion.output_x;
+                        desired_y = human_motion.output_y;
+                    } else {
+                        desired_x = predictive.output_x;
+                        desired_y = predictive.output_y;
+                    }
                     predictive_pid_latency_ms = predictive.latency_s * 1000.0F;
                     predictive_pid_horizon_ms = predictive.horizon_s * 1000.0F;
                     predictive_pid_deadzone_active = predictive.deadzone_active_x || predictive.deadzone_active_y;
@@ -2756,6 +2783,9 @@ void DeltaApp::inferenceLoop() {
                 : 0;
             if (use_predictive_pid && runtime.pid_enable) {
                 predictive_pid.commitOutput(static_cast<float>(dx), static_cast<float>(dy));
+                if (runtime.predictive_pid_human_motion_enable) {
+                    sigma_drift.commitOutput(static_cast<float>(dx), static_cast<float>(dy));
+                }
             }
             app_timings.aim_pid_s = secondsSince(aim_pid_start, SteadyClock::now());
 
@@ -2808,7 +2838,10 @@ void DeltaApp::inferenceLoop() {
                 shared_.capture_focus_full = {focus_x, focus_y};
                 shared_.target_time = now_system;
                 shared_.display_rate_servo = DisplayRateServoState{
-                    .valid = target_output_allowed,
+                    .valid = target_output_allowed
+                        && !(use_predictive_pid
+                            && runtime.pid_enable
+                            && runtime.predictive_pid_human_motion_enable),
                     .target_x = predicted_x,
                     .target_y = aim_y,
                     .velocity_x = servo_velocity_x,
@@ -3189,13 +3222,17 @@ void DeltaApp::controlLoop() {
         }
         const bool target_command_allowed = target_detected && target_output_allowed;
         const bool advanced_recoil_pending = !virtual_recoil_target_active && (pending_recoil.dx != 0 || pending_recoil.dy != 0);
-        if (runtime.display_rate_servo_enable && !target_command_allowed) {
+        const bool sigma_drift_active = runtime.tracking_strategy == TrackingStrategy::PredictivePid
+            && runtime.pid_enable
+            && runtime.predictive_pid_human_motion_enable;
+        const bool display_rate_servo_active = runtime.display_rate_servo_enable && !sigma_drift_active;
+        if (display_rate_servo_active && !target_command_allowed) {
             pending_aim_cmd.reset();
             next_aim_budget_tick = {};
             servo_carry_x = 0.0;
             servo_carry_y = 0.0;
         }
-        if (!runtime.display_rate_servo_enable) {
+        if (!display_rate_servo_active) {
             pending_aim_cmd.reset();
             next_aim_budget_tick = {};
             servo_carry_x = 0.0;
@@ -3221,7 +3258,7 @@ void DeltaApp::controlLoop() {
                 toggles.left_pressed,
                 toggles.right_pressed,
                 toggles.x1_pressed);
-        const bool target_scheduler_active = runtime.display_rate_servo_enable
+        const bool target_scheduler_active = display_rate_servo_active
             && target_command_allowed
             && target_engage_active;
         const auto command_wait_start = SteadyClock::now();
@@ -3260,7 +3297,7 @@ void DeltaApp::controlLoop() {
             incoming_cmd.reset();
         }
 
-        if (runtime.display_rate_servo_enable && target_command_allowed && incoming_cmd.has_value() && isTargetAimCommand(*incoming_cmd)) {
+        if (display_rate_servo_active && target_command_allowed && incoming_cmd.has_value() && isTargetAimCommand(*incoming_cmd)) {
             pending_aim_cmd = *incoming_cmd;
             if (!target_budget_due && perf_) {
                 recordAimSchedulerPerf(*perf_, false, false, false, true, false, false);
@@ -3298,7 +3335,7 @@ void DeltaApp::controlLoop() {
         }
         const bool deferred_target_command = !cmd.has_value() && pending_aim_cmd.has_value();
 
-        if (!cmd.has_value() && !deferred_target_command && runtime.display_rate_servo_enable && target_command_allowed) {
+        if (!cmd.has_value() && !deferred_target_command && display_rate_servo_active && target_command_allowed) {
             DisplayRateServoState servo{};
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);

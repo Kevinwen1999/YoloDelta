@@ -325,6 +325,16 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"predictive_pid_deadzone_exit_px\":" << cfg.predictive_pid_deadzone_exit_px << ","
         << "\"predictive_pid_deadzone_enter_ratio\":" << cfg.predictive_pid_deadzone_enter_ratio << ","
         << "\"predictive_pid_deadzone_exit_ratio\":" << cfg.predictive_pid_deadzone_exit_ratio << ","
+        << "\"predictive_pid_human_motion_enable\":" << (cfg.predictive_pid_human_motion_enable ? "true" : "false") << ","
+        << "\"predictive_pid_human_fitts_a_ms\":" << cfg.predictive_pid_human_fitts_a_ms << ","
+        << "\"predictive_pid_human_fitts_b_ms\":" << cfg.predictive_pid_human_fitts_b_ms << ","
+        << "\"predictive_pid_human_target_width_px\":" << cfg.predictive_pid_human_target_width_px << ","
+        << "\"predictive_pid_human_overshoot_probability\":" << cfg.predictive_pid_human_overshoot_probability << ","
+        << "\"predictive_pid_human_curvature_scale\":" << cfg.predictive_pid_human_curvature_scale << ","
+        << "\"predictive_pid_human_ou_sigma\":" << cfg.predictive_pid_human_ou_sigma << ","
+        << "\"predictive_pid_human_tremor_amplitude_px\":" << cfg.predictive_pid_human_tremor_amplitude_px << ","
+        << "\"predictive_pid_human_signal_noise\":" << cfg.predictive_pid_human_signal_noise << ","
+        << "\"predictive_pid_human_sample_interval_ms\":" << cfg.predictive_pid_human_sample_interval_ms << ","
         << "\"sticky_bias_px\":" << cfg.sticky_bias_px << ","
         << "\"target_association_enable\":" << (cfg.target_association_enable ? "true" : "false") << ","
         << "\"target_association_min_iou\":" << cfg.target_association_min_iou << ","
@@ -747,6 +757,7 @@ const F=[
 {g:"Legacy PID",k:"legacy_pid_lock_error_px",l:"Legacy PID Lock Error (px)",t:"n",s:0.1,n:0},{g:"Legacy PID",k:"legacy_pid_speed_multiplier",l:"Legacy PID Speed Multiplier",t:"n",s:0.001},{g:"Legacy PID",k:"legacy_pid_threshold_min_scale",l:"Legacy PID Min Scale",t:"n",s:0.001,n:0},{g:"Legacy PID",k:"legacy_pid_threshold_max_scale",l:"Legacy PID Max Scale",t:"n",s:0.001,n:0},{g:"Legacy PID",k:"legacy_pid_transition_sharpness",l:"Legacy PID Transition Sharpness",t:"n",s:0.001,n:0},{g:"Legacy PID",k:"legacy_pid_transition_midpoint",l:"Legacy PID Transition Midpoint",t:"n",s:0.001},{g:"Legacy PID",k:"legacy_pid_stable_frames",l:"Legacy PID Stable Frames",t:"n",s:1,n:1},{g:"Legacy PID",k:"legacy_pid_error_delta_px",l:"Legacy PID Error Delta (px)",t:"n",s:0.1,n:0},{g:"Legacy PID",k:"legacy_pid_prelock_scale",l:"Legacy PID Prelock Scale",t:"n",s:0.001,n:0,x:1},
 {g:"Predictive PID",k:"predictive_pid_kp",l:"Predictive Kp",t:"n",s:0.001},{g:"Predictive PID",k:"predictive_pid_ki",l:"Predictive Ki",t:"n",s:0.001},{g:"Predictive PID",k:"predictive_pid_kd",l:"Predictive Kd",t:"n",s:0.001},{g:"Predictive PID",k:"predictive_pid_pred_weight_x",l:"Prediction Weight X",t:"n",s:0.001},{g:"Predictive PID",k:"predictive_pid_pred_weight_y",l:"Prediction Weight Y",t:"n",s:0.001},{g:"Predictive PID",k:"predictive_pid_init_scale",l:"Initial P Scale",t:"n",s:0.001,n:0,x:1},{g:"Predictive PID",k:"predictive_pid_ramp_time_s",l:"P Ramp Time (s)",t:"n",s:0.001,n:0},{g:"Predictive PID",k:"predictive_pid_integral_limit",l:"Integral Limit",t:"n",s:1,n:0},{g:"Predictive PID",k:"predictive_pid_derivative_limit",l:"Derivative Limit",t:"n",s:1,n:0},{g:"Predictive PID",k:"predictive_pid_output_limit",l:"Output Limit",t:"n",s:1,n:0},
 {g:"Predictive PID",k:"predictive_pid_velocity_alpha",l:"Velocity Alpha",t:"n",s:0.001,n:0,x:1},{g:"Predictive PID",k:"predictive_pid_acceleration_alpha",l:"Acceleration Alpha",t:"n",s:0.001,n:0,x:1},{g:"Predictive PID",k:"predictive_pid_max_velocity_px_s",l:"Max Velocity (px/s)",t:"n",s:1,n:0},{g:"Predictive PID",k:"predictive_pid_max_acceleration_px_s",l:"Max Accel (px/s2)",t:"n",s:1,n:0},{g:"Predictive PID",k:"predictive_pid_reverse_gate_px",l:"Reverse Gate (px)",t:"n",s:0.1,n:0},{g:"Predictive PID",k:"predictive_pid_reverse_scale",l:"Reverse Scale",t:"n",s:0.001,n:0,x:1},{g:"Predictive PID",k:"predictive_pid_prediction_error_scale",l:"Prediction Error Scale",t:"n",s:0.001,n:0},{g:"Predictive PID",k:"predictive_pid_prediction_min_px",l:"Prediction Min (px)",t:"n",s:0.1,n:0},{g:"Predictive PID",k:"predictive_pid_prediction_max_px",l:"Prediction Max (px)",t:"n",s:0.1,n:0},{g:"Predictive PID",k:"predictive_pid_latency_comp_enable",l:"Latency Comp",t:"b"},{g:"Predictive PID",k:"predictive_pid_latency_auto_enable",l:"Auto Latency",t:"b"},{g:"Predictive PID",k:"predictive_pid_latency_bias_s",l:"Latency Bias (s)",t:"n",s:0.001,n:0},{g:"Predictive PID",k:"predictive_pid_latency_max_s",l:"Latency Max (s)",t:"n",s:0.001,n:0},{g:"Predictive PID",k:"predictive_pid_deadzone_enable",l:"Dead Zone",t:"b"},{g:"Predictive PID",k:"predictive_pid_deadzone_enter_px",l:"Dead Zone Enter (px)",t:"n",s:0.1,n:0},{g:"Predictive PID",k:"predictive_pid_deadzone_exit_px",l:"Dead Zone Exit (px)",t:"n",s:0.1,n:0},{g:"Predictive PID",k:"predictive_pid_deadzone_enter_ratio",l:"Dead Zone Enter Ratio",t:"n",s:0.001,n:0,x:1},{g:"Predictive PID",k:"predictive_pid_deadzone_exit_ratio",l:"Dead Zone Exit Ratio",t:"n",s:0.001,n:0,x:1},
+{g:"Predictive Human Motion",k:"predictive_pid_human_motion_enable",l:"SigmaDrift Human Motion",t:"b"},{g:"Predictive Human Motion",k:"predictive_pid_human_fitts_a_ms",l:"Fitts A (ms)",t:"n",s:1,n:0},{g:"Predictive Human Motion",k:"predictive_pid_human_fitts_b_ms",l:"Fitts B (ms)",t:"n",s:1,n:0},{g:"Predictive Human Motion",k:"predictive_pid_human_target_width_px",l:"Fallback Target Width (px)",t:"n",s:1,n:1},{g:"Predictive Human Motion",k:"predictive_pid_human_overshoot_probability",l:"Overshoot Probability",t:"n",s:0.01,n:0,x:1},{g:"Predictive Human Motion",k:"predictive_pid_human_curvature_scale",l:"Curvature Scale",t:"n",s:0.001,n:0},{g:"Predictive Human Motion",k:"predictive_pid_human_ou_sigma",l:"OU Drift Sigma",t:"n",s:0.1,n:0},{g:"Predictive Human Motion",k:"predictive_pid_human_tremor_amplitude_px",l:"Tremor Max (px)",t:"n",s:0.05,n:0},{g:"Predictive Human Motion",k:"predictive_pid_human_signal_noise",l:"Signal Noise",t:"n",s:0.005,n:0},{g:"Predictive Human Motion",k:"predictive_pid_human_sample_interval_ms",l:"Mean Sample Interval (ms)",t:"n",s:0.1,n:0.1},
 {g:"Target Guard",k:"target_guard_enable",l:"Target Guard",t:"b"},{g:"Target Guard",k:"target_guard_commit_frames",l:"Target Guard Commit Frames",t:"n",s:1,n:1},{g:"Target Guard",k:"target_guard_hold_frames",l:"Target Guard Hold Frames",t:"n",s:1,n:0},{g:"Target Guard",k:"target_guard_window_scale",l:"Target Guard Window Scale",t:"n",s:0.01,n:0.1},{g:"Target Guard",k:"target_guard_min_window_px",l:"Target Guard Min Window (px)",t:"n",s:1,n:1},
 {g:"Target Lead",k:"target_lead_enable",l:"Target Lead",t:"b"},{g:"Target Lead",k:"target_lead_commit_frames",l:"Target Lead Commit Frames",t:"n",s:1,n:1},{g:"Target Lead",k:"target_lead_auto_latency_enable",l:"Target Lead Auto Latency",t:"b"},{g:"Target Lead",k:"target_lead_max_time_s",l:"Target Lead Max Time (s)",t:"n",s:0.001,n:0},{g:"Target Lead",k:"target_lead_min_speed_px_s",l:"Target Lead Min Speed (px/s)",t:"n",s:1,n:0},{g:"Target Lead",k:"target_lead_max_offset_box_scale",l:"Target Lead Max Box Scale",t:"n",s:0.01,n:0},{g:"Target Lead",k:"target_lead_smoothing_alpha",l:"Target Lead Smoothing",t:"n",s:0.001,n:0,x:1},{g:"Target Lead",k:"prediction_time",l:"Target Lead Manual Bias (s)",t:"n",s:0.001},
 {g:"TriggerBot",k:"triggerbot_enable",l:"Trigger Bot",t:"b"},{g:"TriggerBot",k:"triggerbot_arm_scale_x",l:"Trigger Arm X Scale",t:"n",s:0.01,n:0},{g:"TriggerBot",k:"triggerbot_arm_scale_y",l:"Trigger Arm Y Scale",t:"n",s:0.01,n:0},{g:"TriggerBot",k:"triggerbot_arm_min_x_px",l:"Trigger Arm Min X (px)",t:"n",s:1,n:0},{g:"TriggerBot",k:"triggerbot_arm_min_y_px",l:"Trigger Arm Min Y (px)",t:"n",s:1,n:0},{g:"TriggerBot",k:"triggerbot_click_hold_s",l:"Trigger Hold (s)",t:"n",s:0.001,n:0},{g:"TriggerBot",k:"triggerbot_click_cooldown_s",l:"Trigger Cooldown (s)",t:"n",s:0.001,n:0},
@@ -1035,6 +1046,36 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     cfg.predictive_pid_deadzone_exit_ratio = std::max(
         cfg.predictive_pid_deadzone_exit_ratio,
         cfg.predictive_pid_deadzone_enter_ratio);
+    if (const auto value = extractJsonBool(body, "predictive_pid_human_motion_enable"); value.has_value()) {
+        cfg.predictive_pid_human_motion_enable = *value;
+    }
+    if (const auto value = extractJsonNumber(body, "predictive_pid_human_fitts_a_ms"); value.has_value()) {
+        cfg.predictive_pid_human_fitts_a_ms = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "predictive_pid_human_fitts_b_ms"); value.has_value()) {
+        cfg.predictive_pid_human_fitts_b_ms = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "predictive_pid_human_target_width_px"); value.has_value()) {
+        cfg.predictive_pid_human_target_width_px = std::max(1.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "predictive_pid_human_overshoot_probability"); value.has_value()) {
+        cfg.predictive_pid_human_overshoot_probability = clamp(static_cast<float>(*value), 0.0F, 1.0F);
+    }
+    if (const auto value = extractJsonNumber(body, "predictive_pid_human_curvature_scale"); value.has_value()) {
+        cfg.predictive_pid_human_curvature_scale = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "predictive_pid_human_ou_sigma"); value.has_value()) {
+        cfg.predictive_pid_human_ou_sigma = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "predictive_pid_human_tremor_amplitude_px"); value.has_value()) {
+        cfg.predictive_pid_human_tremor_amplitude_px = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "predictive_pid_human_signal_noise"); value.has_value()) {
+        cfg.predictive_pid_human_signal_noise = std::max(0.0F, static_cast<float>(*value));
+    }
+    if (const auto value = extractJsonNumber(body, "predictive_pid_human_sample_interval_ms"); value.has_value()) {
+        cfg.predictive_pid_human_sample_interval_ms = std::max(0.1F, static_cast<float>(*value));
+    }
     if (const auto value = extractJsonNumber(body, "sticky_bias_px"); value.has_value()) cfg.sticky_bias_px = std::max(0.0F, static_cast<float>(*value));
     if (const auto value = extractJsonBool(body, "target_association_enable"); value.has_value()) cfg.target_association_enable = *value;
     if (const auto value = extractJsonNumber(body, "target_association_min_iou"); value.has_value()) {
