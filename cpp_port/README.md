@@ -2,6 +2,10 @@
 
 This directory is the native port workspace for moving `testNonKal1.py` to C++ on Windows.
 
+For repeatable tracking accuracy and speed measurements, see the
+[C++ benchmark guide](docs/benchmark.md). Run `benchmarks/run.ps1 -Timing` to build
+the production-loop replay benchmark and generate an interactive local report.
+
 It is intentionally scoped as a safe starting point:
 
 - It does not modify the current Python workflow.

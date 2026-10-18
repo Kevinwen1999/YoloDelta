@@ -12,6 +12,7 @@
 #include "delta/inference.hpp"
 #include "delta/mouse_suppression.hpp"
 #include "delta/recoil.hpp"
+#include "delta/replay.hpp"
 #include "delta/runtime_state.hpp"
 #include "delta/tracking.hpp"
 
@@ -33,9 +34,16 @@ public:
     int run();
     void stop();
 
+    // Synchronous replay: creates no device adapters, windows or worker threads.
+    // Exceptions propagate to the caller rather than being swallowed by a worker.
+    static void replay(StaticConfig config, RuntimeConfig runtime, ITrackingReplay& source);
+
 private:
+    struct ReplayOnly {};
+    DeltaApp(StaticConfig config, RuntimeConfig runtime, ReplayOnly);
+    void initializeSharedState();
     void captureLoop();
-    void inferenceLoop();
+    void inferenceLoop(ITrackingReplay* replay = nullptr);
     void recoilLoop();
     void controlLoop();
     void sideButtonKeySequenceLoop();

@@ -1131,6 +1131,20 @@ DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime)
     if (capture_) {
         capture_->setCachedFrameTimeoutMs(runtime_store_.snapshot().capture_cached_timeout_ms);
     }
+    initializeSharedState();
+}
+
+DeltaApp::DeltaApp(StaticConfig config, RuntimeConfig runtime, ReplayOnly)
+    : config_(std::move(config)), runtime_store_(std::move(runtime)) {
+    initializeSharedState();
+}
+
+void DeltaApp::replay(StaticConfig config, RuntimeConfig runtime, ITrackingReplay& source) {
+    DeltaApp app(std::move(config), std::move(runtime), ReplayOnly{});
+    app.inferenceLoop(&source);
+}
+
+void DeltaApp::initializeSharedState() {
     const auto center = screenCenter(config_);
     const RuntimeConfig initial_runtime = runtime_store_.snapshot();
     std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -1159,6 +1173,10 @@ int DeltaApp::run() {
     std::cout << "Control module: " << (input_sender_ ? input_sender_->name() : "none") << "\n";
     if (!capture_ || !inference_ || !input_sender_) {
         std::cerr << "[fatal] Native runtime is missing a required module.\n";
+        return 1;
+    }
+    if (config_.onnx_require_gpu && !inference_->gpuExecutionEnabled()) {
+        std::cerr << "[fatal] GPU inference is required but no working GPU session was created.\n";
         return 1;
     }
 
@@ -1387,8 +1405,19 @@ void DeltaApp::captureLoop() {
 
 }
 
-void DeltaApp::inferenceLoop() {
+void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
     try {
+        std::optional<ReplayFrame> replay_frame;
+        ReplayResult replay_result;
+        InferenceAppTimings app_timings{};
+        SteadyClock::time_point replay_wall_start{};
+        SteadyClock::time_point previous_replay_tick{};
+        const auto steadyNow = [&]() { return replay_frame ? replay_frame->now : SteadyClock::now(); };
+        const auto systemNow = [&]() {
+            return replay_frame
+                ? SystemClock::time_point(std::chrono::duration_cast<SystemClock::duration>(replay_frame->now.time_since_epoch()))
+                : SystemClock::now();
+        };
         const auto center = screenCenter(config_);
         PIDController pid_x{};
         PIDController pid_y{};
@@ -1417,7 +1446,9 @@ void DeltaApp::inferenceLoop() {
                 current.derivative_alpha,
                 current.output_limit);
             predictive_pid.configure(buildPredictivePidConfig(current));
-            sigma_drift.configure(buildSigmaDriftConfig(current));
+            auto sigma_config = buildSigmaDriftConfig(current);
+            if (replay) sigma_config.random_seed = std::max<std::uint64_t>(1, replay->randomSeed());
+            sigma_drift.configure(sigma_config);
         };
         configurePidControllers(runtime);
         if (capture_) {
@@ -1450,6 +1481,7 @@ void DeltaApp::inferenceLoop() {
         std::optional<std::array<int, 4>> last_target_bbox;
         SteadyClock::time_point last_pid_tick{};
         SteadyClock::time_point last_track_tick{};
+        SteadyClock::time_point last_measurement_tick{};
         std::uint64_t last_kalman_snap_count = 0;
         bool last_debug_preview_enabled = runtime.debug_preview_enable;
         bool last_debug_overlay_enabled = runtime.debug_overlay_enable;
@@ -1480,6 +1512,46 @@ void DeltaApp::inferenceLoop() {
         }
 
         for (;;) {
+            if (replay) {
+                if (replay_frame) {
+                    replay_result.processing_us = std::chrono::duration<double, std::micro>(SteadyClock::now() - replay_wall_start).count();
+                    replay_result.command = command_slot_.try_take();
+                    if (tracker->initialized()) replay_result.track = tracker->state();
+                    replay_result.tracker_diagnostics = tracker->diagnostics();
+                    replay_result.lost_frames = lost_frames;
+                    replay_result.output_ready = shared_.detection_dampening_ready;
+                    replay_result.association_id = target_association.diagnostics().active_id;
+                    replay_result.next_crop_size = shared_.adaptive_capture_crop_size;
+                    replay_result.selection_us = app_timings.select_s * 1e6;
+                    replay_result.tracking_us = app_timings.tracker_update_s * 1e6;
+                    replay_result.prediction_us = app_timings.aim_predict_s * 1e6;
+                    replay_result.control_us = app_timings.aim_pid_s * 1e6;
+                    replay->observe(replay_result);
+                }
+                auto focus = selectCaptureFocus(runtime.capture_freeze_to_center_enable,
+                    shared_.target_found, center, shared_.capture_focus_full);
+                focus = applyThirdPersonCaptureOffset(focus,
+                    effectiveThirdPersonCaptureOffset(runtime, shared_.toggles.right_pressed), config_.screen_w, config_.screen_h);
+                int crop_size = initialEffectiveCaptureCropSize(config_, runtime, shared_.toggles.right_pressed);
+                if (shared_.adaptive_capture_crop_active && shared_.adaptive_capture_crop_size > 0)
+                    crop_size = shared_.adaptive_capture_crop_size;
+                replay_frame = replay->next(buildCaptureRegion(config_, focus.first, focus.second, crop_size));
+                if (!replay_frame) break;
+                if (replay_frame->now <= previous_replay_tick
+                    || replay_frame->frame.frame_ready <= SteadyClock::time_point{}
+                    || replay_frame->frame.frame_ready > replay_frame->now
+                    || replay_frame->frame.capture.width <= 0 || replay_frame->frame.capture.height <= 0) {
+                    throw std::invalid_argument("Replay requires increasing positive time, a valid crop, and non-future positive observation timestamps");
+                }
+                previous_replay_tick = replay_frame->now;
+                shared_.toggles = replay_frame->toggles;
+                replay_result = {};
+                replay_result.preview.capture_region = replay_frame->frame.capture;
+                replay_result.preview.screen_center = center;
+                app_timings = {};
+                command_slot_.clear();
+                replay_wall_start = SteadyClock::now();
+            }
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
                 if (!shared_.running) {
@@ -1490,7 +1562,7 @@ void DeltaApp::inferenceLoop() {
 
             runtime = runtime_store_.snapshot();
             const std::uint64_t reset_token = runtime_store_.resetToken();
-            inference_->setModelConfidence(runtime.model_conf);
+            if (inference_) inference_->setModelConfidence(runtime.model_conf);
             const bool tracking_enabled = runtime.tracking_enabled;
             const TargetAssociationConfig target_association_config = buildTargetAssociationConfig(runtime);
             const TargetGuardConfig target_guard_config = buildTargetGuardConfig(runtime);
@@ -1499,8 +1571,9 @@ void DeltaApp::inferenceLoop() {
             const TriggerbotConfig triggerbot_config = buildTriggerbotConfig(runtime);
             const bool debug_preview_enabled = runtime.debug_preview_enable;
             const bool debug_overlay_enabled = runtime.debug_overlay_enable;
-            const bool debug_visuals_enabled = debug_preview_enabled || debug_overlay_enabled;
+            const bool debug_visuals_enabled = replay || debug_preview_enabled || debug_overlay_enabled;
             const auto publishDebugSnapshot = [&](DebugPreviewSnapshot snapshot) {
+                if (replay) replay_result.preview = snapshot;
                 if (debug_preview_ && debug_preview_enabled) {
                     debug_preview_->publish(snapshot);
                 }
@@ -1802,11 +1875,13 @@ void DeltaApp::inferenceLoop() {
                 }
             }
 
-            InferenceAppTimings app_timings{};
+            app_timings = {};
             std::optional<FramePacket> cpu_packet;
             std::optional<GpuFramePacket> gpu_packet;
-            const GpuCaptureSchedule capture_schedule = inference_->gpuCaptureSchedule();
-            if (capture_schedule == GpuCaptureSchedule::AsyncLatest) {
+            const GpuCaptureSchedule capture_schedule = inference_ ? inference_->gpuCaptureSchedule() : GpuCaptureSchedule::None;
+            if (replay_frame) {
+                cpu_packet = replay_frame->frame;
+            } else if (capture_schedule == GpuCaptureSchedule::AsyncLatest) {
                 gpu_packet = gpu_frame_slot_.wait_take_for(kInferenceIdleSleep);
                 if (!gpu_packet.has_value() && capture_ && !capture_->supportsGpuCapture()) {
                     cpu_packet = frame_slot_.try_take();
@@ -1892,8 +1967,9 @@ void DeltaApp::inferenceLoop() {
                 : (gpu_packet.has_value() ? gpu_packet->frame_time : cpu_packet->frame_time);
             const SteadyClock::time_point capture_done = gpu_packet.has_value() ? gpu_packet->capture_done : cpu_packet->capture_done;
             const SteadyClock::time_point acquire_started = gpu_packet.has_value() ? gpu_packet->acquire_started : cpu_packet->acquire_started;
-            const double frame_age = secondsSince(frame_time, SteadyClock::now());
+            const double frame_age = secondsSince(frame_time, steadyNow());
             if (frame_age > kMaxFrameAgeSeconds) {
+                if (replay) replay_result.stale_frame = true;
                 if (perf_) {
                     recordInferencePerf(*perf_, frame_age, secondsSince(loop_start, SteadyClock::now()), true, false, app_timings, {}, std::nullopt);
                 }
@@ -1903,7 +1979,9 @@ void DeltaApp::inferenceLoop() {
             const int requested_target_cls = aimModeTargetClass(runtime.aim_mode);
 
             InferenceResult inference_result{};
-            if (gpu_packet.has_value()) {
+            if (replay_frame) {
+                inference_result.detections = replay_frame->detections;
+            } else if (gpu_packet.has_value()) {
                 inference_result = inference_->predictGpu(*gpu_packet, requested_target_cls);
             } else if (cpu_packet.has_value()) {
                 inference_result = inference_->predict(*cpu_packet, requested_target_cls);
@@ -1949,7 +2027,7 @@ void DeltaApp::inferenceLoop() {
                 && prev_target_found
                 && canReusePreviousTarget(runtime.aim_mode, aim_pool.using_head_candidates, prev_target_cls)
                 && prev_target_time != SystemClock::time_point{}
-                && secondsSince(prev_target_time, SystemClock::now()) <= kTargetTimeoutSeconds) {
+                && secondsSince(prev_target_time, systemNow()) <= kTargetTimeoutSeconds) {
                 locked_point = std::make_pair(static_cast<float>(prev_target_full.first), static_cast<float>(prev_target_full.second));
             } else if (target_guard_config.enable
                 && target_guard_state.active.active
@@ -2000,7 +2078,7 @@ void DeltaApp::inferenceLoop() {
             const bool guard_active = target_guard_config.enable && target_guard_state.active.active;
             const bool association_enabled = tracking_enabled && target_association_config.enable;
             if (association_enabled) {
-                const SteadyClock::time_point association_tick = SteadyClock::now();
+                const SteadyClock::time_point association_tick = steadyNow();
                 const float association_dt = clamp(
                     last_track_tick == SteadyClock::time_point{}
                         ? kMinTrackDt
@@ -2139,6 +2217,8 @@ void DeltaApp::inferenceLoop() {
                     selected_detection ? sticky->detection : std::nullopt,
                     target_switched);
             const bool target_output_allowed = detection_dampening_result.ready;
+            // Selection ran even if dampening returns before tracker/control.
+            app_timings.select_s = secondsSince(select_start, SteadyClock::now());
             if (!debug_overlay_observe_active && !target_output_allowed) {
                 resetPidControllers();
                 tracker->reset();
@@ -2146,7 +2226,7 @@ void DeltaApp::inferenceLoop() {
                 target_lead_state.reset();
                 recoil_aim_offset.reset();
                 command_slot_.clear();
-                const auto now_system = SystemClock::now();
+                const auto now_system = systemNow();
                 int pending_cls = -1;
                 std::pair<int, int> pending_focus = center;
                 if (selected_detection) {
@@ -2286,7 +2366,7 @@ void DeltaApp::inferenceLoop() {
             }
 
             const auto tracker_start = SteadyClock::now();
-            const SteadyClock::time_point now_tick = SteadyClock::now();
+            const SteadyClock::time_point now_tick = steadyNow();
             const float dt = clamp(
                 last_track_tick == SteadyClock::time_point{}
                     ? kMinTrackDt
@@ -2322,6 +2402,7 @@ void DeltaApp::inferenceLoop() {
                 }
                 last_kalman_snap_count = diagnostics.snap_count;
                 active_target_cls = sticky->detection->cls;
+                last_measurement_tick = lead_sample_time;
                 lost_frames = 0;
                 last_box_w = selected_box_w;
                 last_box_h = static_cast<float>(std::max(1, sticky->detection->bbox[3] - sticky->detection->bbox[1]));
@@ -2376,7 +2457,10 @@ void DeltaApp::inferenceLoop() {
                 continue;
             } else {
                 ++lost_frames;
-                if (lost_frames > runtime.target_max_lost_frames) {
+                const bool prediction_expired = runtime.target_prediction_timeout_ms > 0.0F
+                    && last_measurement_tick != SteadyClock::time_point{}
+                    && secondsSince(last_measurement_tick, now_tick) * 1000.0 > runtime.target_prediction_timeout_ms;
+                if (lost_frames > runtime.target_max_lost_frames || prediction_expired) {
                     app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
                     tracker->reset();
                     last_kalman_snap_count = 0;
@@ -2796,7 +2880,7 @@ void DeltaApp::inferenceLoop() {
                 ? (aim_pool.using_head_candidates ? 1 : 0)
                 : aimModeTargetClass(runtime.aim_mode);
             const int selected_cls = active_target_cls != -1 ? active_target_cls : default_target_cls;
-            const auto now_system = SystemClock::now();
+            const auto now_system = systemNow();
 
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
@@ -2900,7 +2984,7 @@ void DeltaApp::inferenceLoop() {
                     .acquire_started = acquire_started,
                     .frame_ready = frame_ready,
                     .capture_done = capture_done,
-                    .cmd_generated = queue_start,
+                    .cmd_generated = replay ? steadyNow() : queue_start,
                     .generated_at = now_system,
                     .frame_time = gpu_packet.has_value() ? gpu_packet->capture_time : cpu_packet->capture_time,
                     .capture_time = gpu_packet.has_value() ? gpu_packet->capture_time : cpu_packet->capture_time,
@@ -2925,6 +3009,7 @@ void DeltaApp::inferenceLoop() {
             }
         }
     } catch (const std::exception& ex) {
+        if (replay) throw;
         std::cerr << "[inference] loop failed: " << ex.what() << "\n";
         stop();
     }

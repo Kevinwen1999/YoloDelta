@@ -1,0 +1,2 @@
+#pragma once
+inline constexpr const char* benchmarkReportTemplate = R"DELTA_REPORT(@BENCH_REPORT_HTML@)DELTA_REPORT";

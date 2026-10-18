@@ -365,6 +365,7 @@ std::string buildConfigJson(const RuntimeConfig& cfg, const std::uint64_t versio
         << "\"target_lead_smoothing_alpha\":" << cfg.target_lead_smoothing_alpha << ","
         << "\"prediction_time\":" << cfg.prediction_time << ","
         << "\"target_max_lost_frames\":" << cfg.target_max_lost_frames << ","
+        << "\"target_prediction_timeout_ms\":" << cfg.target_prediction_timeout_ms << ","
         << "\"model_conf\":" << cfg.model_conf << ","
         << "\"detection_min_conf\":" << cfg.detection_min_conf << ","
         << "\"detection_box_scale\":" << cfg.detection_box_scale << ","
@@ -1148,6 +1149,7 @@ bool applyRuntimePatch(const std::string& body, RuntimeConfig& cfg, std::string&
     }
     if (const auto value = extractJsonNumber(body, "prediction_time"); value.has_value()) cfg.prediction_time = std::max(0.0F, static_cast<float>(*value));
     if (const auto value = extractJsonNumber(body, "target_max_lost_frames"); value.has_value()) cfg.target_max_lost_frames = std::max(1, static_cast<int>(std::lround(*value)));
+    if (const auto value = extractJsonNumber(body, "target_prediction_timeout_ms"); value.has_value()) cfg.target_prediction_timeout_ms = std::max(0.0F, static_cast<float>(*value));
     if (const auto value = extractJsonNumber(body, "model_conf"); value.has_value()) cfg.model_conf = clamp(static_cast<float>(*value), 0.0F, 1.0F);
     if (const auto value = extractJsonNumber(body, "detection_min_conf"); value.has_value()) cfg.detection_min_conf = clamp(static_cast<float>(*value), 0.0F, 1.0F);
     if (const auto value = extractJsonNumber(body, "detection_box_scale"); value.has_value()) {

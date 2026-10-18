@@ -8,3 +8,6 @@
 tmp*
 /test/
 /train_backups/
+!/cpp_port/CMakeLists.txt
+/cpp_port/build-benchmark/
+/cpp_port/benchmark-results/

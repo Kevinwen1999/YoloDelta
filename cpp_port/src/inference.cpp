@@ -757,6 +757,9 @@ void OnnxRuntimeEngine::Impl::loadRuntime(const fs::path& root) {
 
 void OnnxRuntimeEngine::Impl::createSession(const bool use_tensorrt) {
     Ort::SessionOptions so;
+    if (!config.inference_profile_prefix.empty()) {
+        so.EnableProfiling(fs::path(config.inference_profile_prefix).c_str());
+    }
     so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
     so.EnableMemPattern();
     so.EnableCpuMemArena();
@@ -779,6 +782,15 @@ void OnnxRuntimeEngine::Impl::createSession(const bool use_tensorrt) {
             fs::path trt_cache = config.tensorrt_cache_dir.empty()
                 ? model_path.parent_path() / "trt_cache"
                 : fs::path(config.tensorrt_cache_dir);
+#if defined(DELTA_WITH_CUDA_PIPELINE)
+            // TensorRT plans are device-specific; CUDA ordinals alone are not
+            // stable across machines or device-order settings.
+            cudaDeviceProp cache_device{};
+            checkCuda(cudaGetDeviceProperties(&cache_device, config.onnx_cuda_device_id), "TensorRT cache device");
+            std::string device_name = cache_device.name;
+            std::replace(device_name.begin(), device_name.end(), ' ', '_');
+            trt_cache /= device_name;
+#endif
             std::error_code ec;
             fs::create_directories(trt_cache, ec);
             trt.Update({
@@ -1621,6 +1633,17 @@ InferenceResult OnnxRuntimeEngine::predict(const FramePacket& frame, const int t
 
 bool OnnxRuntimeEngine::supportsGpuInput() const {
     return impl_ ? impl_->gpu_input_ready : false;
+}
+
+bool OnnxRuntimeEngine::gpuExecutionEnabled() const {
+    return impl_ && impl_->session && impl_->session_uses_gpu;
+}
+
+std::string OnnxRuntimeEngine::finishProfiling() {
+    if (!impl_ || !impl_->session || impl_->config.inference_profile_prefix.empty()) return {};
+    auto path = impl_->session->EndProfilingAllocated(*impl_->allocator);
+    impl_->config.inference_profile_prefix.clear();
+    return path ? std::string(path.get()) : std::string{};
 }
 
 InferenceResult OnnxRuntimeEngine::predictGpu(const GpuFramePacket& frame, const int target_class) {

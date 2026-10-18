@@ -37,6 +37,8 @@ public:
     virtual GpuCaptureSchedule gpuCaptureSchedule() const { return GpuCaptureSchedule::None; }
     virtual InferenceResult predict(const FramePacket& frame, int target_class) = 0;
     virtual bool supportsGpuInput() const { return false; }
+    virtual bool gpuExecutionEnabled() const { return false; }
+    virtual std::string finishProfiling() { return {}; }
     virtual InferenceResult predictGpu(const GpuFramePacket&, int) { return InferenceResult{}; }
 };
 
@@ -52,6 +54,8 @@ public:
     GpuCaptureSchedule gpuCaptureSchedule() const override;
     InferenceResult predict(const FramePacket& frame, int target_class) override;
     bool supportsGpuInput() const override;
+    bool gpuExecutionEnabled() const override;
+    std::string finishProfiling() override;
     InferenceResult predictGpu(const GpuFramePacket& frame, int target_class) override;
 
 private:

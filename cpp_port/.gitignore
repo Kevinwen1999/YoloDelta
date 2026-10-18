@@ -13,5 +13,7 @@
 /__py_cache__/
 /build-cuda-*/
 /third_party/
-/tests/
+/tests/*
+!/tests/test_benchmark.cpp
+!/tests/check_benchmark_report.cjs
 /__pycache__/

@@ -134,11 +134,13 @@ inline int aimModeTargetClass(const AimMode mode) {
 }
 
 struct StaticConfig {
-    std::string model_path = R"(C:\YOLO\Delta\runs\detect\train6\weights\best.onnx)";
+    std::string model_path = R"(C:\YOLO\Delta\runs\detect\train4\weights\best.onnx)";
     std::string onnxruntime_root;
     std::string cuda_root;
     std::string tensorrt_root;
     std::string tensorrt_cache_dir;
+    // Optional benchmark audit. Empty leaves normal session profiling disabled.
+    std::string inference_profile_prefix;
     std::string recoil_profiles_dir = R"(C:\YOLO\Delta\cpp_port\runtime\recoil_profiles)";
     int screen_w = 2560;
     int screen_h = 1440;
@@ -164,7 +166,9 @@ struct StaticConfig {
     bool onnx_trt_fp16 = true;
     bool onnx_skip_resize_if_match = true;
     bool onnx_enable_cuda_graph = true;
-    bool onnx_trt_cuda_graph_enable = true;
+    // train4 on this ORT/TensorRT stack fails graph warmup; use the measured
+    // working TensorRT path directly instead of rebuilding after that failure.
+    bool onnx_trt_cuda_graph_enable = false;
     bool async_gpu_capture_enable = true;
     // DXGI adapter index Desktop Duplication captures from. May safely differ
     // from onnx_cuda_device_id above -- see that field's comment. A mismatch
@@ -307,6 +311,9 @@ struct RuntimeConfig {
     float target_lead_smoothing_alpha = 0.5F;
     float prediction_time = 0.000F;
     int target_max_lost_frames = 8;
+    // Additional age cap for prediction without a detection. Zero preserves the
+    // historical frame budget. Measured from the last accepted observation.
+    float target_prediction_timeout_ms = 0.0F;
     float model_conf = 0.10F;
     float detection_min_conf = 0.10F;
     float detection_box_scale = 1.0F;
@@ -348,7 +355,7 @@ struct RuntimeConfig {
     double side_button_key_sequence_left_click_hold_ms = 0.0;
     double side_button_key_sequence_loop_delay_ms = 8.0;
     MouseOutputMethod mouse_output_method = MouseOutputMethod::Serial;
-    std::string serial_mouse_port = "COM7";
+    std::string serial_mouse_port = "COM6";
     int serial_mouse_baud = 921600;
     float sendinput_gain_x = 1.0F;
     float sendinput_gain_y = 1.0F;
