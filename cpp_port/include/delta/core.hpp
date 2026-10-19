@@ -66,6 +66,8 @@ struct CaptureTimings {
 };
 
 struct FramePacket {
+    std::uint64_t source_id = 0;
+    SteadyClock::time_point source_present{};
     std::vector<std::uint8_t> bgr;
     int width = 0;
     int height = 0;
@@ -79,6 +81,8 @@ struct FramePacket {
 };
 
 struct GpuFramePacket {
+    std::uint64_t source_id = 0;
+    SteadyClock::time_point source_present{};
     void* device_ptr = nullptr;
     std::size_t pitch_bytes = 0;
     int width = 0;
@@ -110,6 +114,24 @@ struct CommandPacket {
     bool synthetic_recoil = false;
     bool synthetic_servo = false;
     bool trigger_fire = false;
+    std::uint64_t source_id = 0;
+    SteadyClock::time_point observation_time{};
+    SteadyClock::time_point expires_at{};
+};
+
+// Ordinary output-adapter feedback; contains no evaluator target truth.
+struct CommandDelivery {
+    CommandPacket command{};
+    int dx = 0;
+    int dy = 0;
+    SteadyClock::time_point completed_at{};
+    bool movement_sent = false;
+};
+
+struct DispatchFeedbackSnapshot {
+    float send_latency_s = 0;
+    float sent_velocity_x = 0;
+    float sent_velocity_y = 0;
 };
 
 struct PerfSnapshot {

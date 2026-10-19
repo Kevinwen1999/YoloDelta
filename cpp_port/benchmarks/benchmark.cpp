@@ -1,5 +1,6 @@
 #include "benchmark.hpp"
 #include "delta/app.hpp"
+#include "delta/dispatch.hpp"
 #include "benchmark_build.hpp"
 
 #include <algorithm>
@@ -54,6 +55,7 @@ struct Scenario {
     int speed_px_s = 0;
     int cadence_ms = 10;
     int age_ms = 8;
+    double target_scale = 1.0;
 };
 
 std::pair<double,double> camera(const Scenario& s, double t) {
@@ -77,7 +79,8 @@ std::vector<Actor> world(const StaticConfig& config, const Scenario& s, double t
     if (s.name == "crop_exit" && t > 0.8 && t < 2.4) x += 800 * std::sin((t - 0.8) / 1.6 * 3.141592653589793);
     const auto actor = [&](int id, double ax, double ay) {
         int cx = static_cast<int>(std::lround(ax + shake_x)), cy = static_cast<int>(std::lround(ay + shake_y));
-        return Actor{id, {cx-30,cy-45,cx+30,cy+65}, {cx-13,cy-48,cx+13,cy-22}};
+        const auto scaled=[&](int v){return static_cast<int>(std::lround(v*s.target_scale));};
+        return Actor{id, {cx-scaled(30),cy-scaled(45),cx+scaled(30),cy+scaled(65)}, {cx-scaled(13),cy-scaled(48),cx+scaled(13),cy-scaled(22)}};
     };
     std::vector<Actor> out;
     if (!(s.name == "departure" && t >= 1.25) && !(s.name == "allowed_switch" && t >= 1.5))
@@ -175,12 +178,20 @@ public:
         if (!collect_) return;
         row_["stale"] = result.stale_frame;
         row_["output_ready"] = result.output_ready;
+        row_["motion_ambiguous"] = result.motion_ambiguous;
+        row_["motion_residual_px"] = result.motion_residual_px;
+        row_["motion_matches"]=Json::array();
+        for(const auto& [d,cost]:result.motion_matches)
+            row_["motion_matches"].push_back({{"bbox",d.bbox},{"cls",d.cls},{"cost",cost}});
         row_["association_id"] = result.association_id;
         row_["lost_frames"] = result.lost_frames;
         row_["next_crop_size"] = result.next_crop_size;
         row_["predicted"] = optionalPoint(result.preview.predicted_point);
         row_["filtered"] = result.track ? point(result.track->x,result.track->y) : Json(nullptr);
         row_["command"] = result.command ? Json::array({result.command->dx,result.command->dy}) : Json(nullptr);
+        row_["command_observation_ms"] = result.command ? Json(std::chrono::duration<double,std::milli>(result.command->observation_time-tick(0)).count()) : Json(nullptr);
+        row_["command_expiry_ms"] = result.command && result.command->expires_at!=SteadyClock::time_point{}
+            ? Json(std::chrono::duration<double,std::milli>(result.command->expires_at-tick(0)).count()) : Json(nullptr);
         row_["detections"] = Json::array();
         int selected_id = -1, selected_class = -1;
         for (const auto& detection : result.preview.detections) {
@@ -256,7 +267,7 @@ Json distribution(const std::vector<double>& values) {
 
 Json scoreFrames(const Json& frames, double loss_deadline_ms) {
     double wrong_ms=0, missing_ms=0, total_present_ms=0, scored_ms=0, weighted_error=0, filtered_scored_ms=0, filtered_error=0;
-    double output_after_timeout_ms=0, gap_drift=0;
+    double output_after_timeout_ms=0, gap_drift=0, output_ready_ms=0, moving_wrong_ms=0;
     int switches=0, allowed_switches=0, aim_switches=0, previous_identity=-1, previous_class=-1;
     int stale_count=0, ambiguous=0, unrecovered=0;
     std::optional<bool> initial_correct;
@@ -272,6 +283,8 @@ Json scoreFrames(const Json& frames, double loss_deadline_ms) {
         const bool wrong=tracked >= 0 && tracked != intended;
         const bool missing=present && tracked == -1;
         if (present) total_present_ms+=dt;
+        if (present && f.value("output_ready",false)) output_ready_ms+=dt;
+        if (wrong && !f.at("command").is_null()) moving_wrong_ms+=dt;
         if (wrong) wrong_ms+=dt;
         if (missing) missing_ms+=dt;
         if (tracked == -2) ++ambiguous;
@@ -321,7 +334,9 @@ Json scoreFrames(const Json& frames, double loss_deadline_ms) {
     if (recovery_start) ++unrecovered;
     for (const auto& [kind,event] : open_events) events.push_back(event);
     std::sort(events.begin(),events.end(),[](const Json& a,const Json& b){return a.at("start_ms") < b.at("start_ms");});
-    return {{"wrong_target_ms",wrong_ms},{"identity_switches",switches},{"allowed_identity_switches",allowed_switches},{"aim_point_changes",aim_switches},
+    return {{"wrong_target_ms",wrong_ms},{"moving_wrong_target_ms",moving_wrong_ms},
+        {"output_ready_coverage",total_present_ms>0?Json(output_ready_ms/total_present_ms):Json(nullptr)},
+        {"identity_switches",switches},{"allowed_identity_switches",allowed_switches},{"aim_point_changes",aim_switches},
         {"initial_selection_correct",initial_correct?Json(*initial_correct):Json(nullptr)},
         {"no_track_ms",missing_ms},{"ambiguous_identity_frames",ambiguous},
         {"prediction_coverage",total_present_ms>0?Json(scored_ms/total_present_ms):Json(nullptr)},
@@ -353,9 +368,34 @@ Json runSuite(const StaticConfig& config, const RuntimeConfig& runtime, const Op
         DeltaApp::replay(config,settings,replay);
         Json item={{"key",scenario.name+"/"+std::to_string(scenario.seed)+"/"+std::to_string(scenario.gap_ms)+"/"+scenario.variant},
             {"scenario",scenario.name},{"seed",scenario.seed},{"gap_ms",scenario.gap_ms},{"variant",scenario.variant},
-            {"speed_px_s",scenario.speed_px_s},{"cadence_ms",scenario.cadence_ms},{"configured_observation_age_ms",scenario.age_ms},
+            {"speed_px_s",scenario.speed_px_s},{"cadence_ms",scenario.cadence_ms},{"configured_observation_age_ms",scenario.age_ms},{"target_scale",scenario.target_scale},
             {"runtime",runtimeJson(settings)},{"input_hash",replay.inputHash()},{"frames",std::move(replay.frames)}};
         item["metrics"]=scoreFrames(item["frames"],options.loss_deadline_ms);
+        // No-device dispatch uses the same deadline and freshness functions as
+        // controlLoop. It excludes servo extrapolation and device delivery.
+        Json dispatches=Json::array();std::vector<double> dispatch_ages;
+        const double hz=settings.display_rate_servo_hz>0?settings.display_rate_servo_hz:165.0;
+        SimulatedCommandDispatch dispatch(hz,settings.command_max_observation_age_ms);
+        std::size_t input_index=0;
+        for(double time=0;time<=durationMs+100;time+=1000.0/hz) {
+            while(input_index<item["frames"].size() && item["frames"][input_index]["time_ms"].get<double>()<=time) {
+                const auto& frame=item["frames"][input_index++];
+                if(!frame["output_ready"].get<bool>()) dispatch.clear();
+                if(!frame["command"].is_null()) {
+                    CommandPacket command;command.dx=frame["command"][0];command.dy=frame["command"][1];
+                    command.observation_time=tick(frame["command_observation_ms"]);
+                    command.cmd_generated=tick(frame["time_ms"]);
+                    if(!frame["command_expiry_ms"].is_null())command.expires_at=tick(frame["command_expiry_ms"]);
+                    dispatch.submit(command);
+                }
+            }
+            if(auto sent=dispatch.poll(tick(time))) {
+                const double age=std::chrono::duration<double,std::milli>(tick(time)-sent->observation_time).count();
+                dispatch_ages.push_back(age);
+                dispatches.push_back({{"time_ms",time},{"observation_age_ms",age},{"command",{sent->dx,sent->dy}}});
+            }
+        }
+        item["dispatch"]={{"hz",hz},{"expired",dispatch.expired},{"observation_age_ms",distribution(dispatch_ages)},{"events",dispatches}};
         if (item["frames"].empty()) throw std::runtime_error("Scenario produced no frames");
         for (const auto& frame : item["frames"]) {
             if (!frame["command"].is_null()) {
@@ -384,14 +424,20 @@ Json runSuite(const StaticConfig& config, const RuntimeConfig& runtime, const Op
     if (options.suite == "quick") {
         for (const auto& name : names) if (options.scenario.empty() || options.scenario==name)
             execute(Scenario{name,options.seed},runtime);
-    } else if (options.suite == "speed") {
+    } else if (options.suite == "speed" || options.suite == "speed_sizes") {
         if (!options.scenario.empty() && options.scenario != "high_speed")
             throw std::invalid_argument("The speed suite contains high_speed scenarios");
         for (int speed : {500,1500,3000,6000}) for (int cadence : {4,8,16}) for (int age : {5,15,30}) {
             Scenario scenario{"high_speed",options.seed};
             scenario.speed_px_s=speed;scenario.cadence_ms=cadence;scenario.age_ms=age;
             scenario.variant="speed="+std::to_string(speed)+",cadence="+std::to_string(cadence)+",age="+std::to_string(age);
-            execute(scenario,runtime);
+            if (options.suite=="speed_sizes") {
+                for (double scale : {0.5,1.0,2.0}) {
+                    auto sized=scenario;sized.target_scale=scale;
+                    sized.variant+=",scale="+std::to_string(scale);
+                    execute(sized,runtime);
+                }
+            } else execute(scenario,runtime);
         }
     } else {
         for (std::uint64_t seed=options.seed;seed<options.seed+3;++seed)

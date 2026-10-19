@@ -29,7 +29,7 @@ int main(int argc,char** argv) {
             const std::string arg=argv[i];
             auto value=[&]() -> std::string { if (++i>=argc) throw std::invalid_argument("Missing value for "+arg); return argv[i]; };
             if (arg=="--help") {
-                std::cout << "delta_benchmark [--suite quick|sweep|speed] [--scenario NAME] [--seed N]\n"
+                std::cout << "delta_benchmark [--suite quick|sweep|speed|speed_sizes] [--scenario NAME] [--seed N]\n"
                     "  [--config runtime.json] [--output DIRECTORY] [--baseline run.json]\n"
                     "  [--timing] [--repeats N] [--loss-deadline-ms N]\n"
                     "  [--write-default-config PATH]\n"

@@ -1,0 +1,8 @@
+{
+  "motion_stability_enable": true,
+  "motion_identity_enable": false,
+  "motion_residual_scale": 0.5,
+  "motion_prediction_timeout_ms": 40,
+  "motion_match_margin": 0.75,
+  "motion_prediction_max_displacement_px": 30
+}

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "source_dataset": "delta_train_backup",
+  "source_dataset_version": 31,
+  "license": "CC BY 4.0",
+  "source_url": "https://universe.roboflow.com/ala-xuls/delta-9ez3o/dataset/31",
+  "split": "valid",
+  "image": "train_backups/delta_train_backup/valid/images/frame000287_Class0_0-89_Class1_0-90_jpg.rf.0e1e7f3f2d38f3416592a32e2aa6c3dd.jpg",
+  "label": "train_backups/delta_train_backup/valid/labels/frame000287_Class0_0-89_Class1_0-90_jpg.rf.0e1e7f3f2d38f3416592a32e2aa6c3dd.txt",
+  "background": "train_backups/delta_train_backup/valid/images/00017_0_57_7faba8ae_png.rf.4223bbc84c9fd22f5b8fe74eebfc08e0.jpg",
+  "background_label": "train_backups/delta_train_backup/valid/labels/00017_0_57_7faba8ae_png.rf.4223bbc84c9fd22f5b8fe74eebfc08e0.txt",
+  "sprite_box_xyxy": [84, 120, 264, 370],
+  "body_box_xyxy": [92, 128, 256, 364],
+  "head_box_xyxy": [140, 127, 186, 174],
+  "target_identity": 1,
+  "annotation_status": "paired head/body validation labels checked against source image; ellipse cutout remains exploratory and is not a segmentation mask"
+}

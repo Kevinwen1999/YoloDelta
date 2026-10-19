@@ -207,6 +207,8 @@ struct DesktopDuplicationCapture::Impl {
         checkHr(output.As(&output1), "QueryInterface(IDXGIOutput1)");
         checkHr(output->GetDesc(&output_desc), "IDXGIOutput::GetDesc");
         QueryPerformanceFrequency(&qpc_frequency);
+        QueryPerformanceCounter(&source_qpc_anchor);
+        source_steady_anchor = SteadyClock::now();
 
         output_name = wideToUtf8(output_desc.DeviceName);
         output_refresh_hz = currentOutputRefreshHz(output_desc.DeviceName);
@@ -781,6 +783,7 @@ struct DesktopDuplicationCapture::Impl {
                 ? frame_ready
                 : cached_desktop_frame_ready;
             FramePacket packet = copyRegionToPacket(cached_desktop.Get(), region, acquire_started, cached_frame_ready, true);
+            stampSource(packet, 0);
             packet.timings.acquire_s = secondsSince(acquire_started, frame_ready);
             return packet;
         }
@@ -812,6 +815,7 @@ struct DesktopDuplicationCapture::Impl {
         }
 
         FramePacket packet = copyRegionToPacket(source_texture, region, acquire_started, frame_ready, false, timings);
+        stampSource(packet, frame_info.LastPresentTime.QuadPart);
         packet.timings.acquire_s = secondsSince(acquire_started, frame_ready);
         checkHr(duplication->ReleaseFrame(), "ReleaseFrame");
         frame_acquired = false;
@@ -863,6 +867,7 @@ struct DesktopDuplicationCapture::Impl {
                 return std::nullopt;
             }
             packet->timings.acquire_s = secondsSince(acquire_started, frame_ready);
+            stampSource(*packet, 0);
             return packet;
         }
 
@@ -893,12 +898,25 @@ struct DesktopDuplicationCapture::Impl {
             return std::nullopt;
         }
         packet->timings.acquire_s = secondsSince(acquire_started, frame_ready);
+        stampSource(*packet, frame_info.LastPresentTime.QuadPart);
         checkHr(duplication->ReleaseFrame(), "ReleaseFrame");
         frame_acquired = false;
         return packet;
     }
 #endif
 
+    template<class Packet> void stampSource(Packet& packet, LONGLONG present) {
+        if (present>0 && qpc_frequency.QuadPart>0) {
+            source_id=static_cast<std::uint64_t>(present);
+            source_present=source_steady_anchor+std::chrono::duration_cast<SteadyClock::duration>(
+                std::chrono::duration<double>(static_cast<double>(present-source_qpc_anchor.QuadPart)/qpc_frequency.QuadPart));
+        }
+        packet.source_id=source_id;
+        packet.source_present=source_present;
+    }
+    std::uint64_t source_id=0;
+    SteadyClock::time_point source_present{},source_steady_anchor{};
+    LARGE_INTEGER source_qpc_anchor{};
     StaticConfig config{};
     bool initialized = false;
     bool has_cached_desktop = false;

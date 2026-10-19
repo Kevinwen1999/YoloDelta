@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "delta/core.hpp"
@@ -16,16 +17,23 @@ struct ReplayFrame {
     SteadyClock::time_point now{};
     FramePacket frame{};
     std::vector<Detection> detections;
+    std::vector<CommandDelivery> dispatch_feedback;
     ToggleState toggles{.mode = 1};
 };
 
 struct ReplayResult {
     DebugPreviewSnapshot preview{};
     std::optional<CommandPacket> command;
+    DisplayRateServoState servo{};
+    DispatchFeedbackSnapshot dispatch_feedback{};
     std::optional<TrackerState> track;
     TrackerDiagnostics tracker_diagnostics{};
     bool stale_frame = false;
     bool output_ready = false;
+    bool motion_ambiguous = false;
+    std::string motion_decision = "legacy_policy";
+    float motion_residual_px = 0;
+    std::vector<std::pair<Detection,float>> motion_matches;
     int association_id = -1;
     int lost_frames = 0;
     int next_crop_size = 0;

@@ -1,5 +1,8 @@
 # Tracking benchmark
 
+Motion-continuity experiments and source-to-dispatch freshness checks are
+documented in [tracking-fixes.md](tracking-fixes.md).
+
 The first milestone evaluates the **production C++ inference loop** using
 synthetic detections and explicit logical timestamps. `DeltaApp::replay` runs
 the same selection, guard, association, dampening, tracking, prediction, PID and

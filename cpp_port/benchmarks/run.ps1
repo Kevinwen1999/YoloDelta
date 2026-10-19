@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('quick', 'sweep', 'speed')][string]$Suite = 'quick',
+    [ValidateSet('quick', 'sweep', 'speed', 'speed_sizes')][string]$Suite = 'quick',
     [string]$Config,
     [string]$Baseline,
     [string]$Scenario,

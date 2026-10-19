@@ -1,4 +1,5 @@
 #include "delta/app.hpp"
+#include "delta/dispatch.hpp"
 #include "delta/capture_focus.hpp"
 #include "delta/detection_dampening.hpp"
 #include "delta/mouse_suppression.hpp"
@@ -224,10 +225,7 @@ constexpr double kMaxRecoilIntegrateDtSeconds = 0.05;
 constexpr float kMinTrackDt = 1.0F / 240.0F;
 constexpr float kMaxTrackDt = 0.06F;
 constexpr float kMaxTrackSpeedPxS = 1800.0F;
-constexpr float kEgoMotionCompAlpha = 0.30F;
-constexpr float kCmdSendLatencyAlpha = 0.20F;
-constexpr float kEgoMotionCompMaxPxS = 3200.0F;
-constexpr float kEgoMotionCompDecay = 0.92F;
+constexpr float kEgoMotionCompMaxPxS = kDispatchVelocityLimitPxS;
 constexpr float kTargetLockMaxJump = 260.0F;
 constexpr float kTrackerReinitMinIou = 0.35F;
 constexpr float kAssocPredictDt = 0.02F;
@@ -312,14 +310,6 @@ bool canReusePreviousTarget(
         return prev_target_cls == (using_head_candidates ? 1 : 0);
     }
     return prev_target_cls == aimModeTargetClass(aim_mode);
-}
-
-float emaUpdateSigned(const float prev, const float sample, const float alpha) {
-    const float clamped_alpha = clamp(alpha, 0.0F, 1.0F);
-    if (clamped_alpha <= 0.0F) {
-        return prev;
-    }
-    return prev + ((sample - prev) * clamped_alpha);
 }
 
 std::pair<int, int> screenCenter(const StaticConfig& config) {
@@ -506,7 +496,15 @@ bool sameThirdPersonCaptureOffset(const ThirdPersonCaptureOffset& lhs, const Thi
 
 bool detectionDampeningRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rhs) {
     return lhs.detection_dampening_enable != rhs.detection_dampening_enable
-        || lhs.detection_dampening_stable_frames != rhs.detection_dampening_stable_frames;
+        || lhs.detection_dampening_stable_frames != rhs.detection_dampening_stable_frames
+        || lhs.motion_stability_enable != rhs.motion_stability_enable
+        || lhs.motion_identity_enable != rhs.motion_identity_enable
+        || lhs.motion_max_speed_px_s != rhs.motion_max_speed_px_s
+        || lhs.motion_residual_scale != rhs.motion_residual_scale
+        || lhs.motion_confirmation_window_ms != rhs.motion_confirmation_window_ms
+        || lhs.motion_prediction_timeout_ms != rhs.motion_prediction_timeout_ms
+        || lhs.motion_prediction_max_displacement_px != rhs.motion_prediction_max_displacement_px
+        || lhs.motion_match_margin != rhs.motion_match_margin;
 }
 
 DebugPreviewSnapshot makeInactiveDebugPreviewSnapshot(
@@ -596,16 +594,7 @@ void resetEgoMotionStateLocked(SharedState& shared) {
 }
 
 void decayEgoMotionStateLocked(SharedState& shared) {
-    float ctrl_sent_vx_ema = shared.ctrl_sent_vx_ema.load(std::memory_order_relaxed) * kEgoMotionCompDecay;
-    float ctrl_sent_vy_ema = shared.ctrl_sent_vy_ema.load(std::memory_order_relaxed) * kEgoMotionCompDecay;
-    if (std::abs(ctrl_sent_vx_ema) < 1e-6F) {
-        ctrl_sent_vx_ema = 0.0F;
-    }
-    if (std::abs(ctrl_sent_vy_ema) < 1e-6F) {
-        ctrl_sent_vy_ema = 0.0F;
-    }
-    shared.ctrl_sent_vx_ema.store(ctrl_sent_vx_ema, std::memory_order_relaxed);
-    shared.ctrl_sent_vy_ema.store(ctrl_sent_vy_ema, std::memory_order_relaxed);
+    decayDispatchFeedbackLocked(shared);
 }
 
 struct InferenceAppTimings {
@@ -1412,6 +1401,7 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
         InferenceAppTimings app_timings{};
         SteadyClock::time_point replay_wall_start{};
         SteadyClock::time_point previous_replay_tick{};
+        SteadyClock::time_point previous_delivery_tick{};
         const auto steadyNow = [&]() { return replay_frame ? replay_frame->now : SteadyClock::now(); };
         const auto systemNow = [&]() {
             return replay_frame
@@ -1481,6 +1471,8 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
         std::optional<std::array<int, 4>> last_target_bbox;
         SteadyClock::time_point last_pid_tick{};
         SteadyClock::time_point last_track_tick{};
+        SteadyClock::time_point last_source_tick{};
+        std::uint64_t last_source_id=0;
         SteadyClock::time_point last_measurement_tick{};
         std::uint64_t last_kalman_snap_count = 0;
         bool last_debug_preview_enabled = runtime.debug_preview_enable;
@@ -1516,6 +1508,14 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
                 if (replay_frame) {
                     replay_result.processing_us = std::chrono::duration<double, std::micro>(SteadyClock::now() - replay_wall_start).count();
                     replay_result.command = command_slot_.try_take();
+                    {
+                        std::lock_guard<std::mutex> lock(shared_.mutex);
+                        replay_result.servo = shared_.display_rate_servo;
+                        replay_result.dispatch_feedback = {
+                            shared_.cmd_send_latency_ema_s.load(std::memory_order_relaxed),
+                            shared_.ctrl_sent_vx_ema.load(std::memory_order_relaxed),
+                            shared_.ctrl_sent_vy_ema.load(std::memory_order_relaxed)};
+                    }
                     if (tracker->initialized()) replay_result.track = tracker->state();
                     replay_result.tracker_diagnostics = tracker->diagnostics();
                     replay_result.lost_frames = lost_frames;
@@ -1542,6 +1542,17 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
                     || replay_frame->frame.frame_ready > replay_frame->now
                     || replay_frame->frame.capture.width <= 0 || replay_frame->frame.capture.height <= 0) {
                     throw std::invalid_argument("Replay requires increasing positive time, a valid crop, and non-future positive observation timestamps");
+                }
+                for(const auto& delivery:replay_frame->dispatch_feedback) {
+                    if(delivery.completed_at<=SteadyClock::time_point{}
+                        || delivery.completed_at<previous_delivery_tick
+                        || delivery.completed_at<previous_replay_tick
+                        || delivery.completed_at>replay_frame->now
+                        || delivery.command.cmd_generated>delivery.completed_at)
+                        throw std::invalid_argument("Replay delivery feedback must be chronological and available before inference");
+                    std::lock_guard<std::mutex> lock(shared_.mutex);
+                    noteCommandDeliveryLocked(shared_,delivery);
+                    previous_delivery_tick=delivery.completed_at;
                 }
                 previous_replay_tick = replay_frame->now;
                 shared_.toggles = replay_frame->toggles;
@@ -1962,19 +1973,23 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
 
             const CaptureRegion capture_region = gpu_packet.has_value() ? gpu_packet->capture : cpu_packet->capture;
             const SteadyClock::time_point frame_ready = gpu_packet.has_value() ? gpu_packet->frame_ready : cpu_packet->frame_ready;
-            const SteadyClock::time_point frame_time = frame_ready != SteadyClock::time_point{}
+            const auto source_id=gpu_packet ? gpu_packet->source_id : cpu_packet->source_id;
+            const auto source_present=gpu_packet ? gpu_packet->source_present : cpu_packet->source_present;
+            const SteadyClock::time_point frame_time = source_present != SteadyClock::time_point{} ? source_present : frame_ready != SteadyClock::time_point{}
                 ? frame_ready
                 : (gpu_packet.has_value() ? gpu_packet->frame_time : cpu_packet->frame_time);
             const SteadyClock::time_point capture_done = gpu_packet.has_value() ? gpu_packet->capture_done : cpu_packet->capture_done;
             const SteadyClock::time_point acquire_started = gpu_packet.has_value() ? gpu_packet->acquire_started : cpu_packet->acquire_started;
             const double frame_age = secondsSince(frame_time, steadyNow());
-            if (frame_age > kMaxFrameAgeSeconds) {
+            if (frame_age < 0 || frame_age*1000.0 > runtime.command_max_observation_age_ms
+                || (source_id!=0 && source_id==last_source_id) || frame_time<=last_source_tick) {
                 if (replay) replay_result.stale_frame = true;
                 if (perf_) {
                     recordInferencePerf(*perf_, frame_age, secondsSince(loop_start, SteadyClock::now()), true, false, app_timings, {}, std::nullopt);
                 }
                 continue;
             }
+            last_source_id=source_id;last_source_tick=frame_time;
 
             const int requested_target_cls = aimModeTargetClass(runtime.aim_mode);
 
@@ -1988,6 +2003,11 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             }
 
             std::vector<Detection> detections = inference_result.detections;
+            if (secondsSince(frame_time,steadyNow())*1000.0 > runtime.command_max_observation_age_ms) {
+                if (replay) replay_result.stale_frame=true;
+                command_slot_.clear();
+                continue;
+            }
             for (auto& detection : detections) {
                 detection.bbox[0] += capture_region.left;
                 detection.bbox[1] += capture_region.top;
@@ -2151,6 +2171,28 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
                 }
             }
 
+            const bool motion_stability = runtime.motion_stability_enable && runtime.detection_dampening_enable;
+            MotionSelection motion_selection;
+            if (motion_stability && !debug_overlay_observe_active) {
+                motion_selection = noteMotionSelection(detection_dampening_state, runtime,
+                    sticky ? sticky->detection : std::nullopt, aim_pool.candidates, frame_time, steadyNow());
+                if (replay) {
+                    replay_result.motion_ambiguous=motion_selection.ambiguous;
+                    replay_result.motion_decision=motion_selection.decision;
+                    replay_result.motion_residual_px=motion_selection.residual_px;
+                    replay_result.motion_matches=motion_selection.matches;
+                }
+                if (motion_selection.detection) {
+                    StickyTargetPick accepted{};
+                    accepted.detection=motion_selection.detection;
+                    accepted.switched=motion_selection.switched;
+                    sticky=accepted;
+                } else sticky.reset();
+                if (!detection_dampening_state.accepted_detection) {
+                    tracker->reset();resetPidControllers();target_lead_state.reset();
+                    last_measurement_tick={};
+                }
+            }
             if (sticky.has_value() && sticky->detection.has_value()) {
                 noteTargetGuardSelection(target_guard_state, target_guard_config, *sticky->detection);
             } else if (!guard_active || target_guard_miss == TargetGuardMissResult::Inactive) {
@@ -2168,9 +2210,7 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             } else {
                 guard_region.reset();
             }
-            const SteadyClock::time_point lead_sample_time = frame_ready != SteadyClock::time_point{}
-                ? frame_ready
-                : frame_time;
+            const SteadyClock::time_point lead_sample_time = frame_time;
             const bool selected_detection = sticky.has_value() && sticky->detection.has_value();
             const bool association_selected = association_enabled && association_pick.detection.has_value();
             std::optional<CaptureCropTarget> crop_target;
@@ -2199,13 +2239,17 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
                 shared_.adaptive_capture_crop_size = next_crop_size;
                 shared_.adaptive_capture_crop_active = effective_adaptive_capture_crop;
             }
-            const bool target_switched = selected_detection
+            const bool target_switched = motion_stability ? motion_selection.switched : selected_detection
                 && (sticky->switched
                     || (
                         !association_selected
                         && last_target_bbox.has_value()
                         && bboxIou(sticky->detection->bbox, *last_target_bbox) < 0.05F));
-            const DetectionDampeningResult detection_dampening_result = debug_overlay_observe_active
+            const DetectionDampeningResult detection_dampening_result = motion_stability
+                ? DetectionDampeningResult{.ready=motion_selection.ready,
+                    .streak=detection_dampening_state.stable_frame_count,
+                    .required_frames=detection_dampening_config.stable_frames}
+                : debug_overlay_observe_active
                 ? DetectionDampeningResult{
                     .ready = !detection_dampening_config.enable,
                     .streak = 0,
@@ -2219,7 +2263,7 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             const bool target_output_allowed = detection_dampening_result.ready;
             // Selection ran even if dampening returns before tracker/control.
             app_timings.select_s = secondsSince(select_start, SteadyClock::now());
-            if (!debug_overlay_observe_active && !target_output_allowed) {
+            if (!debug_overlay_observe_active && !target_output_allowed && !motion_stability) {
                 resetPidControllers();
                 tracker->reset();
                 last_kalman_snap_count = 0;
@@ -2463,6 +2507,7 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
                 if (lost_frames > runtime.target_max_lost_frames || prediction_expired) {
                     app_timings.tracker_update_s = secondsSince(tracker_start, SteadyClock::now());
                     tracker->reset();
+                    if (motion_stability) detection_dampening_state.reset();
                     last_kalman_snap_count = 0;
                     resetPidControllers();
                     resetAimTrackingState(
@@ -2526,6 +2571,12 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             const bool use_legacy_pid = runtime.tracking_strategy == TrackingStrategy::LegacyPid;
             float predicted_x = tracker_state.x;
             float aim_y = tracker_state.y;
+            if (motion_stability && !selected_detection && detection_dampening_state.confirmed
+                && detection_dampening_state.accepted_detection) {
+                const float horizon = static_cast<float>(secondsSince(detection_dampening_state.last_observation, now_tick));
+                predicted_x = detection_dampening_state.accepted_detection->x + detection_dampening_state.vx*horizon;
+                aim_y = detection_dampening_state.accepted_detection->y + detection_dampening_state.vy*horizon;
+            }
             float speed = 0.0F;
             float pid_error_metric_px = 0.0F;
             float pid_threshold_px = 0.0F;
@@ -2939,6 +2990,10 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
                     .capture_done = capture_done,
                     .frame_time = gpu_packet.has_value() ? gpu_packet->capture_time : cpu_packet->capture_time,
                     .capture_time = gpu_packet.has_value() ? gpu_packet->capture_time : cpu_packet->capture_time,
+                    .source_id = source_id,
+                    .observation_time = last_measurement_tick,
+                    .expires_at = motion_stability ? last_measurement_tick + std::chrono::duration_cast<SteadyClock::duration>(
+                        std::chrono::duration<double,std::milli>(runtime.motion_prediction_timeout_ms)) : SteadyClock::time_point{},
                 };
                 shared_.tracking_strategy = trackingStrategyName(runtime.tracking_strategy);
             }
@@ -2977,6 +3032,7 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             }
 
             const auto queue_start = SteadyClock::now();
+            if (!target_output_allowed) { resetPidControllers(); command_slot_.clear(); }
             if (target_output_allowed && (engage_active || trigger_fire)) {
                 command_slot_.put(CommandPacket{
                     .dx = dx,
@@ -2991,6 +3047,10 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
                     .target_detected = true,
                     .synthetic_recoil = false,
                     .trigger_fire = trigger_fire,
+                    .source_id = source_id,
+                    .observation_time = last_measurement_tick,
+                    .expires_at = motion_stability ? last_measurement_tick + std::chrono::duration_cast<SteadyClock::duration>(
+                        std::chrono::duration<double,std::milli>(runtime.motion_prediction_timeout_ms)) : SteadyClock::time_point{},
                 });
                 app_timings.queue_s = secondsSince(queue_start, SteadyClock::now());
             }
@@ -3086,11 +3146,8 @@ void DeltaApp::controlLoop() {
     SystemClock::time_point last_trigger_click{};
     SteadyClock::time_point last_recoil_integrate_tick{};
     SteadyClock::time_point last_target_send_tick{};
-    SteadyClock::time_point next_aim_budget_tick{};
-    std::optional<CommandPacket> pending_aim_cmd;
+    AimCommandScheduler aim_scheduler;
     double recoil_carry_y = 0.0;
-    double servo_carry_x = 0.0;
-    double servo_carry_y = 0.0;
     const double primary_refresh_hz = detectPrimaryDisplayRefreshHz();
     MouseSenderConfig last_sender_config{};
     bool sender_config_initialized = false;
@@ -3129,8 +3186,7 @@ void DeltaApp::controlLoop() {
                 const int mode = shared_.toggles.mode;
                 if (mode == 0) {
                     command_slot_.clear();
-                    pending_aim_cmd.reset();
-                    next_aim_budget_tick = {};
+                    aim_scheduler.reset();
                     clearAimStateLocked(
                         shared_,
                         center,
@@ -3149,8 +3205,7 @@ void DeltaApp::controlLoop() {
                 last_aim_mode_toggle = steady_now;
                 aim_mode_changed = true;
                 command_slot_.clear();
-                pending_aim_cmd.reset();
-                next_aim_budget_tick = {};
+                aim_scheduler.reset();
                 clearAimStateLocked(
                     shared_,
                     center,
@@ -3169,8 +3224,7 @@ void DeltaApp::controlLoop() {
                         shared_.toggles.right_pressed,
                         shared_.toggles.x1_pressed)) {
                     command_slot_.clear();
-                    pending_aim_cmd.reset();
-                    next_aim_budget_tick = {};
+                    aim_scheduler.reset();
                     clearAimStateLocked(
                         shared_,
                         center,
@@ -3253,10 +3307,7 @@ void DeltaApp::controlLoop() {
         if (sender_config_changed) {
             if (serial_connection_change) {
                 command_slot_.clear();
-                pending_aim_cmd.reset();
-                next_aim_budget_tick = {};
-                servo_carry_x = 0.0;
-                servo_carry_y = 0.0;
+                aim_scheduler.reset();
                 {
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     shared_.pending_recoil = {};
@@ -3307,183 +3358,46 @@ void DeltaApp::controlLoop() {
         }
         const bool target_command_allowed = target_detected && target_output_allowed;
         const bool advanced_recoil_pending = !virtual_recoil_target_active && (pending_recoil.dx != 0 || pending_recoil.dy != 0);
-        const bool sigma_drift_active = runtime.tracking_strategy == TrackingStrategy::PredictivePid
-            && runtime.pid_enable
-            && runtime.predictive_pid_human_motion_enable;
-        const bool display_rate_servo_active = runtime.display_rate_servo_enable && !sigma_drift_active;
-        if (display_rate_servo_active && !target_command_allowed) {
-            pending_aim_cmd.reset();
-            next_aim_budget_tick = {};
-            servo_carry_x = 0.0;
-            servo_carry_y = 0.0;
-        }
-        if (!display_rate_servo_active) {
-            pending_aim_cmd.reset();
-            next_aim_budget_tick = {};
-            servo_carry_x = 0.0;
-            servo_carry_y = 0.0;
-        }
-
         double detected_refresh_hz = primary_refresh_hz;
+        DisplayRateServoState servo{};
         {
             std::lock_guard<std::mutex> lock(shared_.mutex);
-            if (shared_.display_refresh_hz > 0.0) {
-                detected_refresh_hz = shared_.display_refresh_hz;
-            }
+            if (shared_.display_refresh_hz > 0.0) detected_refresh_hz = shared_.display_refresh_hz;
+            servo = shared_.display_rate_servo;
         }
         const double target_send_hz = effectiveDisplayRateServoHz(runtime, detected_refresh_hz);
-        const double target_interval_s = 1.0 / target_send_hz;
-        const auto target_interval_duration = std::max(
-            SteadyClock::duration{1},
-            std::chrono::duration_cast<SteadyClock::duration>(std::chrono::duration<double>(target_interval_s)));
         const bool target_engage_active = (toggles.mode != 0)
-            && isLeftHoldEngageSatisfied(
-                toggles.left_hold_engage,
-                runtime.left_hold_engage_button,
-                toggles.left_pressed,
-                toggles.right_pressed,
-                toggles.x1_pressed);
-        const bool target_scheduler_active = display_rate_servo_active
-            && target_command_allowed
-            && target_engage_active;
+            && isLeftHoldEngageSatisfied(toggles.left_hold_engage,runtime.left_hold_engage_button,
+                toggles.left_pressed,toggles.right_pressed,toggles.x1_pressed);
+        const bool sigma_drift_active = runtime.tracking_strategy == TrackingStrategy::PredictivePid
+            && runtime.pid_enable && runtime.predictive_pid_human_motion_enable;
+        const bool target_scheduler_active = runtime.display_rate_servo_enable && !sigma_drift_active
+            && target_command_allowed && target_engage_active;
         const auto command_wait_start = SteadyClock::now();
-        if (target_scheduler_active) {
-            if (next_aim_budget_tick == SteadyClock::time_point{}) {
-                next_aim_budget_tick = command_wait_start;
-            }
-        } else {
-            next_aim_budget_tick = {};
-        }
-        const auto command_wait_deadline = target_scheduler_active
-            ? next_aim_budget_tick
-            : command_wait_start + kControlCommandWait;
+        const auto command_wait_deadline = aim_scheduler.deadline(
+            command_wait_start,target_scheduler_active,kControlCommandWait);
         std::optional<CommandPacket> incoming_cmd = command_slot_.wait_take_until(command_wait_deadline);
         const auto command_wake_tick = SteadyClock::now();
         const auto command_wake_system = SystemClock::now();
-        std::optional<CommandPacket> cmd;
-        bool target_budget_due = false;
-        const double target_dt_s = target_interval_s;
-        if (target_scheduler_active
-            && next_aim_budget_tick != SteadyClock::time_point{}
-            && command_wake_tick >= next_aim_budget_tick) {
-            target_budget_due = true;
-            if (perf_) {
-                recordAimSchedulerPerf(*perf_, true, false, false, false, false, false);
-            }
-            next_aim_budget_tick += target_interval_duration;
-            if (next_aim_budget_tick <= command_wake_tick) {
-                const auto late_duration = command_wake_tick - next_aim_budget_tick;
-                const auto missed_slots = (late_duration.count() / target_interval_duration.count()) + 1;
-                next_aim_budget_tick += target_interval_duration * missed_slots;
-            }
-        }
-
-        if (incoming_cmd.has_value() && isTargetAimCommand(*incoming_cmd) && !target_command_allowed) {
-            incoming_cmd.reset();
-        }
-
-        if (display_rate_servo_active && target_command_allowed && incoming_cmd.has_value() && isTargetAimCommand(*incoming_cmd)) {
-            pending_aim_cmd = *incoming_cmd;
-            if (!target_budget_due && perf_) {
-                recordAimSchedulerPerf(*perf_, false, false, false, true, false, false);
-            }
-        } else {
-            cmd = std::move(incoming_cmd);
-        }
-
-        if (pending_aim_cmd.has_value()
-            && pending_aim_cmd->cmd_generated != SteadyClock::time_point{}
-            && secondsSince(pending_aim_cmd->cmd_generated, command_wake_tick) > kCommandTimeoutSeconds) {
-            if (perf_) {
-                recordControlPerf(
-                    *perf_,
-                    controlPerfKind(*pending_aim_cmd),
-                    secondsSince(pending_aim_cmd->cmd_generated, command_wake_tick),
-                    false,
-                    0.0,
-                    true,
-                    false,
-                    pending_aim_cmd->frame_ready == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(pending_aim_cmd->frame_ready, command_wake_tick)),
-                    pending_aim_cmd->acquire_started == SteadyClock::time_point{} ? std::nullopt : std::optional<double>(secondsSince(pending_aim_cmd->acquire_started, command_wake_tick)),
-                    std::nullopt,
-                    std::nullopt);
-            }
-            pending_aim_cmd.reset();
-        }
-
-        if (!cmd.has_value() && pending_aim_cmd.has_value() && target_budget_due && target_command_allowed) {
-            cmd = *pending_aim_cmd;
-            pending_aim_cmd.reset();
-            if (perf_) {
-                recordAimSchedulerPerf(*perf_, false, true, false, false, false, false);
-            }
-        }
-        const bool deferred_target_command = !cmd.has_value() && pending_aim_cmd.has_value();
-
-        if (!cmd.has_value() && !deferred_target_command && display_rate_servo_active && target_command_allowed) {
-            DisplayRateServoState servo{};
-            {
-                std::lock_guard<std::mutex> lock(shared_.mutex);
-                servo = shared_.display_rate_servo;
-            }
-            const bool servo_engage_active = (toggles.mode != 0)
-                && isLeftHoldEngageSatisfied(
-                    toggles.left_hold_engage,
-                    runtime.left_hold_engage_button,
-                    toggles.left_pressed,
-                    toggles.right_pressed,
-                    toggles.x1_pressed);
-            const double max_servo_age_s =
-                std::max(0.0, runtime.display_rate_servo_max_target_age_ms) / 1000.0;
-            const double servo_age_s = servo.updated_at == SteadyClock::time_point{}
-                ? std::numeric_limits<double>::infinity()
-                : secondsSince(servo.updated_at, command_wake_tick);
-            const bool servo_eligible = servo.valid
-                && target_command_allowed
-                && servo_engage_active
-                && target_budget_due
-                && servo_age_s <= max_servo_age_s
-                && servo_age_s <= kCommandTimeoutSeconds;
-            if (servo_eligible) {
-                if (perf_) {
-                    recordAimSchedulerPerf(*perf_, false, false, true, false, false, false);
-                }
-                const double clamped_dt_s = clamp(target_dt_s, target_interval_s, kMaxFrameAgeSeconds);
-                double move_x = (static_cast<double>(servo.velocity_x) * clamped_dt_s)
-                    + (0.5 * static_cast<double>(servo.acceleration_x) * clamped_dt_s * clamped_dt_s)
-                    + servo_carry_x;
-                double move_y = (static_cast<double>(servo.velocity_y) * clamped_dt_s)
-                    + (0.5 * static_cast<double>(servo.acceleration_y) * clamped_dt_s * clamped_dt_s)
-                    + servo_carry_y;
-                const int rounded_dx = static_cast<int>(std::lround(move_x));
-                const int rounded_dy = static_cast<int>(std::lround(move_y));
-                int servo_dx = clamp(rounded_dx, -runtime.raw_max_step_x, runtime.raw_max_step_x);
-                int servo_dy = clamp(rounded_dy, -runtime.raw_max_step_y, runtime.raw_max_step_y);
-                servo_carry_x = servo_dx == rounded_dx ? (move_x - static_cast<double>(servo_dx)) : 0.0;
-                servo_carry_y = servo_dy == rounded_dy ? (move_y - static_cast<double>(servo_dy)) : 0.0;
-                if (servo_dx != 0 || servo_dy != 0) {
-                    cmd = CommandPacket{
-                        .dx = servo_dx,
-                        .dy = servo_dy,
-                        .acquire_started = servo.acquire_started,
-                        .frame_ready = servo.frame_ready,
-                        .capture_done = servo.capture_done,
-                        .cmd_generated = command_wake_tick,
-                        .generated_at = command_wake_system,
-                        .frame_time = servo.frame_time,
-                        .capture_time = servo.capture_time,
-                        .target_detected = true,
-                        .synthetic_recoil = false,
-                        .synthetic_servo = true,
-                        .trigger_fire = false,
-                    };
-                }
-                if (servo_dx == 0 && servo_dy == 0 && perf_) {
-                    recordAimSchedulerPerf(*perf_, false, false, false, false, false, true);
-                }
-            } else if (!servo.valid || !target_command_allowed || !servo_engage_active || servo_age_s > max_servo_age_s) {
-                servo_carry_x = 0.0;
-                servo_carry_y = 0.0;
+        auto schedule = aim_scheduler.step(command_wake_tick,command_wake_system,
+            std::move(incoming_cmd),servo,runtime,target_send_hz,target_command_allowed,target_engage_active);
+        std::optional<CommandPacket> cmd = std::move(schedule.command);
+        const bool deferred_target_command=schedule.deferred;
+        if (perf_) {
+            if (schedule.budget_due) recordAimSchedulerPerf(*perf_,true,false,false,false,false,false);
+            if (schedule.queued) recordAimSchedulerPerf(*perf_,false,false,false,true,false,false);
+            if (schedule.fresh) recordAimSchedulerPerf(*perf_,false,true,false,false,false,false);
+            if (schedule.servo) recordAimSchedulerPerf(*perf_,false,false,true,false,false,false);
+            if (schedule.zero_servo) recordAimSchedulerPerf(*perf_,false,false,false,false,false,true);
+            if (schedule.timed_out_pending) {
+                const auto& expired=*schedule.timed_out_pending;
+                recordControlPerf(*perf_,controlPerfKind(expired),
+                    secondsSince(expired.cmd_generated,command_wake_tick),false,0.0,true,false,
+                    expired.frame_ready==SteadyClock::time_point{} ? std::nullopt
+                        : std::optional<double>(secondsSince(expired.frame_ready,command_wake_tick)),
+                    expired.acquire_started==SteadyClock::time_point{} ? std::nullopt
+                        : std::optional<double>(secondsSince(expired.acquire_started,command_wake_tick)),
+                    std::nullopt,std::nullopt);
             }
         }
         const double recoil_rate_y_px_s = std::abs(runtime.recoil_compensation_y_rate_px_s) > 1e-6F
@@ -3617,6 +3531,7 @@ void DeltaApp::controlLoop() {
             continue;
         }
 
+        if (!commandFreshAt(*cmd,SteadyClock::now(),runtime.command_max_observation_age_ms)) continue;
         int dx = cmd->dx;
         int dy = cmd->dy;
         const bool trigger_will_click = trigger_fire
@@ -3663,6 +3578,7 @@ void DeltaApp::controlLoop() {
 
         bool movement_sent = false;
         const auto send_start = SteadyClock::now();
+        if (!commandFreshAt(*cmd,send_start,runtime.command_max_observation_age_ms)) continue;
         if (dx != 0 || dy != 0) {
             movement_sent = input_sender_->sendRelative(dx, dy);
         }
@@ -3744,30 +3660,8 @@ void DeltaApp::controlLoop() {
 
         if ((dx != 0 || dy != 0) && movement_sent) {
             std::lock_guard<std::mutex> lock(shared_.mutex);
-            if (cmd->cmd_generated != SteadyClock::time_point{} && !cmd->synthetic_servo) {
-                const float send_latency_s = static_cast<float>(secondsSince(cmd->cmd_generated, send_end_tick));
-                const float next_latency_ema = emaUpdateSigned(
-                    shared_.cmd_send_latency_ema_s.load(std::memory_order_relaxed),
-                    std::max(0.0F, send_latency_s),
-                    kCmdSendLatencyAlpha);
-                shared_.cmd_send_latency_ema_s.store(next_latency_ema, std::memory_order_relaxed);
-            }
-            if (shared_.ctrl_last_send_tick != SteadyClock::time_point{}) {
-                const float send_dt = std::max(1e-4F, static_cast<float>(secondsSince(shared_.ctrl_last_send_tick, send_end_tick)));
-                const float sent_vx = clamp(static_cast<float>(dx) / send_dt, -kEgoMotionCompMaxPxS, kEgoMotionCompMaxPxS);
-                const float sent_vy = clamp(static_cast<float>(dy) / send_dt, -kEgoMotionCompMaxPxS, kEgoMotionCompMaxPxS);
-                const float next_vx_ema = emaUpdateSigned(
-                    shared_.ctrl_sent_vx_ema.load(std::memory_order_relaxed),
-                    sent_vx,
-                    kEgoMotionCompAlpha);
-                const float next_vy_ema = emaUpdateSigned(
-                    shared_.ctrl_sent_vy_ema.load(std::memory_order_relaxed),
-                    sent_vy,
-                    kEgoMotionCompAlpha);
-                shared_.ctrl_sent_vx_ema.store(next_vx_ema, std::memory_order_relaxed);
-                shared_.ctrl_sent_vy_ema.store(next_vy_ema, std::memory_order_relaxed);
-            }
-            shared_.ctrl_last_send_tick = send_end_tick;
+            noteCommandDeliveryLocked(shared_,CommandDelivery{.command=*cmd,.dx=dx,.dy=dy,
+                .completed_at=send_end_tick,.movement_sent=true});
             if (cmd->target_detected && !cmd->synthetic_recoil) {
                 last_target_send_tick = send_end_tick;
             }

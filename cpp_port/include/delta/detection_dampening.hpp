@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <vector>
 
 #include "delta/config.hpp"
 #include "delta/core.hpp"
@@ -15,9 +16,31 @@ struct DetectionDampeningConfig {
 struct DetectionDampeningState {
     std::optional<std::array<int, 4>> last_selected_bbox;
     int stable_frame_count = 0;
+    SteadyClock::time_point last_observation{};
+    SteadyClock::time_point confirmation_started{};
+    std::optional<Detection> accepted_detection;
+    float vx = 0, vy = 0;
+    bool confirmed = false;
 
     void reset();
 };
+
+struct MotionSelection {
+    const char* decision = "no_candidate";
+    std::optional<Detection> detection;
+    bool ready = false;
+    bool switched = false;
+    bool ambiguous = false;
+    bool duplicate = false;
+    float residual_px = 0;
+    std::vector<std::pair<Detection,float>> matches;
+};
+
+// Only unique accepted observations advance confirmation or refresh the deadline.
+MotionSelection noteMotionSelection(DetectionDampeningState& state,
+    const RuntimeConfig& config, const std::optional<Detection>& proposed,
+    const std::vector<Detection>& candidates, SteadyClock::time_point observed,
+    SteadyClock::time_point now);
 
 struct DetectionDampeningResult {
     bool ready = true;

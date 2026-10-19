@@ -12,6 +12,7 @@
 #include <iostream>
 #include <map>
 #include <stdexcept>
+#include <thread>
 
 namespace {
 using delta::bench::Json;
@@ -79,8 +80,10 @@ public:
         if(image_path_.empty()) {
             capture_=delta::makeDefaultCaptureSource(config_);
             capture_->setGpuConsumerStream(engine_->gpuInputStream());
-            capture_->setFreshOnly(false);
-            capture_->setCachedFrameTimeoutMs(0);
+            const bool fresh=config_.onnx_provider=="cuda" ? runtime_.async_gpu_capture_fresh_only_enable : runtime_.tensorrt_inline_fresh_only_enable;
+            capture_->setFreshOnly(fresh);
+            capture_->setCachedFrameTimeoutMs(runtime_.capture_cached_timeout_ms);
+            metadata["capture_fresh_only"]=fresh;
         } else {
             image_=loadImage(image_path_);
             shifted_=image_.pixels;
@@ -135,10 +138,15 @@ private:
         double fixture_shift=0;
         if(capture_) {
             delta::CaptureRegion crop{config_.screen_w/2-320,config_.screen_h/2-320,640,640};
-            auto packet=capture_->grabGpu(crop);
-            if(packet){gpu=*packet;gpu_capture=true;}
-            else cpu=capture_->grab(crop);
-            if(!packet && !cpu) throw std::runtime_error("Desktop capture returned no frame");
+            do {
+                auto packet=capture_->grabGpu(crop);
+                if(packet){gpu=*packet;gpu_capture=true;}
+                else cpu=capture_->grab(crop);
+                if(gpu_capture || cpu) break;
+                if(milliseconds(source_start,delta::SteadyClock::now())>5000)
+                    throw std::runtime_error("No fresh desktop frame within five seconds; animate the capture region or use an image fixture");
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } while(true);
             if(cpu)out.frame=*cpu;
         } else {
             const double elapsed=warming_?0:milliseconds(epoch_,source_start)/1000;
@@ -156,12 +164,14 @@ private:
             gpu.capture={config_.screen_w/2-gpu.width/2,config_.screen_h/2-gpu.height/2,gpu.width,gpu.height};
             gpu.device_ptr=buffer_.data;gpu.pitch_bytes=image_.width*4;
             gpu.frame_ready=source_start;gpu.frame_time=source_start;gpu.acquire_started=source_start;
+            gpu.source_id=++fixture_id_;gpu.source_present=source_start;
             gpu.capture_time=delta::SystemClock::now();
             cudaCheck(cudaSetDevice(config_.onnx_cuda_device_id),"Select GPU for upload");
             cudaCheck(cudaMemcpy(buffer_.data,shifted_.data(),shifted_.size(),cudaMemcpyHostToDevice),"Fixture upload");
             gpu.capture_done=delta::SteadyClock::now();gpu_capture=true;
         }
         if(gpu_capture) {
+            out.frame.source_id=gpu.source_id;out.frame.source_present=gpu.source_present;
             out.frame.capture=gpu.capture;out.frame.frame_ready=gpu.frame_ready;out.frame.frame_time=gpu.frame_time;
             out.frame.acquire_started=gpu.acquire_started;out.frame.capture_done=gpu.capture_done;
             out.frame.capture_time=gpu.capture_time;
@@ -177,7 +187,8 @@ private:
             {"preprocess_ms",inference.timings.preprocess_ms},{"execute_ms",inference.timings.execute_ms},
             {"postprocess_ms",inference.timings.postprocess_ms},{"detections",out.detections.size()},
             {"gpu_input",gpu_capture},{"cached_capture",cpu?cpu->timings.used_cached_frame:gpu.timings.used_cached_frame},
-            {"observation_to_inference_ms",milliseconds(out.frame.frame_ready,out.now)},
+            {"source_id",out.frame.source_id},
+            {"observation_to_inference_ms",milliseconds(out.frame.source_present!=delta::SteadyClock::time_point{}?out.frame.source_present:out.frame.frame_ready,out.now)},
             {"source_to_inference_ms",milliseconds(source_start,out.now)}};
         row_["frame_interval_ms"]=(!warming_ && index_>1)?Json(milliseconds(previous_source_,source_start)):Json(nullptr);
         previous_source_=source_start;
@@ -187,6 +198,7 @@ private:
     delta::RuntimeConfig runtime_;
     std::filesystem::path image_path_;
     int count_,index_=0;
+    std::uint64_t fixture_id_=0;
     double speed_;
     bool warming_=true;
     std::unique_ptr<delta::IInferenceEngine> engine_;

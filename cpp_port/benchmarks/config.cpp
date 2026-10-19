@@ -50,6 +50,10 @@ RuntimeConfig runtimeFromJson(const Json& input) {
         || static_cast<int>(config.mouse_output_method) > 1)
         throw std::invalid_argument("Unknown configuration enum value");
     if (config.target_prediction_timeout_ms < 0 || config.target_max_lost_frames < 0
+        || config.motion_max_speed_px_s<=0 || config.motion_residual_scale<=0
+        || config.motion_confirmation_window_ms<=0 || config.motion_prediction_timeout_ms<=0
+        || config.motion_match_margin<0 || config.motion_prediction_max_displacement_px<=0
+        || config.command_max_observation_age_ms<=0
         || config.raw_max_step_x < 0 || config.raw_max_step_y < 0
         || config.detection_box_scale <= 0 || config.adaptive_capture_crop_min_size <= 0
         || config.adaptive_capture_crop_max_size < config.adaptive_capture_crop_min_size)
@@ -58,7 +62,7 @@ RuntimeConfig runtimeFromJson(const Json& input) {
 }
 
 void validateOptions(const Options& options) {
-    if (options.suite != "quick" && options.suite != "sweep" && options.suite != "speed") throw std::invalid_argument("Suite must be quick, sweep or speed");
+    if (options.suite != "quick" && options.suite != "sweep" && options.suite != "speed" && options.suite != "speed_sizes") throw std::invalid_argument("Suite must be quick, sweep, speed or speed_sizes");
     if (options.seed == 0 || options.seed > 0xffffffffULL) throw std::invalid_argument("Seed must be between 1 and 4294967295");
     if (options.repeats < 1 || options.repeats > 100) throw std::invalid_argument("Repeats must be between 1 and 100");
     if (!std::isfinite(options.loss_deadline_ms) || options.loss_deadline_ms <= 0 || options.loss_deadline_ms > 10000)

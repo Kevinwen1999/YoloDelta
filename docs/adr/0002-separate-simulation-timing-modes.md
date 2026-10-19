@@ -1,0 +1,9 @@
+# Separate controlled-time and visible-screen evaluation
+
+Provide both controlled-time simulation for repeatable behavioral comparisons and real-time visible-screen simulation using production capture, RTX 3070 inference and actual scheduling delays. Report the modes separately: controlled-time results cannot establish hardware latency, and real-time runs cannot promise identical observation sequences. The detailed time model remains to be settled in the design discussion.
+
+Controlled-time rendering, observation availability and control dispatch use independent logical schedules with configurable delays. GPU inference produces detections, but its wall-clock duration does not advance logical time. Visible-screen runs use a dedicated unobscured scene window on the configured capture display, respect production adaptive crop coordinates and keep diagnostics outside the captured scene. Invalid placement, occlusion or capture alignment invalidates a run instead of counting as a tracking failure.
+
+Every rendered frame has a scene-state ID linking world update, render submission, presentation, capture, inference, dispatch and simulated camera application. Broken linkage invalidates end-to-end latency claims. The first real-time hardware baseline keeps RTX 3070 inference on CUDA ordinal 1 and the configured display capture adapter, recording render/capture/inference GPU placement and any cross-GPU host-memory transfer. Alternative placement is a separate measured configuration.
+
+Wrong model or GPU, unexpected cached frames, capture misalignment and blocked scene window also invalidate a scored run; ordinary detector misses remain valid outcomes. Invalid runs retain diagnostic logs. Use a quick fixed-seed suite for routine changes and a broader multi-seed, parameter-sweep suite on demand. Measure run cost before setting runtime budgets.

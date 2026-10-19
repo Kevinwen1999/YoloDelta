@@ -131,6 +131,8 @@ struct DisplayRateServoState {
     SteadyClock::time_point capture_done{};
     SystemClock::time_point frame_time{};
     SystemClock::time_point capture_time{};
+    std::uint64_t source_id=0;
+    SteadyClock::time_point observation_time{},expires_at{};
 };
 
 struct SharedState {

@@ -207,6 +207,16 @@ struct RuntimeConfig {
     double display_rate_servo_hz = 0.0;
     double display_rate_servo_max_target_age_ms = 35.0;
     bool detection_dampening_enable = true;
+    // Experimental continuity policy; calibrated independently of legacy gates.
+    bool motion_stability_enable = false;
+    bool motion_identity_enable = false;
+    float motion_max_speed_px_s = 8000.0F;
+    float motion_residual_scale = 1.5F;
+    float motion_confirmation_window_ms = 80.0F;
+    float motion_prediction_timeout_ms = 100.0F;
+    float motion_match_margin = 0.25F;
+    float motion_prediction_max_displacement_px = 60.0F;
+    float command_max_observation_age_ms = 50.0F;
     int detection_dampening_stable_frames = 2;
     bool adaptive_capture_crop_enable = true;
     int adaptive_capture_crop_min_size = 320;

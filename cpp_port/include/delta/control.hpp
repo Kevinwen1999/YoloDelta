@@ -10,6 +10,8 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "delta/config.hpp"
 
@@ -36,6 +38,18 @@ struct MouseSenderConfig {
     float gain_x = 1.0F;
     float gain_y = 1.0F;
     int max_step = 127;
+};
+
+// Numeric movement sent by the selected backend, before physical delivery.
+// The simulator uses this same transform to turn scheduled commands into
+// camera movement without invoking SendInput or opening a serial device.
+class MouseMovementTransform {
+public:
+    void configure(const MouseSenderConfig& config) { config_=config; }
+    std::vector<std::pair<int,int>> apply(int dx,int dy);
+private:
+    MouseSenderConfig config_{};
+    float frac_x_=0.0F,frac_y_=0.0F;
 };
 
 enum class InputSenderState {
@@ -100,8 +114,7 @@ public:
 
 private:
     MouseSenderConfig config_{};
-    float frac_x_ = 0.0F;
-    float frac_y_ = 0.0F;
+    MouseMovementTransform movement_{};
 };
 
 class SerialMouseSender final : public IInputSender {

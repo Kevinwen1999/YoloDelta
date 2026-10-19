@@ -162,12 +162,27 @@ if(DELTA_ENABLE_CUDA_PIPELINE)
     target_link_libraries(delta_gpu_benchmark PRIVATE delta_benchmark_support CUDA::cudart windowscodecs ole32)
     target_include_directories(delta_gpu_benchmark PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
     target_compile_definitions(delta_gpu_benchmark PRIVATE DELTA_BENCH_CONFIGURATION="$<CONFIG>")
+    add_executable(delta_closed_loop_gpu benchmarks/closed_loop_gpu.cpp)
+    target_link_libraries(delta_closed_loop_gpu PRIVATE delta_benchmark_support CUDA::cudart windowscodecs ole32)
+    target_include_directories(delta_closed_loop_gpu PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    target_compile_definitions(delta_closed_loop_gpu PRIVATE DELTA_BENCH_CONFIGURATION="$<CONFIG>")
 endif()
 add_executable(delta_benchmark_tests tests/test_benchmark.cpp)
 target_link_libraries(delta_benchmark_tests PRIVATE delta_benchmark_support)
 add_test(NAME delta_benchmark_tests COMMAND delta_benchmark_tests)
 add_test(NAME delta_benchmark_reject_unknown_option COMMAND delta_benchmark --unknown-option)
 set_tests_properties(delta_benchmark_reject_unknown_option PROPERTIES WILL_FAIL TRUE)
+
+# Keep checked STL algorithms in a standalone executable: its runtime/debug
+# settings do not cross the production library's ABI boundary.
+add_executable(delta_dispatch_tests tests/test_dispatch.cpp)
+target_include_directories(delta_dispatch_tests PRIVATE include)
+if(MSVC)
+    target_compile_definitions(delta_dispatch_tests PRIVATE _DEBUG _ITERATOR_DEBUG_LEVEL=2)
+    set_property(TARGET delta_dispatch_tests PROPERTY MSVC_RUNTIME_LIBRARY MultiThreadedDebugDLL)
+endif()
+add_test(NAME delta_dispatch_tests COMMAND delta_dispatch_tests)
+set_tests_properties(delta_dispatch_tests PROPERTIES TIMEOUT 5)
 
 # Legacy tests are local/ignored in this repository. Register the ones present;
 # the versioned benchmark integration test above is always built.
