@@ -46,5 +46,8 @@ A continuous evaluation interval using one frozen configuration, model, scene as
 **Scene-state ID**:
 An identifier that links one rendered view of the simulated world to its capture, inference, command dispatch and applied movement records.
 
+**Rendered scene ID**:
+The provenance marker identifying an image submitted by the visible scene renderer. A captured observation records this ID and its DXGI presentation source; skipped rendered images do not become controller observations.
+
 **Invalid run**:
 An evaluation whose capture, timing or scene provenance is incomplete or incorrect, so its tracking and latency scores cannot be trusted.

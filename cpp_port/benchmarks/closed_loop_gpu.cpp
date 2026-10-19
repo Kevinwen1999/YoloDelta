@@ -2,8 +2,11 @@
 #include "benchmark_build.hpp"
 #include "scene_geometry.hpp"
 #include "closed_loop_scoring.hpp"
+#include "visible_scene.hpp"
+#include "observation_replay.hpp"
 #include "delta/app.hpp"
 #include "delta/dispatch.hpp"
+#include "delta/timing.hpp"
 
 #include <cuda_runtime.h>
 #include <windows.h>
@@ -21,6 +24,9 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 namespace {
 using delta::bench::Json;
@@ -108,6 +114,7 @@ void checkSourceLabels(const std::filesystem::path& path,UINT width,UINT height,
         throw std::runtime_error("Manifest head/body boxes do not match paired source labels");
 }
 struct SceneParameters {
+    bool visible=false;
     int frames=200;
     double speed=1500,scale=1,cadence_ms=8,inference_delay_ms=5;
     double transport_delay_ms=1,hfov_deg=70,vfov_deg=70,mouse_radians_per_count=.0007;
@@ -138,6 +145,11 @@ public:
             throw std::runtime_error("CUDA ordinal 1 is not the intended RTX 3070");
         check(cudaMalloc(&device_,static_cast<std::size_t>(config_.screen_w)*config_.screen_h*4),"Scene GPU buffer");
         full_.resize(static_cast<std::size_t>(config_.screen_w)*config_.screen_h*4);
+        background_scaled_.resize(full_.size());
+        for(int y=0;y<config_.screen_h;++y)for(int x=0;x<config_.screen_w;++x) {
+            const auto source=(static_cast<std::size_t>(y*background_.height/config_.screen_h)*background_.width+x*background_.width/config_.screen_w)*4;
+            std::copy_n(background_.pixels.data()+source,4,background_scaled_.data()+(static_cast<std::size_t>(y)*config_.screen_w+x)*4);
+        }
         engine_=delta::makeInferenceEngine(config_);
         if(!engine_->supportsGpuInput())throw std::runtime_error("Actual GPU inference required");
         engine_->setModelConfidence(runtime_.model_conf);engine_->warmup();
@@ -167,8 +179,13 @@ public:
         control_period_ms_=1000.0/std::clamp(hz,1.0,1000.0);
         next_control_ms_=0;
     }
-    ~SceneReplay()override {if(device_)cudaFree(device_);}
+    ~SceneReplay()override {stopVisible();if(device_)cudaFree(device_);}
+    void finish() {
+        stopVisible();
+        for(const auto& saved:saved_frames_)savePng(output_/saved.path,saved.pixels,saved.width,saved.height);
+    }
     std::optional<delta::ReplayFrame> next(const delta::CaptureRegion& proposed)override {
+        if(params_.visible)return nextVisible(proposed);
         if(index_>=params_.frames)return std::nullopt;
         const double render_ms=params_.cadence_ms*(index_+1);
         advance(render_ms);
@@ -252,28 +269,27 @@ public:
         if(params_.scenario=="crossing" && render_ms>=40) {
             current_["truth_boxes"].push_back({{"id",2},{"bbox",secondary_box}});
         }
+        addClassRegions(current_,center_x,center_y,secondary_left+width/2);
         applied_since_frame_=Json::array();
         ++index_;
+        current_["replay_input"]=delta::bench::encodeObservation(out);
         return out;
     }
     void observe(const delta::ReplayResult& result)override {
+        std::unique_lock<std::mutex> lock(realtime_mutex_,std::defer_lock);
+        if(params_.visible)lock.lock();
         servo_=result.servo;allowed_=result.output_ready;
         if(!result.track) {selected_truth_id_=-1;selected_cls_=-1;}
         for(const auto& detection:result.preview.detections)if(detection.selected) {
             selected_cls_=detection.cls;
             const double x=(detection.bbox[0]+detection.bbox[2])*0.5;
             const double y=(detection.bbox[1]+detection.bbox[3])*0.5;
-            selected_truth_id_=0;
-            int matches=0;
-            for(const auto& truth:current_["truth_boxes"]) {
-                const auto box=truth["bbox"].get<delta::bench::SceneBox>();
-                if(x>=box[0] && x<=box[2] && y>=box[1] && y<=box[3]) {
-                    selected_truth_id_=truth["id"].get<int>();++matches;
-                }
-            }
-            if(matches>1)selected_truth_id_=-2;
+            std::vector<delta::bench::SceneIdentityRegions> regions;
+            for(const auto& truth:current_["truth_boxes"])regions.push_back({truth["id"].get<int>(),
+                truth["body_bbox"].get<delta::bench::SceneBox>(),truth["head_bbox"].get<delta::bench::SceneBox>()});
+            selected_truth_id_=delta::bench::attributeSceneDetection(x,y,detection.cls,regions);
         }
-        const double now=params_.cadence_ms*index_+params_.inference_delay_ms;
+        const double now=params_.visible?elapsed():params_.cadence_ms*index_+params_.inference_delay_ms;
         selection_by_source_[current_["scene_state_id"].get<std::uint64_t>()]={selected_truth_id_,selected_cls_};
         if(result.command)schedule(now,result.command);
         current_["command"]=result.command?Json::array({result.command->dx,result.command->dy}):Json(nullptr);
@@ -304,11 +320,193 @@ public:
                 config_.screen_w/2.0,config_.screen_h/2.0);
         }
         current_["stale"]=result.stale_frame;
+        current_["replay_outcome"]=delta::bench::observationOutcome(result);
+        current_["tracking_processing_us"]=result.processing_us;
+        if(params_.visible)current_["tracking_completed_ms"]=now;
         current_["camera_yaw_after_dispatch_rad"]=camera_yaw_;
         rows.push_back(current_);
     }
-    Json gpu,rows=Json::array(),movements=Json::array();
+    Json gpu,rows=Json::array(),movements=Json::array(),issues=Json::array(),capture_info=Json::object(),dispatch_rejections=Json::array();
 private:
+    void addClassRegions(Json& state,double x,double y,double secondary_x)const {
+        for(auto& truth:state["truth_boxes"]) {
+            const double center=truth["id"]==1?x:secondary_x;
+            truth["body_bbox"]=delta::bench::projectIdentityBox(body_box_,body_box_,box_,center,y,params_.scale);
+            truth["head_bbox"]=delta::bench::projectIdentityBox(head_box_,head_box_,box_,center,y,params_.scale);
+        }
+    }
+    struct SavedFrame {std::string path;std::vector<std::uint8_t> pixels;int width,height;};
+    double elapsed()const{return std::chrono::duration<double,std::milli>(delta::SteadyClock::now()-realtime_start_).count();}
+    void failVisible(const std::string& reason) {
+        issues.push_back(reason);stop_.store(true);
+    }
+    void stopVisible() {
+        stop_.store(true);
+        if(render_thread_.joinable())render_thread_.join();
+        if(dispatch_thread_.joinable())dispatch_thread_.join();
+    }
+    Json renderVisible(double at,double yaw,double pitch,std::uint32_t id) {
+        const double fx=(config_.screen_w/2.0)/std::tan(params_.hfov_deg*pi/360.0);
+        const double fy=(config_.screen_h/2.0)/std::tan(params_.vfov_deg*pi/360.0);
+        const double angle=worldAngle(at,fx),shake=externalYaw(at),shake_y=externalPitch(at);
+        const int x=static_cast<int>(std::lround(config_.screen_w/2.0+fx*std::tan(angle-yaw-shake)));
+        const int y=static_cast<int>(std::lround(config_.screen_h/2.0-fy*std::tan(pitch+shake_y)));
+        const int width=std::max(8,static_cast<int>(std::lround((box_[2]-box_[0])*params_.scale)));
+        const int height=std::max(8,static_cast<int>(std::lround((box_[3]-box_[1])*params_.scale)));
+        const int other=static_cast<int>(std::lround(config_.screen_w/2.0+fx*std::tan(-angle-yaw-shake)));
+        render(x-width/2,y-height/2,width,height,at,other-width/2,yaw,pitch);
+        delta::bench::writeSceneMarker(full_,config_.screen_w,config_.screen_h,id);
+        const auto body=aimPoint(x,y,0),head=aimPoint(x,y,1);
+        const auto box=delta::bench::projectIdentityBox(body_box_,head_box_,box_,x,y,params_.scale);
+        Json state={{"rendered_scene_id",id},{"world_update_ms",at},{"render_ms",at},
+            {"camera_yaw_rad",yaw},{"camera_pitch_rad",pitch},
+            {"external_yaw_rad",shake},{"external_pitch_rad",shake_y},
+            {"target_center",{x,y}},{"truth_body_aim",{body.first,body.second}},
+            {"truth_head_aim",{head.first,head.second}},{"truth_aim",{body.first,body.second}},
+            {"truth_box",box},{"truth_boxes",Json::array({{{"id",1},{"bbox",box}}})},
+            {"normalized_aim_error",delta::bench::normalizedSceneError(box,body.first,body.second,config_.screen_w/2.0,config_.screen_h/2.0)},
+            {"reticle_within_target",delta::bench::sceneContains(box,config_.screen_w/2.0,config_.screen_h/2.0)},
+            {"device_output",false},{"scenario",params_.scenario},
+            {"target_occluded",params_.scenario=="occlusion" && at>=400 && at<560}};
+        if(params_.scenario=="crossing" && at>=40)state["truth_boxes"].push_back({{"id",2},
+            {"bbox",delta::bench::projectIdentityBox(body_box_,head_box_,box_,other,y,params_.scale)}});
+        addClassRegions(state,x,y,other);
+        return state;
+    }
+    void startVisible() {
+        timer_resolution_.emplace(1);
+        if(!timer_resolution_->active())throw std::runtime_error("Production Windows timer resolution unavailable");
+        display_=delta::bench::captureDisplay(config_);
+        capture_info={{"adapter_index",config_.capture_device_idx},{"output_index",config_.capture_output_idx},
+            {"adapter",delta::bench::displayUtf8(display_.adapter)},
+            {"display",delta::bench::displayUtf8(display_.output)},
+            {"render_api","GDI via desktop compositor on configured capture display"},
+            {"path","DXGI desktop duplication -> host BGR -> RTX inference"},
+            {"requested_timer_resolution_ms",1},
+            {"desktop_size",{config_.screen_w,config_.screen_h}},
+            {"desktop_origin",{display_.bounds.left,display_.bounds.top}},
+            {"latency_scope","DXGI presentation to simulated camera application; excludes physical input delivery"}};
+        capture_=delta::makeDefaultCaptureSource(config_);
+        capture_->setFreshOnly(runtime_.async_gpu_capture_fresh_only_enable);
+        capture_->setCachedFrameTimeoutMs(runtime_.capture_cached_timeout_ms);
+        realtime_start_=delta::SteadyClock::now();
+        std::cout<<"VISIBLE-SCREEN SIMULATION: no mouse/serial output. Scene occupies the configured capture display.\n";
+        render_thread_=std::thread([this] {
+            try {
+                delta::bench::VisibleSceneWindow window(display_);
+                window_.store(window.handle());
+                auto deadline=delta::SteadyClock::now();
+                std::uint32_t id=0;
+                while(!stop_.load()) {
+                    const double at=elapsed();double yaw,pitch;
+                    {std::lock_guard lock(realtime_mutex_);yaw=camera_yaw_;pitch=camera_pitch_;}
+                    auto state=renderVisible(at,yaw,pitch,++id);
+                    state["render_submitted_ms"]=elapsed();
+                    {std::lock_guard lock(realtime_mutex_);rendered_[id]=state;}
+                    window.present(full_,config_.screen_w,config_.screen_h);
+                    {std::lock_guard lock(realtime_mutex_);rendered_[id]["presentation_fence_ms"]=elapsed();}
+                    deadline+=std::chrono::duration_cast<delta::SteadyClock::duration>(std::chrono::duration<double,std::milli>(params_.cadence_ms));
+                    if(deadline<delta::SteadyClock::now())deadline=delta::SteadyClock::now();
+                    std::this_thread::sleep_until(deadline);
+                }
+                window_.store(nullptr);
+            } catch(const std::exception& error) {std::lock_guard lock(realtime_mutex_);failVisible(error.what());}
+        });
+        dispatch_thread_=std::thread([this] {
+            try {
+                while(!stop_.load()) {
+                    double next;
+                    {std::lock_guard lock(realtime_mutex_);
+                        const double now=elapsed();
+                        while(!queued_.empty() && queued_.front().time_ms<=now) {
+                            auto event=queued_.front();queued_.erase(queued_.begin());event.time_ms=elapsed();applyMove(event);
+                        }
+                        if(now>=next_control_ms_) {
+                            schedule(now,std::nullopt);next_control_ms_=now+control_period_ms_;
+                        }
+                        next=next_control_ms_;
+                        if(!queued_.empty())next=std::min(next,queued_.front().time_ms);
+                    }
+                    std::this_thread::sleep_until(realtime_start_+std::chrono::duration_cast<delta::SteadyClock::duration>(std::chrono::duration<double,std::milli>(next)));
+                }
+            } catch(const std::exception& error) {std::lock_guard lock(realtime_mutex_);failVisible(error.what());}
+        });
+    }
+    std::optional<delta::ReplayFrame> nextVisible(const delta::CaptureRegion& proposed) {
+        if(index_>=params_.frames)return std::nullopt;
+        try {
+            if(!capture_)startVisible();
+            const auto timeout=delta::SteadyClock::now()+std::chrono::seconds(5);
+            std::optional<delta::FramePacket> captured;Json state;
+            while(!stop_.load() && delta::SteadyClock::now()<timeout) {
+                if(!window_.load()){std::this_thread::sleep_for(std::chrono::milliseconds(1));continue;}
+                captured=capture_->grab(proposed);
+                if(!captured)continue;
+                const auto marker=delta::bench::readSceneMarker(*captured,config_.screen_w,config_.screen_h);
+                if(!marker || !*marker) {
+                    if(index_==0)continue;
+                    throw std::runtime_error("Captured scene marker is corrupt or outside crop");
+                }
+                if(*marker==last_rendered_id_)continue;
+                if(*marker<last_rendered_id_)throw std::runtime_error("Captured scene IDs moved backward");
+                if(!delta::bench::VisibleSceneWindow::alignedAndUnobscured(window_.load(),display_,captured->capture))
+                    throw std::runtime_error("Scene window is obscured, moved or capture alignment is invalid");
+                {std::lock_guard lock(realtime_mutex_);
+                    const auto found=rendered_.find(*marker);
+                    if(found==rendered_.end())throw std::runtime_error("Captured scene ID has no render record");
+                    state=found->second;
+                }
+                if(captured->source_id==0 || captured->source_present==delta::SteadyClock::time_point{}
+                    || captured->timings.used_cached_frame)throw std::runtime_error("Capture lacks fresh DXGI presentation provenance");
+                last_rendered_id_=*marker;break;
+            }
+            if(stop_.load())return std::nullopt;
+            if(state.empty())throw std::runtime_error("Timed out waiting for a linked scene capture");
+            const auto wall_start=delta::SteadyClock::now();
+            auto inference=engine_->predict(*captured,-1);
+            check(cudaDeviceSynchronize(),"Visible inference synchronization");
+            const auto wall_end=delta::SteadyClock::now();
+            const auto actual_ms=[this](auto time){return std::chrono::duration<double,std::milli>(time-realtime_start_).count();};
+            const double present=actual_ms(captured->source_present);
+            if(present+0.1<state["render_submitted_ms"].get<double>())throw std::runtime_error("DXGI presentation predates linked render submission");
+            const auto natural=inference.detections.size();
+            const bool injected=params_.scenario=="dropout" && state["world_update_ms"].get<double>()>=400
+                && state["world_update_ms"].get<double>()<560;
+            if(injected)inference.detections.clear();
+            const std::string png="frames/"+std::to_string(index_+1)+".png";
+            std::vector<std::uint8_t> bgra(static_cast<std::size_t>(captured->width)*captured->height*4);
+            for(std::size_t i=0;i<captured->bgr.size()/3;++i) {
+                std::copy_n(captured->bgr.data()+i*3,3,bgra.data()+i*4);bgra[i*4+3]=255;
+            }
+            if(saved_bytes_+bgra.size()>1024ULL*1024*1024)throw std::runtime_error("Captured recording exceeds 1 GiB memory budget; use a shorter run");
+            saved_bytes_+=bgra.size();saved_frames_.push_back({png,std::move(bgra),captured->width,captured->height});
+            // Translate real steady timestamps into the existing replay epoch.
+            // Ground truth and the rendered ID stay exclusively in this adapter.
+            const auto convert=[&](auto time){return time==delta::SteadyClock::time_point{}?time:tick(actual_ms(time));};
+            state["dxgi_source_id"]=captured->source_id;
+            state["scene_state_id"]=++scene_id_;
+            captured->source_id=scene_id_;captured->source_present=convert(captured->source_present);
+            captured->acquire_started=convert(captured->acquire_started);captured->frame_ready=convert(captured->frame_ready);
+            captured->capture_done=convert(captured->capture_done);captured->frame_time=convert(captured->frame_time);
+            state["presented_ms"]=present;state["capture_ms"]=ms(captured->capture_done);
+            state["acquire_started_ms"]=ms(captured->acquire_started);state["frame_ready_ms"]=ms(captured->frame_ready);
+            state["inference_started_ms"]=actual_ms(wall_start);state["inference_completed_ms"]=actual_ms(wall_end);
+            state["inference_wall_ms"]=std::chrono::duration<double,std::milli>(wall_end-wall_start).count();
+            state["capture"]={captured->capture.left,captured->capture.top,captured->width,captured->height};
+            state["image"]=png;state["detections"]=inference.detections.size();state["natural_detections"]=natural;
+            state["injected_detection_drop"]=injected;
+            delta::ReplayFrame out;out.frame=std::move(*captured);out.detections=std::move(inference.detections);
+            {std::lock_guard lock(realtime_mutex_);
+                out.now=tick(elapsed());out.dispatch_feedback=std::move(pending_feedback_);pending_feedback_.clear();
+                state["available_ms"]=ms(out.now);state["applied_movement"]=applied_since_frame_;
+                applied_since_frame_=Json::array();current_=std::move(state);
+            }
+            current_["replay_input"]=delta::bench::encodeObservation(out);
+            ++index_;return out;
+        } catch(const std::exception& error) {
+            std::lock_guard lock(realtime_mutex_);failVisible(error.what());return std::nullopt;
+        }
+    }
     struct Movement {double time_ms,scheduled_ms,observation_ms,expiry_ms;
         int dx,dy,truth_id,aim_class;std::uint64_t source_id;};
     double externalYaw(double at_ms)const {
@@ -319,16 +517,18 @@ private:
         if(params_.scenario!="shake" || at_ms<400 || at_ms>=700)return 0;
         return .03*std::cos(at_ms*.15);
     }
-    void render(int left,int top,int width,int height,double at_ms,std::optional<int> secondary_left={}) {
+    void render(int left,int top,int width,int height,double at_ms,std::optional<int> secondary_left={},
+        std::optional<double> yaw={},std::optional<double> pitch={}) {
         const int W=config_.screen_w,H=config_.screen_h;
-        const int pan=static_cast<int>(std::lround((camera_yaw_+externalYaw(at_ms))*W*.6));
-        const int pan_y=static_cast<int>(std::lround((camera_pitch_+externalPitch(at_ms))*H*.6));
-        for(int y=0;y<H;++y)for(int x=0;x<W;++x) {
-            const auto i=(static_cast<std::size_t>(y)*W+x)*4;
-            const auto sx=static_cast<UINT>(((x+pan)%W+W)%W)*background_.width/W;
-            const auto sy=static_cast<UINT>(((y+pan_y)%H+H)%H)*background_.height/H;
-            const auto from=(static_cast<std::size_t>(sy)*background_.width+sx)*4;
-            std::copy_n(background_.pixels.data()+from,4,full_.data()+i);
+        const int pan=static_cast<int>(std::lround(((yaw?*yaw:camera_yaw_)+externalYaw(at_ms))*W*.6));
+        const int pan_y=static_cast<int>(std::lround(((pitch?*pitch:camera_pitch_)+externalPitch(at_ms))*H*.6));
+        const int shift=((pan%W)+W)%W;
+        for(int y=0;y<H;++y) {
+            const int sy=(((y+pan_y)%H)+H)%H;
+            const auto* source=background_scaled_.data()+static_cast<std::size_t>(sy)*W*4;
+            auto* dest=full_.data()+static_cast<std::size_t>(y)*W*4;
+            std::copy_n(source+shift*4,static_cast<std::size_t>(W-shift)*4,dest);
+            std::copy_n(source,static_cast<std::size_t>(shift)*4,dest+(W-shift)*4);
         }
         // Establish intended identity before introducing the crossing distractor.
         if(params_.scenario=="crossing" && at_ms>=40 && secondary_left)drawSprite(*secondary_left,top,width,height);
@@ -402,6 +602,9 @@ private:
     void schedule(double at_ms,std::optional<delta::CommandPacket> incoming) {
         const auto result=scheduler_.step(tick(at_ms),systemTick(at_ms),std::move(incoming),servo_,runtime_,
             1000.0/control_period_ms_,allowed_,true);
+        if(result.rejected_prediction)dispatch_rejections.push_back({{"source_id",result.rejected_prediction->source_id},
+            {"at_ms",at_ms},{"expires_ms",ms(result.rejected_prediction->expires_at)},
+            {"reason","prediction_dispatch_budget"}});
         if(!result.command) {
             if(!result.deferred)pending_feedback_.push_back(delta::CommandDelivery{.completed_at=tick(at_ms)});
             return;
@@ -432,11 +635,74 @@ private:
     std::unique_ptr<delta::IInferenceEngine> engine_;void* device_=nullptr;
     std::vector<std::uint8_t> full_,cropped_;std::vector<Movement> queued_;
     Json current_,applied_since_frame_=Json::array();
+    std::mutex realtime_mutex_;
+    std::atomic_bool stop_{false};std::atomic<HWND> window_{nullptr};
+    std::thread render_thread_,dispatch_thread_;
+    delta::SteadyClock::time_point realtime_start_{};
+    delta::bench::CaptureDisplay display_{};
+    std::unique_ptr<delta::ICaptureSource> capture_;
+    std::map<std::uint32_t,Json> rendered_;
+    std::uint32_t last_rendered_id_=0;
+    std::vector<SavedFrame> saved_frames_;
+    std::size_t saved_bytes_=0;
+    std::vector<std::uint8_t> background_scaled_;
+    std::optional<delta::ScopedTimerResolution> timer_resolution_;
 };
 }
 
+int replayObservations(int argc,char** argv) {
+    std::filesystem::path source=argv[2],output,config_file;
+    for(int i=3;i<argc;++i) {
+        const std::string key=argv[i];if(++i>=argc)throw std::invalid_argument("Missing replay argument");
+        if(key=="--output")output=argv[i];else if(key=="--config")config_file=argv[i];
+        else throw std::invalid_argument("Unknown replay argument "+key);
+    }
+    if(output.empty() || std::filesystem::exists(output))throw std::invalid_argument("Replay requires a new --output FILE");
+    std::ifstream file(source);Json input;file>>input;
+    auto runtime=delta::bench::runtimeFromJson(input.at("runtime"));
+    if(!config_file.empty()) {
+        std::ifstream override_file(config_file);Json overrides;override_file>>overrides;
+        auto merged=input.at("runtime");merged.update(overrides);runtime=delta::bench::runtimeFromJson(merged);
+    }
+    delta::StaticConfig config;
+    const auto viewport=input.at("scene").at("viewport").get<std::array<int,2>>();
+    config.screen_w=viewport[0];config.screen_h=viewport[1];
+    class Recorded final:public delta::ITrackingReplay {
+    public:
+        explicit Recorded(const Json& frames):frames_(frames){}
+        std::optional<delta::ReplayFrame> next(const delta::CaptureRegion&)override {
+            if(index_==frames_.size())return {};
+            return delta::bench::decodeObservation(frames_.at(index_++).at("replay_input"));
+        }
+        void observe(const delta::ReplayResult& result)override {
+            auto outcome=delta::bench::observationOutcome(result);
+            if(outcome!=frames_.at(index_-1).at("replay_outcome"))++different;
+            if(!result.track)identity_=0;
+            std::vector<delta::bench::SceneIdentityRegions> regions;
+            for(const auto& t:frames_.at(index_-1).at("truth_boxes"))regions.push_back({t.at("id").get<int>(),
+                t.at("body_bbox").get<delta::bench::SceneBox>(),t.at("head_bbox").get<delta::bench::SceneBox>()});
+            for(const auto& d:result.preview.detections)if(d.selected)identity_=delta::bench::attributeSceneDetection(
+                (d.bbox[0]+d.bbox[2])*.5,(d.bbox[1]+d.bbox[3])*.5,d.cls,regions);
+            outcome["selected_truth_id"]=identity_;
+            if(result.output_ready && identity_>0 && identity_!=1)++wrong_ready;
+            if(result.output_ready && identity_<=0)++unknown_ready;
+            outcomes.push_back(outcome);
+        }
+        Json outcomes=Json::array();int different=0,wrong_ready=0,unknown_ready=0;
+    private:const Json& frames_;std::size_t index_=0;int identity_=0;
+    } replay(input.at("frames"));
+    delta::DeltaApp::replay(config,runtime,replay);
+    Json result={{"scope","recorded_observations_open_loop"},{"source",source.string()},
+        {"recorded_feedback",true},{"device_output",false},{"runtime",delta::bench::runtimeJson(runtime)},
+        {"different_outcomes",replay.different},{"wrong_identity_output_ready_observations",replay.wrong_ready},
+        {"unknown_identity_output_ready_observations",replay.unknown_ready},{"frames",replay.outcomes}};
+    std::ofstream out(output);out<<result.dump(2);if(!out)throw std::runtime_error("Cannot write observation replay");
+    std::cout<<"Replayed "<<replay.outcomes.size()<<" observations; "<<replay.different<<" outcomes differ from recording\n";
+    return 0;
+}
 int main(int argc,char** argv) {
     try {
+        if(argc>=3 && std::string(argv[1])=="--replay")return replayObservations(argc,argv);
         const std::filesystem::path manifest_path="cpp_port/benchmarks/scenes/delta-backup-first.json";
         std::ifstream manifest_file(manifest_path);
         if(!manifest_file)throw std::runtime_error("Cannot open scene manifest: "+manifest_path.string());
@@ -455,13 +721,16 @@ int main(int argc,char** argv) {
             || std::filesystem::file_size(background_label)!=0)
             throw std::runtime_error("Background must have an empty label file: "+background_label.string());
         SceneParameters params;delta::StaticConfig config;delta::RuntimeConfig runtime;
-        config.onnx_require_gpu=true;config.screen_w=800;config.screen_h=800;config.capture_crop_size=640;
+        config.onnx_require_gpu=true;
         for(int i=1;i<argc;++i) {
             const std::string key=argv[i];auto value=[&](){if(++i>=argc)throw std::invalid_argument("Missing "+key);return std::string(argv[i]);};
-            if(key=="--image")image=value();else if(key=="--background")background=value();
+            if(key=="--mode") {const auto mode=value();if(mode!="controlled" && mode!="visible")throw std::invalid_argument("Mode must be controlled or visible");params.visible=mode=="visible";}
+            else if(key=="--image")image=value();else if(key=="--background")background=value();
             else if(key=="--output")output=value();
             else if(key=="--frames")params.frames=std::stoi(value());else if(key=="--speed")params.speed=std::stod(value());
             else if(key=="--scale")params.scale=std::stod(value());
+            else if(key=="--screen-width")config.screen_w=std::stoi(value());
+            else if(key=="--screen-height")config.screen_h=std::stoi(value());
             else if(key=="--cadence-ms")params.cadence_ms=std::stod(value());
             else if(key=="--inference-delay-ms")params.inference_delay_ms=std::stod(value());
             else if(key=="--transport-delay-ms")params.transport_delay_ms=std::stod(value());
@@ -475,15 +744,16 @@ int main(int argc,char** argv) {
             else if(key=="--box") {
                 const std::string input=value();if(std::sscanf(input.c_str(),"%d,%d,%d,%d",&box[0],&box[1],&box[2],&box[3])!=4)
                     throw std::invalid_argument("--box needs x1,y1,x2,y2");
-            } else if(key=="--help") {std::cout<<"delta_closed_loop_gpu --output NEW_DIRECTORY [--image FILE] [--background FILE] [--box x1,y1,x2,y2] [--frames 200] [--speed 1500] [--scale 1] [--cadence-ms 8] [--scenario clean|occlusion|dropout|shake|crossing] [--config FILE] [--gpu-device 1]\n";return 0;}
+            } else if(key=="--help") {std::cout<<"delta_closed_loop_gpu --output NEW_DIRECTORY [--mode controlled|visible] [--image FILE] [--background FILE] [--box x1,y1,x2,y2] [--frames 200] [--speed 1500] [--scale 1] [--cadence-ms 8] [--scenario clean|occlusion|dropout|shake|crossing] [--config FILE] [--gpu-device 1]\n";return 0;}
             else throw std::invalid_argument("Unknown argument "+key);
         }
         if(image.empty() || output.empty() || params.frames<10 || params.frames>10000
+            || config.screen_w<640 || config.screen_w>7680 || config.screen_h<640 || config.screen_h>4320
             || !std::isfinite(params.speed) || params.speed<0 || params.speed>6000
             || !std::isfinite(params.scale) || params.scale<.25 || params.scale>2
             || !std::isfinite(params.cadence_ms) || params.cadence_ms<2 || params.cadence_ms>50
             || !std::isfinite(params.inference_delay_ms) || params.inference_delay_ms<1 || params.inference_delay_ms>50
-            || params.inference_delay_ms>params.cadence_ms
+            || (!params.visible && params.inference_delay_ms>params.cadence_ms)
             || !std::isfinite(params.transport_delay_ms) || params.transport_delay_ms<0 || params.transport_delay_ms>50
             || !std::isfinite(params.hfov_deg) || params.hfov_deg<20 || params.hfov_deg>150
             || !std::isfinite(params.vfov_deg) || params.vfov_deg<20 || params.vfov_deg>150
@@ -492,6 +762,13 @@ int main(int argc,char** argv) {
                 && params.scenario!="shake" && params.scenario!="crossing"))
             throw std::invalid_argument("Provide image, new output directory, 10..10000 frames and speed 0..6000");
         if(std::filesystem::exists(output))throw std::invalid_argument("Output directory already exists");
+        if(params.visible) {
+            if(!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+                && GetLastError()!=ERROR_ACCESS_DENIED)throw std::runtime_error("Cannot establish physical-pixel DPI coordinates");
+            const auto display=delta::bench::captureDisplay(config);
+            config.screen_w=display.bounds.right-display.bounds.left;
+            config.screen_h=display.bounds.bottom-display.bounds.top;
+        }
         std::filesystem::create_directories(output);
         std::filesystem::create_directories(output/"frames");
         check(CoInitializeEx(nullptr,COINIT_MULTITHREADED),"COM initialization");
@@ -501,28 +778,34 @@ int main(int argc,char** argv) {
         SceneReplay scene(config,runtime,std::move(source_image),loadImage(background),
             box,body_box,head_box,params,output);
         delta::DeltaApp::replay(config,runtime,scene);
-        Json result={{"schema_version",3},{"scope","controlled_time_gpu_closed_loop_exploratory"},
+        scene.finish();
+        Json result={{"schema_version",5},{"scope",params.visible?"visible_screen_gpu_closed_loop_exploratory":"controlled_time_gpu_closed_loop_exploratory"},
+            {"mode",params.visible?"visible":"controlled"},{"capture_hardware",scene.capture_info},
             {"device_output",false},{"gpu",scene.gpu},{"frames",scene.rows},{"applied_movements",scene.movements},
+            {"dispatch_rejections",scene.dispatch_rejections},
             {"runtime",delta::bench::runtimeJson(runtime)},{"asset_manifest",manifest},
             {"fingerprints",{{"model",fileFingerprint(config.model_path)},
                 {"target_image",fileFingerprint(image)},{"background_image",fileFingerprint(background)},
                 {"target_label",fileFingerprint(source_label)},
                 {"background_label",fileFingerprint(background_label)},
                 {"asset_manifest",fileFingerprint(manifest_path)}}},
-            {"scene",{{"image",image.string()},
+            {"scene",{{"image",image.string()},{"viewport",{config.screen_w,config.screen_h}},
                 {"background",background.string()},{"sprite_box",box},
                 {"speed_px_s",params.speed},{"scale",params.scale},{"scenario",params.scenario},
                 {"crossing_distractor_visible_after_ms",40},
                 {"horizontal_fov_deg",params.hfov_deg},{"vertical_fov_deg",params.vfov_deg},
                 {"mouse_radians_per_count",params.mouse_radians_per_count},
-                {"render_interval_ms",params.cadence_ms},{"logical_inference_delay_ms",params.inference_delay_ms},
+                {"render_interval_ms",params.cadence_ms},{"logical_inference_delay_ms",params.visible?Json(nullptr):Json(params.inference_delay_ms)},
                 {"simulated_transport_delay_ms",params.transport_delay_ms}}},
             {"build",{{"revision",DELTA_BENCH_REVISION},{"source_hash",DELTA_BENCH_SOURCE_HASH}}}};
         double total_error=0,frame_error=0,wrong_time_ms=0;
         int inside=0,frame_inside=0,wrong=0,past_deadline=0,ready=0,detected=0;
         std::vector<double> inference_times,application_ages;
         Json motion_decisions=Json::object();
+        double previous_available_ms=0;
         for(const auto& frame:scene.rows) {
+            const double sampled_interval=params.visible?frame["available_ms"].get<double>()-previous_available_ms:params.cadence_ms;
+            previous_available_ms=frame["available_ms"].get<double>();
             const auto decision=frame["motion_decision"].get<std::string>();
             motion_decisions[decision]=motion_decisions.value(decision,0)+1;
             frame_error+=frame["normalized_aim_error"].get<double>();
@@ -531,7 +814,7 @@ int main(int argc,char** argv) {
             inference_times.push_back(frame["inference_wall_ms"].get<double>());
             for(const auto& applied:frame["applied_movement"]) {
                 const int id=applied["selected_truth_id"].get<int>();
-                if(id>=0 && id!=1) {wrong_time_ms+=params.cadence_ms;break;}
+                if(id>=0 && id!=1) {wrong_time_ms+=sampled_interval;break;}
             }
         }
         for(const auto& movement:scene.movements) {
@@ -542,10 +825,11 @@ int main(int argc,char** argv) {
                 && movement["selected_truth_id"].get<int>()!=1;
             past_deadline+=movement["past_loss_deadline"].get<bool>();
         }
+        const double frame_count=static_cast<double>(std::max<std::size_t>(1,scene.rows.size()));
         result["summary"]={{"frames",scene.rows.size()},{"applied_movements",scene.movements.size()},
-            {"frames_with_detections",detected},{"output_ready_coverage",double(ready)/scene.rows.size()},
-            {"mean_normalized_error_all_frames",frame_error/scene.rows.size()},
-            {"fraction_frames_within_target_region",double(frame_inside)/scene.rows.size()},
+            {"frames_with_detections",detected},{"output_ready_coverage",double(ready)/frame_count},
+            {"mean_normalized_error_all_frames",frame_error/frame_count},
+            {"fraction_frames_within_target_region",double(frame_inside)/frame_count},
             {"mean_normalized_error_at_application",scene.movements.empty()?Json(nullptr):Json(total_error/scene.movements.size())},
             {"fraction_movements_within_target_region",scene.movements.empty()?Json(nullptr):Json(double(inside)/scene.movements.size())},
             {"movements_with_wrong_selected_target",wrong},{"wrong_target_movement_ms_sampled",wrong_time_ms},
@@ -553,8 +837,37 @@ int main(int argc,char** argv) {
             {"identity_scoring",delta::bench::scoreMovementIdentity(scene.movements,1)},
             {"motion_decision_counts",motion_decisions},
             {"gpu_inference_wall_ms",distribution(inference_times)},
-            {"logical_observation_to_applied_ms",distribution(application_ages)}};
-        Json validity_reasons=Json::array();
+            {params.visible?"measured_observation_to_applied_ms":"logical_observation_to_applied_ms",distribution(application_ages)}};
+        if(params.visible) {
+            std::vector<double> render_present,present_capture,capture_inference,inference_tracking,present_intervals;
+            std::vector<double> inference_dispatch,tracking_dispatch,dispatch_application,world_application;
+            for(const auto& f:scene.rows) {
+                render_present.push_back(f["presented_ms"].get<double>()-f["render_submitted_ms"].get<double>());
+                present_capture.push_back(f["capture_ms"].get<double>()-f["presented_ms"].get<double>());
+                capture_inference.push_back(f["inference_completed_ms"].get<double>()-f["capture_ms"].get<double>());
+                inference_tracking.push_back(f["tracking_processing_us"].get<double>()/1000.0);
+            }
+            for(std::size_t i=1;i<scene.rows.size();++i)present_intervals.push_back(
+                scene.rows[i]["presented_ms"].get<double>()-scene.rows[i-1]["presented_ms"].get<double>());
+            for(const auto& movement:scene.movements) {
+                const auto& source=scene.rows.at(movement["scene_state_id"].get<std::size_t>()-1);
+                inference_dispatch.push_back(movement["scheduled_ms"].get<double>()-source["inference_completed_ms"].get<double>());
+                tracking_dispatch.push_back(movement["scheduled_ms"].get<double>()-source["tracking_completed_ms"].get<double>());
+                dispatch_application.push_back(movement["applied_ms"].get<double>()-movement["scheduled_ms"].get<double>());
+                world_application.push_back(movement["applied_ms"].get<double>()-source["world_update_ms"].get<double>());
+            }
+            result["summary"]["measured_latency_ms"]={{"render_submission_to_dxgi_present",distribution(render_present)},
+                {"dxgi_present_to_capture_complete",distribution(present_capture)},
+                {"capture_complete_to_inference_complete",distribution(capture_inference)},
+                {"tracking_processing",distribution(inference_tracking)},
+                {"inference_complete_to_dispatch",distribution(inference_dispatch)},
+                {"tracking_complete_to_dispatch",distribution(tracking_dispatch)},
+                {"dispatch_to_simulated_application",distribution(dispatch_application)},
+                {"world_update_to_simulated_application",distribution(world_application)},
+                {"captured_presentation_interval",distribution(present_intervals)}};
+        }
+        Json validity_reasons=scene.issues;
+        if(scene.rows.size()!=static_cast<std::size_t>(params.frames))validity_reasons.push_back("Run did not complete the requested observation count");
         std::size_t expected_id=1;
         for(const auto& frame:scene.rows) {
             if(frame["scene_state_id"].get<std::size_t>()!=expected_id++)
@@ -590,7 +903,9 @@ int main(int argc,char** argv) {
 <section><h2>Aim error at applied movement</h2><canvas id="plot" width="1100" height="240"></canvas></section>
 <script id="data" type="application/json">)HTML"<<embedded<<R"HTML(</script><script>
 const run=JSON.parse(document.getElementById('data').textContent),rows=run.frames;
-document.getElementById('checks').textContent=`Evidence valid: ${run.validity.valid}. Correctness checks: ${run.correctness.passed?'passed':'FAILED'}.`;
+document.querySelector('h1').textContent=run.mode==='visible'?'Visible-screen GPU closed loop':'Controlled-time GPU closed loop';
+document.getElementById('checks').textContent=`Mode: ${run.mode}. No device output. Evidence valid: ${run.validity.valid}. Correctness checks: ${run.correctness.passed?'passed':'FAILED'}. ${run.validity.reasons.join('; ')}`;
+if(run.mode==='visible'){const timing=document.createElement('pre');timing.style.whiteSpace='pre-wrap';timing.textContent='Measured latency (ms): '+JSON.stringify(run.summary.measured_latency_ms,null,2);document.getElementById('checks').after(timing);}
 const scrub=document.getElementById('scrub'),view=document.getElementById('view'),ctx=view.getContext('2d');scrub.max=rows.length-1;
 let frame=0;const img=new Image();
 function box(b,color,line=2){ctx.strokeStyle=color;ctx.lineWidth=line;ctx.strokeRect(b[0],b[1],b[2]-b[0],b[3]-b[1]);}
@@ -606,7 +921,7 @@ scrub.oninput=()=>setFrame(Number(scrub.value));document.getElementById('back').
 document.getElementById('summary').textContent=`Applied movements: ${run.summary.applied_movements}; mean normalized error (all frames): ${run.summary.mean_normalized_error_all_frames.toFixed(3)}; within target (all frames): ${(run.summary.fraction_frames_within_target_region*100).toFixed(1)}%; output-ready: ${(run.summary.output_ready_coverage*100).toFixed(1)}%`;
 const plot=document.getElementById('plot'),p=plot.getContext('2d'),moves=run.applied_movements;p.clearRect(0,0,plot.width,plot.height);p.strokeStyle='#425765';for(let y=0;y<=4;y++){p.beginPath();p.moveTo(0,y*60);p.lineTo(plot.width,y*60);p.stroke();}
 if(moves.length){const maxT=Math.max(1,moves[moves.length-1].applied_ms),maxE=Math.max(1,...moves.map(m=>m.normalized_aim_error));p.strokeStyle='#ffbd52';p.lineWidth=2;p.beginPath();moves.forEach((m,i)=>{const x=m.applied_ms/maxT*plot.width,y=plot.height-m.normalized_aim_error/maxE*plot.height;i?p.lineTo(x,y):p.moveTo(x,y)});p.stroke();}
-setFrame(0);
+if(rows.length)setFrame(0);
 </script></main>)HTML";
         std::cout<<"GPU "<<scene.gpu["name"]<<" frames="<<scene.rows.size()
             <<" applied_moves="<<scene.movements.size()<<" result="<<std::filesystem::absolute(output/"closed-loop.json")<<'\n';

@@ -1,6 +1,8 @@
 #include "benchmark.hpp"
 #include "scene_geometry.hpp"
 #include "closed_loop_scoring.hpp"
+#include "visible_scene.hpp"
+#include "observation_replay.hpp"
 #include "delta/app.hpp"
 #include "delta/detection_dampening.hpp"
 #include "delta/dispatch.hpp"
@@ -124,12 +126,108 @@ Json scoringFrame(int time,int selected,int cls=1) {
         {"intended_present",true},{"intended_observed",true},{"stale",false},{"command",Json::array({1,0})},
         {"error_normalized",0.5},{"filtered_error_normalized",0.25},{"observation_age_ms",8}};
 }
+class CropFragmentReplay:public delta::ITrackingReplay {
+public:
+    std::optional<delta::ReplayFrame> next(const delta::CaptureRegion&)override {
+        if(index==2)return {};
+        return delta::bench::decodeObservation(inputs.at(index++));
+    }
+    void observe(const delta::ReplayResult& result)override{results.push_back(result);}
+    std::vector<delta::ReplayResult> results;
+private:
+    std::size_t index=0;
+    const Json inputs=Json::parse(R"JSON([
+      {"acquire_started_ns":11837764600,"capture":[880,320,800,800],"capture_done_ns":11838983600,"capture_time_ns":1792388482654144200,"detections":[{"bbox":[0,381,29,530],"cls":0,"conf":0.3647775650024414,"x":14.851261138916016,"y":455.8293151855469},{"bbox":[0,380,29,623],"cls":0,"conf":0.2133771777153015,"x":14.655948638916016,"y":501.7427978515625}],"dispatch_feedback":[],"frame_ready_ns":11837789700,"frame_time_ns":11837789700,"mode":1,"now_ns":11850254000,"source_id":112,"source_present_ns":11837733900,"used_cached_frame":false},
+      {"acquire_started_ns":11864819300,"capture":[848,288,864,864],"capture_done_ns":11866273100,"capture_time_ns":1792388482681433500,"detections":[{"bbox":[0,440,12,539],"cls":1,"conf":0.12294378876686096,"x":6.309328079223633,"y":489.9271240234375}],"dispatch_feedback":[],"frame_ready_ns":11864875500,"frame_time_ns":11864875500,"mode":1,"now_ns":11877681400,"source_id":114,"source_present_ns":11856082400,"used_cached_frame":false}
+    ])JSON");
+};
 }
 
 int main() {
     try {
         delta::StaticConfig config; config.screen_w=1280;config.screen_h=720;
         delta::RuntimeConfig runtime;
+        {
+            delta::DetectionDampeningState state;
+            auto policy=runtime;policy.motion_identity_enable=true;policy.motion_stability_enable=true;
+            policy.detection_dampening_stable_frames=2;policy.motion_match_margin=.75F;
+            policy.motion_residual_scale=.5F;policy.motion_prediction_timeout_ms=40;
+            const auto at=[](int ms){return delta::SteadyClock::time_point(std::chrono::milliseconds(ms));};
+            const auto head=[](int x){return delta::Detection{.bbox={x-23,100,x+23,147},.x=float(x),.y=123.5F,.cls=1,.conf=.95F};};
+            delta::noteMotionSelection(state,policy,head(100),{head(100)},at(1000),at(1001));
+            delta::noteMotionSelection(state,policy,head(117),{head(117)},at(1006),at(1007));
+            const auto crossing=delta::noteMotionSelection(state,policy,head(77),{head(77),head(184)},at(1024),at(1025));
+            require(crossing.ambiguous && !crossing.detection && state.last_observation==at(1006),
+                "A physically reachable reversal competitor must prevent a confident identity switch");
+        }
+        {
+            auto cfg=config;cfg.screen_w=2560;cfg.screen_h=1440;
+            auto policy=runtime;policy.motion_stability_enable=true;policy.motion_identity_enable=true;
+            policy.motion_residual_scale=.5F;policy.motion_prediction_timeout_ms=40;
+            policy.motion_match_margin=.75F;policy.motion_prediction_max_displacement_px=30;
+            CropFragmentReplay replay;delta::DeltaApp::replay(cfg,policy,replay);
+            require(!replay.results.back().output_ready,
+                "Crop-clipped detector fragments must not confirm a new motion target");
+            const auto at=[](int ms){return delta::SteadyClock::time_point(std::chrono::milliseconds(ms));};
+            delta::DetectionDampeningState state;
+            policy.detection_dampening_stable_frames=2;
+            const delta::CaptureRegion crop{0,0,250,250};
+            const delta::Detection full{.bbox={100,100,140,150},.x=120,.y=125,.cls=1,.conf=.9F};
+            delta::noteMotionSelection(state,policy,full,{full},at(1000),at(1001),crop);
+            delta::noteMotionSelection(state,policy,full,{full},at(1008),at(1009),crop);
+            const delta::Detection clipped{.bbox={0,100,12,150},.x=6,.y=125,.cls=1,.conf=.9F};
+            const auto predicted=delta::noteMotionSelection(state,policy,clipped,{clipped},at(1016),at(1017),crop);
+            require(predicted.ready && !predicted.detection && state.last_observation==at(1008),
+                "Clipped evidence must preserve only bounded prediction without refreshing the observation");
+            const auto expired=delta::noteMotionSelection(state,policy,clipped,{clipped},at(1050),at(1051),crop);
+            require(!expired.ready && !state.confirmed,
+                "Repeated clipped evidence must not extend the prediction deadline");
+            for(const auto& box:std::vector<std::array<int,4>>{{238,100,249,150},{100,238,150,249}}) {
+                delta::DetectionDampeningState edge_state;
+                const delta::Detection fragment{.bbox=box,.x=(box[0]+box[2])*.5F,.y=(box[1]+box[3])*.5F,.cls=1,.conf=.9F};
+                delta::noteMotionSelection(edge_state,policy,fragment,{fragment},at(1000),at(1001),crop);
+                const auto edge=delta::noteMotionSelection(edge_state,policy,fragment,{fragment},at(1008),at(1009),crop);
+                require(!edge.ready,"Right/bottom last-pixel detector clipping must not confirm a target");
+            }
+        }
+        {
+            const std::vector<delta::bench::SceneIdentityRegions> truth={
+                {1,{100,100,200,300},{100,80,125,105}},
+                {2,{105,100,205,300},{180,80,205,105}}};
+            require(delta::bench::attributeSceneDetection(112,100,1,truth)==1,
+                "Head identity must use linked head regions rather than overlapping body unions");
+            require(delta::bench::attributeSceneDetection(150,180,0,truth)==-2,
+                "Overlapping same-class truth must remain ambiguous");
+        }
+        {
+            FeedbackReplay source;
+            for(int i=0;i<3;++i) {
+                const auto input=source.next({});
+                const auto encoded=delta::bench::encodeObservation(*input);
+                require(delta::bench::encodeObservation(delta::bench::decodeObservation(encoded))==encoded,
+                    "Observation serialization must preserve exact tracking inputs and delivery feedback");
+            }
+        }
+        {
+            constexpr int width=800,height=800;
+            for(const std::uint32_t id:{1U,0x12345678U,0xffffffffU}) {
+                std::vector<std::uint8_t> pixels(width*height*4,0);
+                delta::bench::writeSceneMarker(pixels,width,height,id);
+                delta::FramePacket captured;captured.width=320;captured.height=320;
+                captured.capture={240,240,320,320};captured.bgr.resize(320*320*3);
+                for(int y=0;y<320;++y)for(int x=0;x<320;++x)
+                    std::copy_n(pixels.data()+((y+240)*width+x+240)*4,3,captured.bgr.data()+(y*320+x)*3);
+                require(delta::bench::readSceneMarker(captured,width,height)==id,
+                    "Desktop provenance marker must survive a production-sized BGR crop");
+                const int at=((400+140-240+5)*320+(400-48-240+1))*3;
+                captured.bgr[at]=captured.bgr[at+1]=captured.bgr[at+2]=pixels[((400+141)*width+353)*4];
+                require(!delta::bench::readSceneMarker(captured,width,height),
+                    "Torn or corrupt provenance must not produce a valid scene link");
+                captured.capture.left=0;
+                require(!delta::bench::readSceneMarker(captured,width,height),
+                    "A crop excluding the marker must not receive scene provenance");
+            }
+        }
         {
             auto policy=runtime;policy.detection_dampening_enable=false;policy.target_guard_enable=false;
             FeedbackReplay replay;delta::DeltaApp::replay(config,policy,replay);

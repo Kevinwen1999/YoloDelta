@@ -40,7 +40,7 @@ struct MotionSelection {
 MotionSelection noteMotionSelection(DetectionDampeningState& state,
     const RuntimeConfig& config, const std::optional<Detection>& proposed,
     const std::vector<Detection>& candidates, SteadyClock::time_point observed,
-    SteadyClock::time_point now);
+    SteadyClock::time_point now,std::optional<CaptureRegion> observed_crop=std::nullopt);
 
 struct DetectionDampeningResult {
     bool ready = true;

@@ -1,5 +1,6 @@
 #include "delta/app.hpp"
 #include "delta/dispatch.hpp"
+#include "delta/timing.hpp"
 #include "delta/capture_focus.hpp"
 #include "delta/detection_dampening.hpp"
 #include "delta/mouse_suppression.hpp"
@@ -240,32 +241,6 @@ enum class ControlPerfKind {
     Other,
     Fresh,
     Servo,
-};
-
-class ScopedTimerResolution {
-public:
-    explicit ScopedTimerResolution(const unsigned int period_ms) : period_ms_(period_ms) {
-#if defined(_WIN32)
-        active_ = timeBeginPeriod(period_ms_) == 0;
-#else
-        (void)period_ms_;
-#endif
-    }
-
-    ScopedTimerResolution(const ScopedTimerResolution&) = delete;
-    ScopedTimerResolution& operator=(const ScopedTimerResolution&) = delete;
-
-    ~ScopedTimerResolution() {
-#if defined(_WIN32)
-        if (active_) {
-            timeEndPeriod(period_ms_);
-        }
-#endif
-    }
-
-private:
-    unsigned int period_ms_ = 0;
-    bool active_ = false;
 };
 
 bool risingEdge(const bool current, const bool previous) {
@@ -2175,7 +2150,7 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             MotionSelection motion_selection;
             if (motion_stability && !debug_overlay_observe_active) {
                 motion_selection = noteMotionSelection(detection_dampening_state, runtime,
-                    sticky ? sticky->detection : std::nullopt, aim_pool.candidates, frame_time, steadyNow());
+                    sticky ? sticky->detection : std::nullopt, aim_pool.candidates, frame_time, steadyNow(),capture_region);
                 if (replay) {
                     replay_result.motion_ambiguous=motion_selection.ambiguous;
                     replay_result.motion_decision=motion_selection.decision;
@@ -3389,8 +3364,8 @@ void DeltaApp::controlLoop() {
             if (schedule.fresh) recordAimSchedulerPerf(*perf_,false,true,false,false,false,false);
             if (schedule.servo) recordAimSchedulerPerf(*perf_,false,false,true,false,false,false);
             if (schedule.zero_servo) recordAimSchedulerPerf(*perf_,false,false,false,false,false,true);
-            if (schedule.timed_out_pending) {
-                const auto& expired=*schedule.timed_out_pending;
+            if (schedule.timed_out_pending || schedule.rejected_prediction) {
+                const auto& expired=schedule.timed_out_pending?*schedule.timed_out_pending:*schedule.rejected_prediction;
                 recordControlPerf(*perf_,controlPerfKind(expired),
                     secondsSince(expired.cmd_generated,command_wake_tick),false,0.0,true,false,
                     expired.frame_ready==SteadyClock::time_point{} ? std::nullopt

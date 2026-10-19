@@ -18,4 +18,7 @@
 !/tests/check_benchmark_report.cjs
 !/tests/check_closed_loop_report.cjs
 !/tests/test_dispatch.cpp
+!/tests/check_visible_capture.ps1
+!/tests/check_scene_response.ps1
+!/tests/check_observation_replay.ps1
 /__pycache__/

@@ -52,7 +52,7 @@ void DetectionDampeningState::reset() {
 MotionSelection noteMotionSelection(DetectionDampeningState& state,
     const RuntimeConfig& config, const std::optional<Detection>& proposed,
     const std::vector<Detection>& candidates, SteadyClock::time_point observed,
-    SteadyClock::time_point now) {
+    SteadyClock::time_point now,std::optional<CaptureRegion> observed_crop) {
     MotionSelection result;
     const auto ms = [](auto a, auto b) { return std::chrono::duration<double,std::milli>(b-a).count(); };
     const double timeout = std::max(1.0F, config.motion_prediction_timeout_ms);
@@ -71,16 +71,28 @@ MotionSelection noteMotionSelection(DetectionDampeningState& state,
         result.decision="duplicate_observation";
         return result;
     }
+    const auto complete=[&](const Detection& d) {
+        if(!observed_crop)return true;
+        const auto& crop=*observed_crop;
+        return d.bbox[0]>crop.left && d.bbox[1]>crop.top
+            && d.bbox[2]<crop.left+crop.width-1 && d.bbox[3]<crop.top+crop.height-1;
+    };
+    std::vector<Detection> eligible;
+    for(const auto& candidate:candidates)if(complete(candidate))eligible.push_back(candidate);
+    const auto proposal=proposed && complete(*proposed)?proposed:std::optional<Detection>{};
+    if((eligible.empty() && !candidates.empty()) || (!config.motion_identity_enable && proposed && !proposal)) {
+        result.decision="clipped_observation";return result;
+    }
     std::vector<Detection> distinct_candidates;
     if(config.motion_identity_enable) {
-        for(const auto& candidate:candidates) {
+        for(const auto& candidate:eligible) {
             const auto existing=std::find_if(distinct_candidates.begin(),distinct_candidates.end(),
                 [&](const Detection& other){return other.cls==candidate.cls && other.bbox==candidate.bbox;});
             if(existing==distinct_candidates.end())distinct_candidates.push_back(candidate);
             else if(candidate.conf>existing->conf)*existing=candidate;
         }
     }
-    std::optional<Detection> accepted = proposed;
+    std::optional<Detection> accepted = proposal;
     bool new_candidate = !state.accepted_detection;
     if (state.accepted_detection) {
         const auto& previous = *state.accepted_detection;
@@ -122,12 +134,27 @@ MotionSelection noteMotionSelection(DetectionDampeningState& state,
             if (accepted && second-best < config.motion_match_margin) {
                 accepted.reset(); result.ambiguous=true;result.decision="ambiguous_match";
             }
+            if(accepted) {
+                // A direction/prediction gate may reject the real target during
+                // camera-induced reversal. It must not make a reachable rival
+                // look uniquely identified. Compare these alternatives in the
+                // same displacement-based metric used for reconfirmation.
+                const float accepted_displacement=cost(*accepted,true);
+                for(const auto& candidate:distinct_candidates) {
+                    if(candidate.cls!=previous.cls || std::isfinite(cost(candidate)))continue;
+                    const float alternate=cost(candidate,true);
+                    if(std::isfinite(alternate) && alternate-accepted_displacement<config.motion_match_margin) {
+                        result.matches.emplace_back(candidate,alternate);
+                        accepted.reset();result.ambiguous=true;result.decision="ambiguous_motion_change";break;
+                    }
+                }
+            }
         } else if (accepted && !std::isfinite(cost(*accepted))) accepted.reset();
         if (!accepted) {
             // Visible but inconsistent evidence can be a reversal or camera shake.
             // A unique, physically reachable observation starts a new acquisition.
             // It cannot move until a second distinct observation confirms it.
-            if (!candidates.empty() && !result.ambiguous) {
+            if (!eligible.empty() && !result.ambiguous) {
                 result.ready=false;
                 result.decision="inconsistent_motion";
                 std::optional<Detection> reacquire;
@@ -141,7 +168,7 @@ MotionSelection noteMotionSelection(DetectionDampeningState& state,
                     if (reacquire && second-best<config.motion_match_margin) {
                         reacquire.reset();result.ambiguous=true;result.decision="ambiguous_reacquisition";
                     }
-                } else if(proposed && std::isfinite(cost(*proposed,true))) reacquire=proposed;
+                } else if(proposal && std::isfinite(cost(*proposal,true))) reacquire=proposal;
                 if (reacquire) {
                     state.reset();
                     state.accepted_detection=reacquire;state.last_selected_bbox=reacquire->bbox;

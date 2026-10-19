@@ -1,4 +1,8 @@
 param(
+    [ValidateSet('controlled', 'visible')][string]$Mode = 'controlled',
+    [ValidateRange(640,7680)][int]$ScreenWidth = 2560,
+    [ValidateRange(640,4320)][int]$ScreenHeight = 1440,
+    [ValidateRange(0.000001,0.05)][double]$MouseRadiansPerCount = 0.0007,
     [ValidateRange(10, 10000)][int]$Frames = 200,
     [ValidateRange(0, 6000)][double]$Speed = 1500,
     [ValidateRange(0.25, 2)][double]$Scale = 1,
@@ -29,7 +33,9 @@ if (!$SkipBuildAndTests) {
     if ($LASTEXITCODE) { throw 'Benchmark integration checks failed.' }
 }
 if (!$Output) { $Output = Join-Path $portRoot ('benchmark-results/closed-loop-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff')) }
-$argsForRunner = @('--output', $Output, '--provider', $Provider, '--frames', $Frames,
+$argsForRunner = @('--mode', $Mode, '--output', $Output, '--provider', $Provider, '--frames', $Frames,
+    '--screen-width', $ScreenWidth, '--screen-height', $ScreenHeight,
+    '--mouse-radians-per-count', $MouseRadiansPerCount,
     '--speed', $Speed, '--scale', $Scale, '--cadence-ms', $CadenceMs,
     '--inference-delay-ms', $InferenceDelayMs, '--scenario', $Scenario)
 if ($Config) { $argsForRunner += @('--config', (Resolve-Path -LiteralPath $Config).Path) }

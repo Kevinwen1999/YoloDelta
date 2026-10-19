@@ -8,7 +8,7 @@ $runs = foreach ($row in $rows) {
     $run = Get-Content -LiteralPath (Join-Path $SuiteRoot "$directory/closed-loop.json") -Raw | ConvertFrom-Json
     if ($run.schema_version -lt 2 -or !$run.validity.valid) { throw "Comparison requires valid schema 2 results: $directory" }
     if ($run.correctness -and !$run.correctness.passed) { throw "Comparison contains correctness violations: $directory" }
-    $signature = ConvertTo-Json -InputObject @($run.fingerprints,$run.scene,$run.gpu.name,$run.gpu.ordinal,$run.build.source_hash) -Depth 12 -Compress
+    $signature = ConvertTo-Json -InputObject @($run.scope,$run.capture_hardware,$run.fingerprints,$run.scene,$run.gpu.name,$run.gpu.ordinal,$run.build.source_hash) -Depth 12 -Compress
     if ($references.ContainsKey($row.Case) -and $references[$row.Case] -ne $signature) {
         throw "Paired runs differ in scene, assets, model, hardware or source: $($row.Case)"
     }
@@ -16,7 +16,7 @@ $runs = foreach ($row in $rows) {
     $unattributed = @($run.applied_movements | Where-Object { $_.selected_truth_id -lt 0 }).Count
     $run.summary | Add-Member -NotePropertyName 'unattributed_movements' -NotePropertyValue $unattributed -Force
     [pscustomobject]@{ case=$row.Case; variant=$row.Variant; directory=$directory;
-        frames=$run.frames; summary=$run.summary; gpu=$run.gpu; scene=$run.scene }
+        frames=$run.frames; summary=$run.summary; gpu=$run.gpu; scene=$run.scene; mode=$run.mode; desktop=$(if($run.scene.viewport){$run.scene.viewport}else{$run.capture_hardware.desktop_size}) }
 }
 $dataJson = ConvertTo-Json -InputObject @($runs) -Depth 25 -Compress
 $dataJson = $dataJson.Replace('<','\u003c')
@@ -29,10 +29,11 @@ $html = @'
 <section><table><thead><tr><th>Metric</th><th>Baseline</th><th>Motion candidate</th></tr></thead><tbody id="metrics"></tbody></table></section>
 <script id="runs" type="application/json">__RUN_DATA__</script><script>
 const runs=JSON.parse(document.getElementById('runs').textContent),variants=['baseline','motion-identity'];
+if(runs[0].mode==='visible')document.querySelector('main>p').textContent='Visible-screen GPU runs with production DXGI capture and real-time scheduling. No mouse or serial output. Paired frames align by observation index; each run has its own actual timestamps. Camera response and cutouts remain exploratory.';
 const cases=document.getElementById('cases'),scrub=document.getElementById('scrub');let frame=0;
 for(const name of [...new Set(runs.map(r=>r.case))]){const o=document.createElement('option');o.textContent=name;o.value=name;cases.append(o);}
 function selected(v){return runs.find(r=>r.case===cases.value&&r.variant===v);}
-function draw(v){const run=selected(v),idx=frame,name=cases.value,r=run.frames[idx],img=new Image();img.onload=()=>{if(frame!==idx||cases.value!==name)return;const canvas=document.getElementById(v);canvas.width=r.capture[2];canvas.height=r.capture[3];const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0);function box(b,color){ctx.strokeStyle=color;ctx.lineWidth=2;ctx.strokeRect(b[0]-r.capture[0],b[1]-r.capture[1],b[2]-b[0],b[3]-b[1]);}for(const t of r.truth_boxes)box(t.bbox,t.id===1?'#42f59b':'#df8dff');for(const d of r.detector_boxes)box(d.bbox,d.selected?'#ffbd52':'#67b7ff');const x=400-r.capture[0],y=400-r.capture[1];ctx.strokeStyle='white';ctx.beginPath();ctx.moveTo(x-9,y);ctx.lineTo(x+9,y);ctx.moveTo(x,y-9);ctx.lineTo(x,y+9);ctx.stroke();};img.src=`${run.directory}/${r.image}`;
+function draw(v){const run=selected(v),idx=frame,name=cases.value,r=run.frames[idx],img=new Image();img.onload=()=>{if(frame!==idx||cases.value!==name)return;const canvas=document.getElementById(v);canvas.width=r.capture[2];canvas.height=r.capture[3];const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0);function box(b,color){ctx.strokeStyle=color;ctx.lineWidth=2;ctx.strokeRect(b[0]-r.capture[0],b[1]-r.capture[1],b[2]-b[0],b[3]-b[1]);}for(const t of r.truth_boxes)box(t.bbox,t.id===1?'#42f59b':'#df8dff');for(const d of r.detector_boxes)box(d.bbox,d.selected?'#ffbd52':'#67b7ff');const x=(run.desktop?.[0]||800)/2-r.capture[0],y=(run.desktop?.[1]||800)/2-r.capture[1];ctx.strokeStyle='white';ctx.beginPath();ctx.moveTo(x-9,y);ctx.lineTo(x+9,y);ctx.moveTo(x,y-9);ctx.lineTo(x,y+9);ctx.stroke();};img.src=`${run.directory}/${r.image}`;
 document.getElementById(`${v}-state`).textContent=`Scene ${r.scene_state_id} | render ${r.render_ms} ms | available ${r.available_ms} ms | detections ${r.detections} | output ready ${r.output_ready} | ${r.motion_decision||'legacy policy'} | selected identity ${r.selected_truth_id}`;document.getElementById(`${v}-link`).href=`${run.directory}/report.html`;}
 function update(){
   const a=selected('baseline'),b=selected('motion-identity');

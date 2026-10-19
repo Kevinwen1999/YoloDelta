@@ -78,6 +78,7 @@ private:
 struct AimScheduleResult {
     std::optional<CommandPacket> command;
     std::optional<CommandPacket> timed_out_pending;
+    std::optional<CommandPacket> rejected_prediction;
     bool budget_due=false;
     bool fresh=false;
     bool servo=false;
@@ -154,6 +155,16 @@ public:
                     result.servo=true;
                 } else result.zero_servo=true;
             } else if (!servo.valid || !engaged || age>max_age) carry_x_=carry_y_=0.0;
+        }
+        // Leave one configured send interval for delivery/wake variation. This
+        // applies only to explicit prediction deadlines; ordinary selection and
+        // observation-age policy remain unchanged. Receivers can still be late,
+        // so simulated application continues to audit the actual deadline.
+        if(result.command && is_aim(*result.command)
+            && result.command->expires_at!=SteadyClock::time_point{}
+            && now+interval>result.command->expires_at) {
+            result.rejected_prediction=result.command;result.command.reset();
+            result.fresh=false;result.servo=false;carry_x_=carry_y_=0;
         }
         return result;
     }

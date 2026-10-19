@@ -7,6 +7,7 @@
 #include "delta/core.hpp"
 #include "delta/debug_preview_types.hpp"
 #include "delta/tracking.hpp"
+#include "delta/runtime_state.hpp"
 
 namespace delta {
 

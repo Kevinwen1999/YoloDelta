@@ -1,4 +1,6 @@
 param(
+    [ValidateSet('controlled', 'visible')][string]$Mode = 'controlled',
+    [ValidateRange(0.000001,0.05)][double]$MouseRadiansPerCount = 0.0007,
     [switch]$Broad,
     [string]$OutputRoot
 )
@@ -34,6 +36,8 @@ foreach ($case in $cases) {
     foreach ($variant in @('baseline','motion-identity')) {
         $output = Join-Path $OutputRoot ($case.Name + '-' + $variant)
         $argsForRun = @{
+            Mode=$Mode;
+            MouseRadiansPerCount=$MouseRadiansPerCount;
             Frames=$case.Frames; Speed=$case.Speed; Scale=$case.Scale;
             CadenceMs=$case.Cadence; InferenceDelayMs=[math]::Min(5,$case.Cadence);
             Scenario=$case.Scenario; Output=$output
@@ -47,6 +51,7 @@ foreach ($case in $cases) {
         if (!$result.validity.valid) { throw "Invalid closed-loop run: $output" }
         if (!$result.correctness.passed) { throw "Closed-loop correctness checks failed or are missing: $output" }
         $rows.Add([pscustomobject]@{
+            Mode=$Mode;
             Case=$case.Name; Variant=$variant; Scenario=$case.Scenario;
             SpeedPxS=$case.Speed; Scale=$case.Scale; CadenceMs=$case.Cadence;
             Frames=$result.summary.frames;
