@@ -144,6 +144,16 @@ private:
 }
 
 int main() {
+    {
+        const double a=delta::bench::constantAngularTargetAngle(0,6000,1800);
+        const double b=delta::bench::constantAngularTargetAngle(100,6000,1800);
+        const double c=delta::bench::constantAngularTargetAngle(200,6000,1800);
+        require(std::abs((b-a)-(c-b))<1e-9,"Constant-motion scene must not insert speed-dependent reversals");
+        require(delta::bench::projectAngularTargetX(3.141592653589793,1800,2560)<0,
+            "Targets behind the camera must stay outside the rendered view");
+        require(delta::bench::projectAngularTargetX(0,1800,2560)==1280,
+            "Aligned target must project to screen center");
+    }
     try {
         delta::StaticConfig config; config.screen_w=1280;config.screen_h=720;
         delta::RuntimeConfig runtime;

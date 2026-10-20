@@ -36,7 +36,9 @@ const { pathToFileURL } = require('node:url');
       const select=document.getElementById('cases');
       check(select.options.length===new Set(runs.map(r=>r.case)).size && select.options.length>=4,
         'Suite must show all paired cases');
-      select.value='crossing-1500';select.dispatchEvent(new Event('change'));
+      const crossing=[...select.options].find(o=>o.value.includes('crossing'))?.value;
+      check(crossing,'Suite must include a crossing case');
+      select.value=crossing;select.dispatchEvent(new Event('change'));
       const scrub=document.getElementById('scrub');scrub.value=65;scrub.dispatchEvent(new Event('input'));
       document.getElementById('next').click();check(frame===66,'Synchronized frame step failed');
       document.getElementById('back').click();check(frame===65,'Backward frame step failed');
@@ -44,7 +46,7 @@ const { pathToFileURL } = require('node:url');
       for(const variant of variants){
         check(document.getElementById(variant).width>300,'Missing scene image');
         check(document.getElementById(variant+'-state').textContent.includes('Scene 66'),'Panels are not synchronized');
-        check(document.getElementById(variant+'-link').getAttribute('href').includes('crossing-1500'),'Report link points to wrong case');
+        check(document.getElementById(variant+'-link').getAttribute('href').includes(crossing),'Report link points to wrong case');
       }
       check(document.querySelectorAll('#metrics tr').length===8,'Missing selection/following/ambiguity comparison metrics');
       if(runs[0].mode==='visible')check(document.querySelector('main>p').textContent.includes('real-time scheduling'),

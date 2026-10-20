@@ -8,7 +8,7 @@ param(
     [ValidateRange(0.25, 2)][double]$Scale = 1,
     [ValidateRange(2, 50)][double]$CadenceMs = 8,
     [ValidateRange(1, 50)][double]$InferenceDelayMs = 5,
-    [ValidateSet('clean', 'occlusion', 'dropout', 'shake', 'crossing')][string]$Scenario = 'clean',
+    [ValidateSet('clean', 'linear', 'occlusion', 'dropout', 'shake', 'crossing')][string]$Scenario = 'clean',
     [ValidateSet('cuda', 'tensorrt')][string]$Provider = 'tensorrt',
     [switch]$SkipBuildAndTests,
     [string]$Config,

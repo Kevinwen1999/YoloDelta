@@ -58,6 +58,11 @@ RuntimeConfig runtimeFromJson(const Json& input) {
         || config.detection_box_scale <= 0 || config.adaptive_capture_crop_min_size <= 0
         || config.adaptive_capture_crop_max_size < config.adaptive_capture_crop_min_size)
         throw std::invalid_argument("Invalid timeout, movement limit, box scale or crop bounds");
+    if (config.calibrated_pixels_per_count_x < .001F || config.calibrated_pixels_per_count_x > 100
+        || config.calibrated_pixels_per_count_y < .001F || config.calibrated_pixels_per_count_y > 100
+        || config.calibrated_response_time_s < .02F || config.calibrated_response_time_s > 1
+        || config.calibrated_response_delay_ms<0 || config.calibrated_response_delay_ms>50)
+        throw std::invalid_argument("Invalid calibrated response: pixels/count .001..100, response time .02..1s");
     return config;
 }
 

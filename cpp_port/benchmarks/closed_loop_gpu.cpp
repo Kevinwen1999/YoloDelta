@@ -196,14 +196,13 @@ public:
         const double fx=(config_.screen_w/2.0)/std::tan(params_.hfov_deg*pi/360.0);
         const double target_angle=worldAngle(render_ms,fx);
         const double shake_yaw=externalYaw(render_ms),shake_pitch=externalPitch(render_ms);
-        const int center_x=static_cast<int>(std::lround(config_.screen_w/2.0+fx*std::tan(target_angle-camera_yaw_-shake_yaw)));
+        const int center_x=static_cast<int>(std::lround(screenX(target_angle-camera_yaw_-shake_yaw,fx)));
         const double fy=(config_.screen_h/2.0)/std::tan(params_.vfov_deg*pi/360.0);
         const int center_y=static_cast<int>(std::lround(config_.screen_h/2.0-fy*std::tan(camera_pitch_+shake_pitch)));
         const int width=std::max(8,static_cast<int>(std::lround((box_[2]-box_[0])*params_.scale)));
         const int height=std::max(8,static_cast<int>(std::lround((box_[3]-box_[1])*params_.scale)));
         const int left=center_x-width/2,top=center_y-height/2;
-        const int secondary_left=static_cast<int>(std::lround(config_.screen_w/2.0
-            +fx*std::tan(-target_angle-camera_yaw_-shake_yaw)))-width/2;
+        const int secondary_left=static_cast<int>(std::lround(screenX(-target_angle-camera_yaw_-shake_yaw,fx)))-width/2;
         const auto [aim_x,aim_y]=aimPoint(center_x,center_y,0);
         const auto [head_x,head_y]=aimPoint(center_x,center_y,1);
         const auto identity_box=delta::bench::projectIdentityBox(body_box_,head_box_,box_,center_x,center_y,params_.scale);
@@ -349,11 +348,11 @@ private:
         const double fx=(config_.screen_w/2.0)/std::tan(params_.hfov_deg*pi/360.0);
         const double fy=(config_.screen_h/2.0)/std::tan(params_.vfov_deg*pi/360.0);
         const double angle=worldAngle(at,fx),shake=externalYaw(at),shake_y=externalPitch(at);
-        const int x=static_cast<int>(std::lround(config_.screen_w/2.0+fx*std::tan(angle-yaw-shake)));
+        const int x=static_cast<int>(std::lround(screenX(angle-yaw-shake,fx)));
         const int y=static_cast<int>(std::lround(config_.screen_h/2.0-fy*std::tan(pitch+shake_y)));
         const int width=std::max(8,static_cast<int>(std::lround((box_[2]-box_[0])*params_.scale)));
         const int height=std::max(8,static_cast<int>(std::lround((box_[3]-box_[1])*params_.scale)));
-        const int other=static_cast<int>(std::lround(config_.screen_w/2.0+fx*std::tan(-angle-yaw-shake)));
+        const int other=static_cast<int>(std::lround(screenX(-angle-yaw-shake,fx)));
         render(x-width/2,y-height/2,width,height,at,other-width/2,yaw,pitch);
         delta::bench::writeSceneMarker(full_,config_.screen_w,config_.screen_h,id);
         const auto body=aimPoint(x,y,0),head=aimPoint(x,y,1);
@@ -373,7 +372,7 @@ private:
         addClassRegions(state,x,y,other);
         return state;
     }
-    void startVisible() {
+    void startVisible(const delta::CaptureRegion& initial_crop) {
         timer_resolution_.emplace(1);
         if(!timer_resolution_->active())throw std::runtime_error("Production Windows timer resolution unavailable");
         display_=delta::bench::captureDisplay(config_);
@@ -389,11 +388,19 @@ private:
         capture_=delta::makeDefaultCaptureSource(config_);
         capture_->setFreshOnly(runtime_.async_gpu_capture_fresh_only_enable);
         capture_->setCachedFrameTimeoutMs(runtime_.capture_cached_timeout_ms);
-        realtime_start_=delta::SteadyClock::now();
+        // Initialize the lazy capture device before starting world motion. The
+        // discarded desktop frame is setup, not an observation or scored image.
+        const auto warmup_start=delta::SteadyClock::now();
+        (void)capture_->grab(initial_crop);
+        capture_info["capture_warmup_ms"]=std::chrono::duration<double,std::milli>(delta::SteadyClock::now()-warmup_start).count();
+        capture_info["motion_clock_start"]="after capture warm-up and scene window setup";
         std::cout<<"VISIBLE-SCREEN SIMULATION: no mouse/serial output. Scene occupies the configured capture display.\n";
         render_thread_=std::thread([this] {
             try {
                 delta::bench::VisibleSceneWindow window(display_);
+                // Publishing the handle also publishes the initialized clock
+                // to capture and dispatch. Window setup must not move targets.
+                realtime_start_=delta::SteadyClock::now();
                 window_.store(window.handle());
                 auto deadline=delta::SteadyClock::now();
                 std::uint32_t id=0;
@@ -414,6 +421,9 @@ private:
         });
         dispatch_thread_=std::thread([this] {
             try {
+                while(!stop_.load() && !window_.load())
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if(stop_.load())return;
                 while(!stop_.load()) {
                     double next;
                     {std::lock_guard lock(realtime_mutex_);
@@ -435,7 +445,7 @@ private:
     std::optional<delta::ReplayFrame> nextVisible(const delta::CaptureRegion& proposed) {
         if(index_>=params_.frames)return std::nullopt;
         try {
-            if(!capture_)startVisible();
+            if(!capture_)startVisible(proposed);
             const auto timeout=delta::SteadyClock::now()+std::chrono::seconds(5);
             std::optional<delta::FramePacket> captured;Json state;
             while(!stop_.load() && delta::SteadyClock::now()<timeout) {
@@ -569,9 +579,14 @@ private:
         }
     }
     double worldAngle(double at_ms,double fx)const {
+        if(params_.scenario=="linear")return delta::bench::constantAngularTargetAngle(at_ms,params_.speed,fx);
         const double phase=std::fmod(at_ms*params_.speed/1000.0,1000.0);
         const double independent_x=phase<=500?phase-250:750-phase;
         return std::atan((120.0+independent_x)/fx);
+    }
+    double screenX(double angle,double fx)const {
+        return params_.scenario=="linear" ? delta::bench::projectAngularTargetX(angle,fx,config_.screen_w)
+            : config_.screen_w/2.0+fx*std::tan(angle);
     }
     std::pair<double,double> aimPoint(double center_x,double center_y,int cls)const {
         const auto& source=cls==1?head_box_:body_box_;
@@ -582,8 +597,8 @@ private:
         camera_pitch_+=event.dy*params_.mouse_radians_per_count;
         const double fx=(config_.screen_w/2.0)/std::tan(params_.hfov_deg*pi/360.0);
         const double fy=(config_.screen_h/2.0)/std::tan(params_.vfov_deg*pi/360.0);
-        const double body_x=config_.screen_w/2.0+fx*std::tan(
-            worldAngle(event.time_ms,fx)-camera_yaw_-externalYaw(event.time_ms));
+        const double body_x=screenX(
+            worldAngle(event.time_ms,fx)-camera_yaw_-externalYaw(event.time_ms),fx);
         const double body_center_y=config_.screen_h/2.0-fy*std::tan(camera_pitch_+externalPitch(event.time_ms));
         const auto identity_box=delta::bench::projectIdentityBox(body_box_,head_box_,box_,body_x,body_center_y,params_.scale);
         const auto [truth_x,truth_y]=aimPoint(body_x,body_center_y,event.aim_class);
@@ -744,7 +759,7 @@ int main(int argc,char** argv) {
             else if(key=="--box") {
                 const std::string input=value();if(std::sscanf(input.c_str(),"%d,%d,%d,%d",&box[0],&box[1],&box[2],&box[3])!=4)
                     throw std::invalid_argument("--box needs x1,y1,x2,y2");
-            } else if(key=="--help") {std::cout<<"delta_closed_loop_gpu --output NEW_DIRECTORY [--mode controlled|visible] [--image FILE] [--background FILE] [--box x1,y1,x2,y2] [--frames 200] [--speed 1500] [--scale 1] [--cadence-ms 8] [--scenario clean|occlusion|dropout|shake|crossing] [--config FILE] [--gpu-device 1]\n";return 0;}
+            } else if(key=="--help") {std::cout<<"delta_closed_loop_gpu --output NEW_DIRECTORY [--mode controlled|visible] [--image FILE] [--background FILE] [--box x1,y1,x2,y2] [--frames 200] [--speed 1500] [--scale 1] [--cadence-ms 8] [--scenario clean|linear|occlusion|dropout|shake|crossing] [--config FILE] [--gpu-device 1]\n";return 0;}
             else throw std::invalid_argument("Unknown argument "+key);
         }
         if(image.empty() || output.empty() || params.frames<10 || params.frames>10000
@@ -759,7 +774,7 @@ int main(int argc,char** argv) {
             || !std::isfinite(params.vfov_deg) || params.vfov_deg<20 || params.vfov_deg>150
             || !std::isfinite(params.mouse_radians_per_count) || params.mouse_radians_per_count<=0 || params.mouse_radians_per_count>.05
             || (params.scenario!="clean" && params.scenario!="occlusion" && params.scenario!="dropout"
-                && params.scenario!="shake" && params.scenario!="crossing"))
+                && params.scenario!="shake" && params.scenario!="crossing" && params.scenario!="linear"))
             throw std::invalid_argument("Provide image, new output directory, 10..10000 frames and speed 0..6000");
         if(std::filesystem::exists(output))throw std::invalid_argument("Output directory already exists");
         if(params.visible) {
@@ -792,6 +807,7 @@ int main(int argc,char** argv) {
             {"scene",{{"image",image.string()},{"viewport",{config.screen_w,config.screen_h}},
                 {"background",background.string()},{"sprite_box",box},
                 {"speed_px_s",params.speed},{"scale",params.scale},{"scenario",params.scenario},
+                {"motion_model",params.scenario=="linear"?"constant_angular_velocity":"triangle_wave_500px_legs"},
                 {"crossing_distractor_visible_after_ms",40},
                 {"horizontal_fov_deg",params.hfov_deg},{"vertical_fov_deg",params.vfov_deg},
                 {"mouse_radians_per_count",params.mouse_radians_per_count},

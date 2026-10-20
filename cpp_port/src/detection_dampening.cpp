@@ -1,4 +1,5 @@
 #include "delta/detection_dampening.hpp"
+#include "delta/calibrated_control.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -52,7 +53,8 @@ void DetectionDampeningState::reset() {
 MotionSelection noteMotionSelection(DetectionDampeningState& state,
     const RuntimeConfig& config, const std::optional<Detection>& proposed,
     const std::vector<Detection>& candidates, SteadyClock::time_point observed,
-    SteadyClock::time_point now,std::optional<CaptureRegion> observed_crop) {
+    SteadyClock::time_point now,std::optional<CaptureRegion> observed_crop,
+    std::pair<float,float> camera_displacement,std::pair<float,float> camera_displacement_now) {
     MotionSelection result;
     const auto ms = [](auto a, auto b) { return std::chrono::duration<double,std::milli>(b-a).count(); };
     const double timeout = std::max(1.0F, config.motion_prediction_timeout_ms);
@@ -61,7 +63,10 @@ MotionSelection noteMotionSelection(DetectionDampeningState& state,
     }
     result.ready = state.confirmed;
     if (state.confirmed)result.decision="bounded_prediction";
-    if (state.confirmed && std::hypot(state.vx,state.vy)*ms(state.last_observation,now)/1000.0
+    const float prediction_dt=static_cast<float>(ms(state.last_observation,now)/1000.0)
+        +(calibratedControlActive(config)?config.calibrated_response_delay_ms/1000.0F:0.0F);
+    if (state.confirmed && std::hypot(state.vx*prediction_dt-camera_displacement_now.first,
+        state.vy*prediction_dt-camera_displacement_now.second)
         > config.motion_prediction_max_displacement_px) {result.ready=false;result.decision="prediction_displacement_limit";}
     if (observed == SteadyClock::time_point{} || observed > now || ms(observed,now) > timeout) {
         result.decision="invalid_observation_time";return result;
@@ -108,7 +113,8 @@ MotionSelection noteMotionSelection(DetectionDampeningState& state,
             const float wr = std::max(1,d.bbox[2]-d.bbox[0])/width;
             const float hr = std::max(1,d.bbox[3]-d.bbox[1])/height;
             if (!class_change && (wr<0.4F || wr>2.5F || hr<0.4F || hr>2.5F)) return std::numeric_limits<float>::infinity();
-            const float move_x=d.x-previous.x,move_y=d.y-previous.y;
+            const float move_x=d.x-previous.x+camera_displacement.first;
+            const float move_y=d.y-previous.y+camera_displacement.second;
             if(!class_change && std::hypot(move_x,move_y)>std::max(width,config.motion_max_speed_px_s*dt))
                 return std::numeric_limits<float>::infinity();
             const float reversal_gate=std::max(1.0F,width*config.motion_residual_scale);
@@ -116,8 +122,8 @@ MotionSelection noteMotionSelection(DetectionDampeningState& state,
                 && std::hypot(move_x,move_y)>reversal_gate
                 && std::hypot(state.vx,state.vy)*dt>reversal_gate)
                 return std::numeric_limits<float>::infinity();
-            const float residual = reacquiring ? std::hypot(d.x-previous.x,d.y-previous.y)
-                : std::hypot(d.x-previous.x-state.vx*dt,d.y-previous.y-state.vy*dt);
+            const float residual = reacquiring ? std::hypot(move_x,move_y)
+                : std::hypot(move_x-state.vx*dt,move_y-state.vy*dt);
             const float match_radius = reacquiring ? std::max(width,config.motion_max_speed_px_s*dt) : radius;
             const float limit = class_change ? std::max(match_radius,height) : match_radius;
             return residual <= limit ? residual/std::max(1.0F,limit) : std::numeric_limits<float>::infinity();
@@ -185,13 +191,15 @@ MotionSelection noteMotionSelection(DetectionDampeningState& state,
             }
             return result;
         }
-        result.residual_px = std::hypot(accepted->x-previous.x-state.vx*dt,accepted->y-previous.y-state.vy*dt);
+        result.residual_px = std::hypot(accepted->x-previous.x+camera_displacement.first-state.vx*dt,
+            accepted->y-previous.y+camera_displacement.second-state.vy*dt);
         if (!state.confirmed && ms(state.confirmation_started,observed) > config.motion_confirmation_window_ms) {
             state.reset(); new_candidate=true;
         } else {
             // Head/body transitions change the aim point, not target velocity.
             if (accepted->cls == previous.cls) {
-                const float raw_x=(accepted->x-previous.x)/dt, raw_y=(accepted->y-previous.y)/dt;
+                const float raw_x=(accepted->x-previous.x+camera_displacement.first)/dt;
+                const float raw_y=(accepted->y-previous.y+camera_displacement.second)/dt;
                 const float alpha=state.stable_frame_count<2?1.0F:0.5F;
                 state.vx += alpha*(raw_x-state.vx);state.vy += alpha*(raw_y-state.vy);
                 const float speed=std::hypot(state.vx,state.vy);

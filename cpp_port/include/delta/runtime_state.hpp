@@ -11,6 +11,7 @@
 
 #include "delta/config.hpp"
 #include "delta/core.hpp"
+#include "delta/calibrated_control.hpp"
 
 namespace delta {
 
@@ -117,6 +118,8 @@ private:
 };
 
 struct DisplayRateServoState {
+    // velocity/acceleration are command counts per second(/second). Legacy
+    // controller paths historically assume pixel displacement equals counts.
     bool valid = false;
     float target_x = 0.0F;
     float target_y = 0.0F;
@@ -187,6 +190,7 @@ struct SharedState {
     std::atomic<float> ctrl_sent_vy_ema{0.0F};
     std::atomic<float> cmd_send_latency_ema_s{0.0F};
     SteadyClock::time_point ctrl_last_send_tick{};
+    DeliveredMotionHistory delivered_motion;
     double display_refresh_hz = 0.0;
     DisplayRateServoState display_rate_servo{};
     std::string tracking_strategy = "raw_delta";

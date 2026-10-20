@@ -37,10 +37,15 @@ struct MotionSelection {
 };
 
 // Only unique accepted observations advance confirmation or refresh the deadline.
+// Camera displacement is calibrated delivered motion between the previous
+// accepted source frame and this source frame. Detections remain screen-local;
+// the optional compensation keeps camera catch-up out of target velocity.
 MotionSelection noteMotionSelection(DetectionDampeningState& state,
     const RuntimeConfig& config, const std::optional<Detection>& proposed,
     const std::vector<Detection>& candidates, SteadyClock::time_point observed,
-    SteadyClock::time_point now,std::optional<CaptureRegion> observed_crop=std::nullopt);
+    SteadyClock::time_point now,std::optional<CaptureRegion> observed_crop=std::nullopt,
+    std::pair<float,float> camera_displacement={},
+    std::pair<float,float> camera_displacement_now={});
 
 struct DetectionDampeningResult {
     bool ready = true;

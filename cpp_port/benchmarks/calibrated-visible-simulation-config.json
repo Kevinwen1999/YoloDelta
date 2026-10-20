@@ -1,0 +1,15 @@
+{
+  "motion_stability_enable": true,
+  "motion_identity_enable": true,
+  "motion_max_speed_px_s": 12000.0,
+  "motion_residual_scale": 0.5,
+  "motion_match_margin": 0.75,
+  "motion_prediction_timeout_ms": 60.0,
+  "motion_prediction_max_displacement_px": 30.0,
+  "calibrated_control_enable": true,
+  "calibrated_pixels_per_count_x": 0.39988144,
+  "calibrated_pixels_per_count_y": 0.22493331,
+  "calibrated_response_time_s": 0.04,
+  "calibrated_response_delay_ms": 9.0,
+  "predictive_pid_velocity_alpha": 0.5
+}

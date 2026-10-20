@@ -21,6 +21,7 @@ inline void noteCommandDeliveryLocked(SharedState& shared,const CommandDelivery&
     if(!delivery.movement_sent || (delivery.dx==0 && delivery.dy==0)) {
         decayDispatchFeedbackLocked(shared);return;
     }
+    shared.delivered_motion.note(delivery.completed_at, delivery.dx, delivery.dy);
     const auto update=[](float previous,float sample,float alpha){return previous+(sample-previous)*alpha;};
     if(delivery.command.cmd_generated!=SteadyClock::time_point{} && !delivery.command.synthetic_servo) {
         const float latency=std::max(0.0F,std::chrono::duration<float>(delivery.completed_at-delivery.command.cmd_generated).count());
@@ -100,7 +101,16 @@ public:
         std::optional<CommandPacket> incoming,const DisplayRateServoState& servo,
         const RuntimeConfig& runtime,double send_hz,bool target_allowed,bool engaged) {
         AimScheduleResult result;
-        const bool sigma=runtime.tracking_strategy==TrackingStrategy::PredictivePid
+        const bool calibrated=calibratedControlActive(runtime);
+        const std::array<float,7> calibration{runtime.calibrated_pixels_per_count_x,
+            runtime.calibrated_pixels_per_count_y,runtime.calibrated_response_time_s,
+            runtime.calibrated_response_delay_ms,runtime.sendinput_gain_x,runtime.sendinput_gain_y,
+            static_cast<float>(runtime.mouse_output_method)};
+        if (calibrated!=last_calibrated_ || (calibrated && calibration!=last_calibration_)) {
+            reset();calibration_changed_at_=now;
+        }
+        last_calibrated_=calibrated;last_calibration_=calibration;
+        const bool sigma=!calibrated && runtime.tracking_strategy==TrackingStrategy::PredictivePid
             && runtime.pid_enable && runtime.predictive_pid_human_motion_enable;
         const bool enabled=runtime.display_rate_servo_enable && !sigma;
         if (!enabled || !target_allowed) reset();
@@ -115,6 +125,9 @@ public:
             next_tick_=nextDispatchDeadline(next_tick_,now,interval);
         }
         const auto is_aim=[](const CommandPacket& cmd){return cmd.target_detected && !cmd.synthetic_recoil;};
+        // In rate mode every tick integrates the same controller rate, including
+        // ticks with a new frame. Do not add a frame correction to servo motion.
+        if (calibrated && incoming && is_aim(*incoming)) incoming.reset();
         if (incoming && is_aim(*incoming) && !target_allowed) incoming.reset();
         if (enabled && target_allowed && incoming && is_aim(*incoming)) {
             pending_=*incoming;
@@ -133,7 +146,8 @@ public:
                 ? std::numeric_limits<double>::infinity()
                 : std::chrono::duration<double>(now-servo.updated_at).count();
             const double max_age=std::max(0.0,runtime.display_rate_servo_max_target_age_ms)/1000.0;
-            if (servo.valid && engaged && result.budget_due && age<=max_age && age<=0.10) {
+            if (servo.valid && servo.updated_at>=calibration_changed_at_
+                && engaged && result.budget_due && age<=max_age && age<=0.10) {
                 const double dt=std::min(interval_s,0.05);
                 const double move_x=servo.velocity_x*dt+0.5*servo.acceleration_x*dt*dt+carry_x_;
                 const double move_y=servo.velocity_y*dt+0.5*servo.acceleration_y*dt*dt+carry_y_;
@@ -160,9 +174,11 @@ public:
         // applies only to explicit prediction deadlines; ordinary selection and
         // observation-age policy remain unchanged. Receivers can still be late,
         // so simulated application continues to audit the actual deadline.
+        const auto delivery_budget=calibrated ? std::max(interval,
+            now-calibratedHistoryTime(runtime,now)) : interval;
         if(result.command && is_aim(*result.command)
             && result.command->expires_at!=SteadyClock::time_point{}
-            && now+interval>result.command->expires_at) {
+            && now+delivery_budget>result.command->expires_at) {
             result.rejected_prediction=result.command;result.command.reset();
             result.fresh=false;result.servo=false;carry_x_=carry_y_=0;
         }
@@ -172,5 +188,8 @@ private:
     std::optional<CommandPacket> pending_;
     SteadyClock::time_point next_tick_{};
     double carry_x_=0.0,carry_y_=0.0;
+    bool last_calibrated_=false;
+    std::array<float,7> last_calibration_{};
+    SteadyClock::time_point calibration_changed_at_{};
 };
 }

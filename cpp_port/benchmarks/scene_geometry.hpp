@@ -7,6 +7,16 @@
 
 namespace delta::bench {
 using SceneBox = std::array<double,4>;
+// A target behind the perspective camera must not wrap back into view through
+// tan(angle). Clamp offscreen coordinates before raster integer conversion.
+inline double projectAngularTargetX(double angle,double focal_length,int viewport_width) {
+    if(std::cos(angle)<=0)return -4.0*viewport_width;
+    return std::clamp(viewport_width*.5+focal_length*std::tan(angle),
+        -4.0*viewport_width,5.0*viewport_width);
+}
+inline double constantAngularTargetAngle(double time_ms,double center_speed_px_s,double focal_length) {
+    return std::atan(-130.0/focal_length)+time_ms*center_speed_px_s/(1000.0*focal_length);
+}
 struct SceneIdentityRegions {int id;SceneBox body,head;};
 inline int attributeSceneDetection(double x,double y,int cls,const std::vector<SceneIdentityRegions>& truth) {
     if(cls!=0 && cls!=1)return 0;

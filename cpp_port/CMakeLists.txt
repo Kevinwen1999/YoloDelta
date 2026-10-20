@@ -17,6 +17,7 @@ add_library(delta_runtime STATIC
     src/app.cpp
     src/capture.cpp
     src/capture_focus.cpp
+    src/calibrated_control.cpp
     src/control.cpp
     src/debug_overlay.cpp
     src/debug_preview.cpp
@@ -157,6 +158,17 @@ target_include_directories(delta_benchmark_support PUBLIC benchmarks PRIVATE "${
 target_compile_definitions(delta_benchmark_support PRIVATE DELTA_BENCH_CONFIGURATION="$<CONFIG>")
 add_executable(delta_benchmark benchmarks/main.cpp)
 target_link_libraries(delta_benchmark PRIVATE delta_benchmark_support)
+add_executable(delta_control_response benchmarks/control_response_main.cpp benchmarks/control_response.cpp)
+target_link_libraries(delta_control_response PRIVATE delta_benchmark_support)
+add_executable(delta_control_response_tests tests/test_control_response.cpp benchmarks/control_response.cpp)
+target_link_libraries(delta_control_response_tests PRIVATE delta_benchmark_support)
+add_test(NAME delta_control_response_tests COMMAND delta_control_response_tests)
+if(WIN32)
+    add_executable(delta_control_frontend_tests tests/test_control_frontend.cpp)
+    target_link_libraries(delta_control_frontend_tests PRIVATE delta_runtime)
+    add_test(NAME delta_control_frontend_tests COMMAND delta_control_frontend_tests)
+    set_tests_properties(delta_control_frontend_tests PROPERTIES TIMEOUT 10)
+endif()
 if(DELTA_ENABLE_CUDA_PIPELINE)
     add_executable(delta_gpu_benchmark benchmarks/gpu_benchmark.cpp)
     target_link_libraries(delta_gpu_benchmark PRIVATE delta_benchmark_support CUDA::cudart windowscodecs ole32)
@@ -176,6 +188,7 @@ set_tests_properties(delta_benchmark_reject_unknown_option PROPERTIES WILL_FAIL 
 # Keep checked STL algorithms in a standalone executable: its runtime/debug
 # settings do not cross the production library's ABI boundary.
 add_executable(delta_dispatch_tests tests/test_dispatch.cpp)
+target_sources(delta_dispatch_tests PRIVATE src/calibrated_control.cpp)
 target_include_directories(delta_dispatch_tests PRIVATE include)
 if(MSVC)
     target_compile_definitions(delta_dispatch_tests PRIVATE _DEBUG _ITERATOR_DEBUG_LEVEL=2)

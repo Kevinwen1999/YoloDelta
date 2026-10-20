@@ -134,7 +134,7 @@ inline int aimModeTargetClass(const AimMode mode) {
 }
 
 struct StaticConfig {
-    std::string model_path = R"(C:\YOLO\Delta\runs\detect\train4\weights\best.onnx)";
+    std::string model_path = R"(C:\YOLO\Delta\runs\detect\train6\weights\best.onnx)";
     std::string onnxruntime_root;
     std::string cuda_root;
     std::string tensorrt_root;
@@ -256,6 +256,12 @@ struct RuntimeConfig {
     float legacy_pid_error_delta_px = 10.0F;
     float legacy_pid_prelock_scale = 0.2F;
     float predictive_pid_kp = 0.65F;
+    // Experimental response-calibrated rate control, selected within Predictive PID.
+    bool calibrated_control_enable = true;
+    float calibrated_pixels_per_count_x = 1.0F;
+    float calibrated_pixels_per_count_y = 1.0F;
+    float calibrated_response_time_s = 0.080F;
+    float calibrated_response_delay_ms = 0.0F;
     float predictive_pid_ki = 0.0F;
     float predictive_pid_kd = 0.01F;
     float predictive_pid_pred_weight_x = 0.6F;
@@ -339,6 +345,8 @@ struct RuntimeConfig {
     float ego_motion_error_gate_norm_threshold = 2.0F;
     bool ego_motion_reset_on_switch = true;
     RecoilMode recoil_mode = RecoilMode::Legacy;
+    // A configured amount or selected mode alone must not enable direct recoil.
+    bool legacy_recoil_output_enable = false;
     std::string selected_recoil_profile_id;
     bool recoil_virtual_aim_offset_enable = false;
     bool recoil_fallback_with_target_enable = false;

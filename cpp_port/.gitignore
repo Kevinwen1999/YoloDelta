@@ -21,4 +21,7 @@
 !/tests/check_visible_capture.ps1
 !/tests/check_scene_response.ps1
 !/tests/check_observation_replay.ps1
+!/tests/test_control_response.cpp
+!/tests/test_control_frontend.cpp
+!/tests/check_visible_startup.ps1
 /__pycache__/

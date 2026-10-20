@@ -7,6 +7,7 @@
 #include "delta/predictive_pid.hpp"
 #include "delta/sigma_drift.hpp"
 #include "delta/recoil_aim_offset.hpp"
+#include "delta/recoil_output.hpp"
 #include "delta/target_association.hpp"
 #include "delta/target_guard.hpp"
 #include "delta/target_lead.hpp"
@@ -417,6 +418,15 @@ bool pidRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rh
         || lhs.legacy_pid_error_delta_px != rhs.legacy_pid_error_delta_px
         || lhs.legacy_pid_prelock_scale != rhs.legacy_pid_prelock_scale
         || lhs.predictive_pid_kp != rhs.predictive_pid_kp
+        || lhs.calibrated_control_enable != rhs.calibrated_control_enable
+        || lhs.calibrated_pixels_per_count_x != rhs.calibrated_pixels_per_count_x
+        || lhs.calibrated_pixels_per_count_y != rhs.calibrated_pixels_per_count_y
+        || lhs.calibrated_response_time_s != rhs.calibrated_response_time_s
+        || lhs.calibrated_response_delay_ms != rhs.calibrated_response_delay_ms
+        || lhs.display_rate_servo_enable != rhs.display_rate_servo_enable
+        || lhs.mouse_output_method != rhs.mouse_output_method
+        || lhs.sendinput_gain_x != rhs.sendinput_gain_x
+        || lhs.sendinput_gain_y != rhs.sendinput_gain_y
         || lhs.predictive_pid_ki != rhs.predictive_pid_ki
         || lhs.predictive_pid_kd != rhs.predictive_pid_kd
         || lhs.predictive_pid_pred_weight_x != rhs.predictive_pid_pred_weight_x
@@ -471,6 +481,13 @@ bool sameThirdPersonCaptureOffset(const ThirdPersonCaptureOffset& lhs, const Thi
 
 bool detectionDampeningRuntimeSettingsChanged(const RuntimeConfig& lhs, const RuntimeConfig& rhs) {
     return lhs.detection_dampening_enable != rhs.detection_dampening_enable
+        || calibratedControlActive(lhs)!=calibratedControlActive(rhs)
+        || ((calibratedControlActive(lhs)||calibratedControlActive(rhs))
+            && (lhs.calibrated_pixels_per_count_x!=rhs.calibrated_pixels_per_count_x
+                || lhs.calibrated_pixels_per_count_y!=rhs.calibrated_pixels_per_count_y
+                || lhs.calibrated_response_delay_ms!=rhs.calibrated_response_delay_ms
+                || lhs.mouse_output_method!=rhs.mouse_output_method
+                || lhs.sendinput_gain_x!=rhs.sendinput_gain_x || lhs.sendinput_gain_y!=rhs.sendinput_gain_y))
         || lhs.detection_dampening_stable_frames != rhs.detection_dampening_stable_frames
         || lhs.motion_stability_enable != rhs.motion_stability_enable
         || lhs.motion_identity_enable != rhs.motion_identity_enable
@@ -1389,6 +1406,7 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
         LegacyPidAxisState legacy_pid_x{};
         LegacyPidAxisState legacy_pid_y{};
         PredictivePidController predictive_pid{};
+        CalibratedController calibrated_controller{};
         SigmaDriftShaper sigma_drift{};
         RecoilAimOffsetIntegrator recoil_aim_offset{};
 
@@ -1461,6 +1479,7 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             legacy_pid_x.reset();
             legacy_pid_y.reset();
             predictive_pid.reset();
+            calibrated_controller.reset();
             sigma_drift.reset();
             recoil_aim_offset.reset();
             pid_settle_state.reset();
@@ -2149,8 +2168,24 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             const bool motion_stability = runtime.motion_stability_enable && runtime.detection_dampening_enable;
             MotionSelection motion_selection;
             if (motion_stability && !debug_overlay_observe_active) {
+                std::pair<float,float> camera_displacement{};
+                std::pair<float,float> camera_displacement_now{};
+                const auto motion_now=steadyNow();
+                if (calibratedControlActive(runtime) && detection_dampening_state.accepted_detection) {
+                    std::lock_guard<std::mutex> lock(shared_.mutex);
+                    const auto history_start=calibratedHistoryTime(runtime,detection_dampening_state.last_observation);
+                    if (const auto delivered=shared_.delivered_motion.between(history_start,calibratedHistoryTime(runtime,frame_time))) {
+                        camera_displacement={float((*delivered)[0]*runtime.calibrated_pixels_per_count_x),
+                            float((*delivered)[1]*runtime.calibrated_pixels_per_count_y)};
+                    }
+                    if (const auto delivered=shared_.delivered_motion.between(history_start,motion_now)) {
+                        camera_displacement_now={float((*delivered)[0]*runtime.calibrated_pixels_per_count_x),
+                            float((*delivered)[1]*runtime.calibrated_pixels_per_count_y)};
+                    }
+                }
                 motion_selection = noteMotionSelection(detection_dampening_state, runtime,
-                    sticky ? sticky->detection : std::nullopt, aim_pool.candidates, frame_time, steadyNow(),capture_region);
+                    sticky ? sticky->detection : std::nullopt, aim_pool.candidates, frame_time, motion_now,capture_region,
+                    camera_displacement,camera_displacement_now);
                 if (replay) {
                     replay_result.motion_ambiguous=motion_selection.ambiguous;
                     replay_result.motion_decision=motion_selection.decision;
@@ -2238,7 +2273,8 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             const bool target_output_allowed = detection_dampening_result.ready;
             // Selection ran even if dampening returns before tracker/control.
             app_timings.select_s = secondsSince(select_start, SteadyClock::now());
-            if (!debug_overlay_observe_active && !target_output_allowed && !motion_stability) {
+            if (!debug_overlay_observe_active && !target_output_allowed && !motion_stability
+                && !calibratedControlActive(runtime)) {
                 resetPidControllers();
                 tracker->reset();
                 last_kalman_snap_count = 0;
@@ -2420,6 +2456,12 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
                     kalman_snap_delta = diagnostics.snap_count;
                 }
                 last_kalman_snap_count = diagnostics.snap_count;
+                if (calibratedControlActive(runtime) && active_target_cls!=-1
+                    && active_target_cls!=sticky->detection->cls) {
+                    // A different aim point on the same person changes the
+                    // coordinate anchor; it is not a burst of target velocity.
+                    calibrated_controller.reanchorAimPoint();
+                }
                 active_target_cls = sticky->detection->cls;
                 last_measurement_tick = lead_sample_time;
                 lost_frames = 0;
@@ -2572,11 +2614,13 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             std::optional<TargetLeadPrediction> target_lead_prediction;
             const bool target_lead_locked = target_lead_config.enable && target_lead_state.active.active;
             const bool use_predictive_pid = runtime.tracking_strategy == TrackingStrategy::PredictivePid;
+            const bool use_calibrated_control = calibratedControlActive(runtime);
+            bool calibrated_output_valid = false;
             const bool use_modern_pid = !use_legacy_pid && !use_predictive_pid;
             if (use_modern_pid) {
                 ff_scale = tracker->feedforwardScale();
             }
-            if (target_lead_locked) {
+            if (target_lead_locked && !use_calibrated_control) {
                 float extra_velocity_x = 0.0F;
                 float extra_velocity_y = 0.0F;
                 if (use_modern_pid) {
@@ -2754,7 +2798,28 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             last_pid_tick = now_tick;
             int dx = 0;
             int dy = 0;
-            if (use_legacy_pid) {
+            if (use_calibrated_control) {
+                std::optional<std::pair<float, float>> accepted_error;
+                if (selected_detection) accepted_error = std::make_pair(
+                    sticky->detection->x - center.first, sticky->detection->y - center.second);
+                CalibratedControlResult response;
+                {
+                    std::lock_guard<std::mutex> lock(shared_.mutex);
+                    response = calibrated_controller.update(runtime, accepted_error, frame_time,
+                        now_tick, shared_.delivered_motion);
+                }
+                calibrated_output_valid = response.valid;
+                servo_velocity_x = response.counts_per_second_x;
+                servo_velocity_y = response.counts_per_second_y;
+                servo_acceleration_x = servo_acceleration_y = 0;
+                // Rate-mode movement is integrated only by AimCommandScheduler.
+                desired_x = desired_y = 0;
+                predicted_x = center.first + response.error_x;
+                aim_y = center.second + response.error_y;
+                speed = std::hypot(response.velocity_x, response.velocity_y);
+                pid_error_metric_px = std::max(std::abs(response.error_x), std::abs(response.error_y));
+                pid_settled = response.valid;
+            } else if (use_legacy_pid) {
                 const LegacyPidConfig legacy_pid_config = buildLegacyPidConfig(runtime);
                 const LegacyPidAxisResult legacy_x = updateLegacyPidAxis(
                     legacy_pid_x,
@@ -2866,6 +2931,7 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             }
 
             if (runtime.kalman_prediction_enable
+                && !use_calibrated_control
                 && tracker_diagnostics.kalman_active
                 && !target_lead_prediction.has_value()) {
                 if (tracker_diagnostics.measurement_updates >= kKalmanServoWarmupMeasurements) {
@@ -2891,7 +2957,7 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             dy = engage_active
                 ? static_cast<int>(std::lround(clamp(desired_y, -static_cast<float>(runtime.raw_max_step_y), static_cast<float>(runtime.raw_max_step_y))))
                 : 0;
-            if (use_predictive_pid && runtime.pid_enable) {
+            if (use_predictive_pid && runtime.pid_enable && !use_calibrated_control) {
                 predictive_pid.commitOutput(static_cast<float>(dx), static_cast<float>(dy));
                 if (runtime.predictive_pid_human_motion_enable) {
                     sigma_drift.commitOutput(static_cast<float>(dx), static_cast<float>(dy));
@@ -2908,6 +2974,11 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             const int selected_cls = active_target_cls != -1 ? active_target_cls : default_target_cls;
             const auto now_system = systemNow();
 
+            const auto prediction_deadline = use_calibrated_control
+                ? last_measurement_tick + std::chrono::duration_cast<SteadyClock::duration>(
+                    std::chrono::duration<double>(calibratedPredictionTimeoutSeconds(runtime)))
+                : motion_stability ? last_measurement_tick + std::chrono::duration_cast<SteadyClock::duration>(
+                    std::chrono::duration<double,std::milli>(runtime.motion_prediction_timeout_ms)) : SteadyClock::time_point{};
             {
                 std::lock_guard<std::mutex> lock(shared_.mutex);
                 shared_.target_found = true;
@@ -2949,7 +3020,8 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
                 shared_.target_time = now_system;
                 shared_.display_rate_servo = DisplayRateServoState{
                     .valid = target_output_allowed
-                        && !(use_predictive_pid
+                        && (!use_calibrated_control || calibrated_output_valid)
+                        && !(!use_calibrated_control && use_predictive_pid
                             && runtime.pid_enable
                             && runtime.predictive_pid_human_motion_enable),
                     .target_x = predicted_x,
@@ -2967,8 +3039,7 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
                     .capture_time = gpu_packet.has_value() ? gpu_packet->capture_time : cpu_packet->capture_time,
                     .source_id = source_id,
                     .observation_time = last_measurement_tick,
-                    .expires_at = motion_stability ? last_measurement_tick + std::chrono::duration_cast<SteadyClock::duration>(
-                        std::chrono::duration<double,std::milli>(runtime.motion_prediction_timeout_ms)) : SteadyClock::time_point{},
+                    .expires_at = prediction_deadline,
                 };
                 shared_.tracking_strategy = trackingStrategyName(runtime.tracking_strategy);
             }
@@ -3007,7 +3078,10 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
             }
 
             const auto queue_start = SteadyClock::now();
-            if (!target_output_allowed) { resetPidControllers(); command_slot_.clear(); }
+            if (!target_output_allowed) {
+                if (!use_calibrated_control) resetPidControllers();
+                command_slot_.clear();
+            }
             if (target_output_allowed && (engage_active || trigger_fire)) {
                 command_slot_.put(CommandPacket{
                     .dx = dx,
@@ -3024,8 +3098,7 @@ void DeltaApp::inferenceLoop(ITrackingReplay* replay) {
                     .trigger_fire = trigger_fire,
                     .source_id = source_id,
                     .observation_time = last_measurement_tick,
-                    .expires_at = motion_stability ? last_measurement_tick + std::chrono::duration_cast<SteadyClock::duration>(
-                        std::chrono::duration<double,std::milli>(runtime.motion_prediction_timeout_ms)) : SteadyClock::time_point{},
+                    .expires_at = prediction_deadline,
                 });
                 app_timings.queue_s = secondsSince(queue_start, SteadyClock::now());
             }
@@ -3119,10 +3192,9 @@ void DeltaApp::controlLoop() {
     SteadyClock::time_point last_recoil_toggle{};
     SteadyClock::time_point last_triggerbot_toggle{};
     SystemClock::time_point last_trigger_click{};
-    SteadyClock::time_point last_recoil_integrate_tick{};
     SteadyClock::time_point last_target_send_tick{};
     AimCommandScheduler aim_scheduler;
-    double recoil_carry_y = 0.0;
+    LegacyRecoilOutput legacy_recoil_output;
     const double primary_refresh_hz = detectPrimaryDisplayRefreshHz();
     MouseSenderConfig last_sender_config{};
     bool sender_config_initialized = false;
@@ -3344,7 +3416,7 @@ void DeltaApp::controlLoop() {
         const bool target_engage_active = (toggles.mode != 0)
             && isLeftHoldEngageSatisfied(toggles.left_hold_engage,runtime.left_hold_engage_button,
                 toggles.left_pressed,toggles.right_pressed,toggles.x1_pressed);
-        const bool sigma_drift_active = runtime.tracking_strategy == TrackingStrategy::PredictivePid
+        const bool sigma_drift_active = !calibratedControlActive(runtime) && runtime.tracking_strategy == TrackingStrategy::PredictivePid
             && runtime.pid_enable && runtime.predictive_pid_human_motion_enable;
         const bool target_scheduler_active = runtime.display_rate_servo_enable && !sigma_drift_active
             && target_command_allowed && target_engage_active;
@@ -3375,10 +3447,7 @@ void DeltaApp::controlLoop() {
                     std::nullopt,std::nullopt);
             }
         }
-        const double recoil_rate_y_px_s = std::abs(runtime.recoil_compensation_y_rate_px_s) > 1e-6F
-            ? static_cast<double>(runtime.recoil_compensation_y_rate_px_s)
-            : (static_cast<double>(runtime.recoil_compensation_y_px) * kLegacyRecoilReferenceHz);
-        const bool legacy_recoil_enabled = runtime.recoil_mode == RecoilMode::Legacy && std::abs(recoil_rate_y_px_s) > 1e-6;
+        const bool legacy_recoil_enabled = legacyRecoilEnabled(runtime);
         const bool recoil_trigger_pressed = toggles.left_pressed || toggles.x1_pressed;
         if (!cmd.has_value()) {
             if (advanced_recoil_pending) {
@@ -3514,30 +3583,9 @@ void DeltaApp::controlLoop() {
             && (last_trigger_click == SystemClock::time_point{}
                 || secondsSince(last_trigger_click, system_now) >= triggerbot_config.click_cooldown_s);
 
-        const bool recoil_active = !virtual_recoil_target_active
-            && legacy_recoil_enabled
-            && cmd->target_detected
-            && (recoil_trigger_pressed || trigger_will_click);
-        if (recoil_active) {
-            const auto recoil_tick = SteadyClock::now();
-            if (last_recoil_integrate_tick != SteadyClock::time_point{}) {
-                const double recoil_dt = clamp(
-                    secondsSince(last_recoil_integrate_tick, recoil_tick),
-                    0.0,
-                    kMaxRecoilIntegrateDtSeconds);
-                recoil_carry_y += recoil_rate_y_px_s * recoil_dt;
-            }
-            last_recoil_integrate_tick = recoil_tick;
-            const int recoil_step = static_cast<int>(recoil_carry_y);
-            recoil_carry_y -= static_cast<double>(recoil_step);
-            dy = clamp(
-                dy + recoil_step,
-                -runtime.raw_max_step_y,
-                runtime.raw_max_step_y);
-        } else {
-            recoil_carry_y = 0.0;
-            last_recoil_integrate_tick = {};
-        }
+        const int recoil_step = legacy_recoil_output.step(runtime, virtual_recoil_target_active,
+            cmd->target_detected, recoil_trigger_pressed, trigger_will_click, SteadyClock::now());
+        dy = clamp(dy + recoil_step, -runtime.raw_max_step_y, runtime.raw_max_step_y);
         const int base_dx_before_advanced = dx;
         const int base_dy_before_advanced = dy;
         if (advanced_recoil_pending) {

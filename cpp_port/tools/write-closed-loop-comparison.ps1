@@ -8,7 +8,9 @@ $runs = foreach ($row in $rows) {
     $run = Get-Content -LiteralPath (Join-Path $SuiteRoot "$directory/closed-loop.json") -Raw | ConvertFrom-Json
     if ($run.schema_version -lt 2 -or !$run.validity.valid) { throw "Comparison requires valid schema 2 results: $directory" }
     if ($run.correctness -and !$run.correctness.passed) { throw "Comparison contains correctness violations: $directory" }
-    $signature = ConvertTo-Json -InputObject @($run.scope,$run.capture_hardware,$run.fingerprints,$run.scene,$run.gpu.name,$run.gpu.ordinal,$run.build.source_hash) -Depth 12 -Compress
+    # Setup duration is measured evidence, not a different hardware layout.
+    $hardware = $run.capture_hardware | Select-Object * -ExcludeProperty capture_warmup_ms
+    $signature = ConvertTo-Json -InputObject @($run.scope,$hardware,$run.fingerprints,$run.scene,$run.gpu.name,$run.gpu.ordinal,$run.build.source_hash) -Depth 12 -Compress
     if ($references.ContainsKey($row.Case) -and $references[$row.Case] -ne $signature) {
         throw "Paired runs differ in scene, assets, model, hardware or source: $($row.Case)"
     }
